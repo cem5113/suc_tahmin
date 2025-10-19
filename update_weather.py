@@ -8,9 +8,9 @@ from meteostat import Daily, Point
 from github import Github
 
 # === GITHUB AYARLARI ===
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
 REPO_NAME    = "cem5113/crime_prediction_data"
-TARGET_PATH  = "main/sf_weather_5years.csv"  # Not: kök dizine yazmak istiyorsan "sf_weather_5years.csv" yap
+TARGET_PATH = f"{os.getenv('CRIME_DATA_DIR', 'crime_prediction_data').rstrip('/')}/sf_weather_5years.csv"
 
 # === METEOSTAT / ÇIKTI AYARLARI ===
 OUT_CSV             = "sf_weather_5years.csv"
