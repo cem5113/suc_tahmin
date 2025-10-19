@@ -461,6 +461,9 @@ jobs:
 
       - name: 09) Hava durumu → sf_crime_08.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}        # <<— script bunu okuyor
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}# (aşağıdaki normalize aşamasıyla uyumlu)
         run: |
           set -e
           if [ -f update_weather.py ]; then
@@ -472,40 +475,6 @@ jobs:
           fi
           echo "sf_crime_08.csv — ilk 5 satır:"
           head -n 5 "${CRIME_DATA_DIR}/sf_crime_08.csv" || head -n 5 sf_crime_08.csv || true
-
-      # 09.9) sf_crime_08.csv dosyasını CRIME_DATA_DIR altına yerleştir
-      - name: Normalize sf_crime_08 into CRIME_DATA_DIR
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          DEST="${CRIME_DATA_DIR}/sf_crime_08.csv"
-          mkdir -p "${CRIME_DATA_DIR}"
-          FOUND=""
-
-          for p in \
-            "crime_prediction_data/sf_crime_08.csv" \
-            "crime_data/sf_crime_08.csv" \
-            "sf_crime_08.csv" \
-            "outputs/sf_crime_08.csv"
-          do
-            if [ -f "$p" ]; then
-              if [ -e "$DEST" ] && [ "$p" -ef "$DEST" ]; then
-                echo "ℹ️ Zaten hedefte: $DEST"
-              else
-                cp -f "$p" "$DEST"
-                echo "✅ Copied: $p → $DEST"
-              fi
-              FOUND="yes"
-              break
-            fi
-          done
-
-          if [ -z "$FOUND" ]; then
-            echo "❌ sf_crime_08.csv not found in known locations"
-            exit 2
-          fi
-          echo "---- sf_crime_08.csv (head) ----"
-          head -n 5 "$DEST" || true
 
       - name: Normalize grid outputs (put under CRIME_DATA_DIR)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
