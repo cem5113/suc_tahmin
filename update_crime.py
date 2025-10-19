@@ -78,6 +78,37 @@ ARTIFACT_NAME = os.getenv("ARTIFACT_NAME", "sf-crime-pipeline-output")
 # --------------------------
 # Helpers
 # --------------------------
+def ensure_datetime_local(df: pd.DataFrame, tz=SF_TZ) -> pd.DataFrame:
+    """
+    df içinde 'datetime' sütununu güvenle üretir ve SF yereline çevirir.
+    - Varsa: parse eder (UTC varsayımıyla), tz-aware yapar ve tz_convert(SF_TZ) uygular.
+    - Yoksa: 'date' + 'time' birleşiminden üretir (time yoksa 00:00:00).
+    Ayrıca 'date', 'time', 'event_hour' alanlarını 'datetime'dan türetir.
+    """
+    # 1) datetime kaynağını topla
+    if "datetime" in df.columns:
+        s = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
+    else:
+        date_s = pd.to_datetime(df.get("date"), errors="coerce")
+        time_s = df.get("time")
+        if time_s is None:
+            combo = date_s.dt.strftime("%Y-%m-%d") + " 00:00:00"
+        else:
+            combo = date_s.dt.strftime("%Y-%m-%d") + " " + time_s.astype(str)
+        s = pd.to_datetime(combo, errors="coerce", utc=True)
+
+    # 2) tz-aware ve SF’ye çevir
+    if s.dt.tz is None:
+        s = s.dt.tz_localize("UTC")
+    s_local = s.dt.tz_convert(tz)
+
+    # 3) Standart alanlar
+    df["datetime"]   = s_local
+    df["date"]       = df["datetime"].dt.date
+    df["time"]       = df["datetime"].dt.strftime("%H:%M:%S")
+    df["event_hour"] = df["datetime"].dt.hour
+    return df
+
 def _to_date_series(x):
     try:
         s = pd.to_datetime(x, utc=True, errors="coerce").dt.tz_convert(SF_TZ).dt.date
@@ -475,6 +506,8 @@ if raw_new is not None and not raw_new.empty:
     else:
         df_new["GEOID"] = df_new.get("GEOID", np.nan)
         df_new["GEOID"] = df_new["GEOID"].astype(str).str.extract(r"(\d+)")[0].str[:DEFAULT_GEOID_LEN]
+    # df_new’ı standart hale getir (tz-aware + türev alanlar)
+    df_new = ensure_datetime_local(df_new, tz=SF_TZ)
 else:
     df_new = pd.DataFrame()
 
@@ -484,42 +517,50 @@ log_date_range(df_new, "date", "Suç (yeni)")
 # --------------------------
 # Birleştir & zamanda özellikler
 # --------------------------
+# --------------------------
+# Birleştir & zamanda özellikler
+# --------------------------
+# df_old ve df_new’u önce normalize et → datetime kesin olsun
 if "time" not in df_old.columns:
     df_old["time"] = "00:00:00"
-_before_merge = df_old.shape
-if "date" in df_old.columns:
-    df_old["date"] = pd.to_datetime(df_old["date"], errors="coerce").dt.date
+df_old = ensure_datetime_local(df_old, tz=SF_TZ)
 
+if not df_new.empty:
+    if "time" not in df_new.columns:
+        df_new["time"] = "00:00:00"
+    df_new = ensure_datetime_local(df_new, tz=SF_TZ)
+
+_before_merge = df_old.shape
+
+# Birleştir
 if FORCE_FULL and (raw_new is not None) and (not raw_new.empty):
     df_all = df_new.copy()
 else:
     df_all = pd.concat([df_old, df_new], ignore_index=True)
 
-# normalize
+# normalize kimlikler
 df_all["id"] = df_all["id"].astype(str)
 if "GEOID" in df_all.columns:
-    df_all["GEOID"] = df_all["GEOID"].astype(str).str.extract(r"(\d+)")[0].str[:DEFAULT_GEOID_LEN]
+    df_all["GEOID"] = (
+        df_all["GEOID"].astype(str).str.extract(r"(\d+)")[0].str[:DEFAULT_GEOID_LEN]
+    )
 
-# 5y pencere + datetime
+# 5y pencere
 start_date_5y = today - timedelta(days=5*365)
-df_all = df_all[df_all["date"] >= start_date_5y]
+# ensure_datetime_local zaten df_all["date"]’i datetime’dan türetmişti (tip: date)
+# filtreyi yeniden güvenle uygula:
+df_all = df_all[pd.to_datetime(df_all["date"], errors="coerce").dt.date >= start_date_5y]
 
-df_all["date"] = pd.to_datetime(df_all["date"], errors="coerce")
-df_all["time"] = df_all["time"].astype(str).fillna("00:00:00")
-df_all["date_local"]   = df_all["datetime"].dt.date                    
-df_all["hour_local"]   = df_all["datetime"].dt.strftime("%H:00")        
+# (Güvenlik için) df_all üzerinde de normalize et → karışık tip kalmasın
+df_all = ensure_datetime_local(df_all, tz=SF_TZ)
+
+# Türev anahtarlar
+df_all["date_local"]   = df_all["datetime"].dt.date
+df_all["hour_local"]   = df_all["datetime"].dt.strftime("%H:00")
 df_all["datehour_key"] = (
     df_all["GEOID"].astype(str).str.zfill(DEFAULT_GEOID_LEN) + "|" +
     df_all["datetime"].dt.strftime("%Y-%m-%d %H:00")
 )
-# TZ sabitle
-try:
-    df_all["datetime"] = df_all["datetime"].dt.tz_localize(SF_TZ)
-except Exception:
-    try:
-        df_all["datetime"] = df_all["datetime"].dt.tz_convert(SF_TZ)
-    except Exception:
-        pass
 
 # türev alanlar
 df_all["event_hour"]  = df_all["datetime"].dt.hour
