@@ -1,4 +1,4 @@
-# update_weather.py
+# update_weather.py (https://meteostat.net/en/)
 
 from datetime import datetime, timedelta, date
 import pandas as pd
