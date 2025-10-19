@@ -1,4 +1,5 @@
-# update_weather.py  — robust & header-safe (Meteostat Daily, PyGithub)
+# update_weather.py — robust & header-safe (Meteostat Daily, PyGithub)
+
 from datetime import datetime, timedelta, date
 import os
 import pandas as pd
@@ -7,15 +8,19 @@ import numpy as np
 from meteostat import Daily, Point
 from github import Github
 
-# === GITHUB AYARLARI ===
+# === ENV / GITHUB AYARLARI ===
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
 REPO_NAME    = "cem5113/crime_prediction_data"
-TARGET_PATH = f"{os.getenv('CRIME_DATA_DIR', 'crime_prediction_data').rstrip('/')}/sf_weather_5years.csv"
+CRIME_DIR    = os.getenv("CRIME_DATA_DIR", "crime_prediction_data").rstrip("/")
+TARGET_PATH  = f"{CRIME_DIR}/sf_weather_5years.csv"   # repo içindeki yol
 
 # === METEOSTAT / ÇIKTI AYARLARI ===
-OUT_CSV             = "sf_weather_5years.csv"
+OUT_CSV             = "sf_weather_5years.csv"         # runner'da local dosya
 HOT_DAY_THRESHOLD_C = 25.0
-LAT, LON            = 37.7749, -122.4194  # San Francisco
+LAT, LON            = 37.7749, -122.4194              # San Francisco
+
+# Opsiyonel: tmin/tmax eksikse tavg etrafında basit doldurma (0/1)
+FILL_TMIN_TMAX_FROM_TAVG = os.getenv("FILL_TMIN_TMAX_FROM_TAVG", "0").lower() in ("1","true","yes","on")
 
 # === 5 yıl penceresi ===
 def five_year_window(today: date):
@@ -35,16 +40,14 @@ def normalize_existing_columns(df: pd.DataFrame) -> pd.DataFrame:
     Varsa farklı isimli kolonları standarda dönüştürür:
     - temp_min/temp_max -> tmin/tmax
     - precipitation_mm/prcp_mm -> prcp
-    Saatlik 'temp' verisi gelmişse günlük min/max üretir.
+    Saatlik 'temp' varsa günlük min/max üretir.
     """
     d = df.copy()
-
-    # Kolon isimlerini lower-case eşlemesi için harita
     lower_map = {c.lower(): c for c in d.columns}
     def has(col): return col in lower_map
     def col(col): return lower_map[col]
 
-    # Tarih sütunu standardizasyonu
+    # Tarih sütunu
     if has('date'):
         d[col('date')] = pd.to_datetime(d[col('date')], errors='coerce').dt.date
     elif has('time'):
@@ -61,16 +64,14 @@ def normalize_existing_columns(df: pd.DataFrame) -> pd.DataFrame:
     if has('taverage') and not has('tavg'): rename_pairs[col('taverage')] = 'tavg'
     d.rename(columns=rename_pairs, inplace=True)
 
-    # Tip dönüşümleri
+    # Tipler
     for c in ['tavg', 'tmin', 'tmax', 'prcp', 'snow', 'wspd', 'pres']:
         if c in d.columns:
             d[c] = pd.to_numeric(d[c], errors='coerce')
 
-    # Eğer saatlik 'temp' varsa günlük min/max üret
-    # (Normalde bu dosya günlük olmalı; ama eldeki veride 'temp' görülürse koruma)
+    # Saatlik 'temp' → günlük min/max
     has_temp_hourly = 'temp' in d.columns
     if has_temp_hourly:
-        # temp ve bir zaman kolonu aranır
         time_col = None
         for cand in ['datetime', 'time', 'Timestamp']:
             if cand in d.columns:
@@ -84,18 +85,16 @@ def normalize_existing_columns(df: pd.DataFrame) -> pd.DataFrame:
                 .groupby('date')['temp'].agg(tmin='min', tmax='max', tavg='mean')
                 .reset_index()
             )
-            # Esas tabloya join
             if 'date' not in d.columns:
                 d['date'] = pd.to_datetime(d[time_col], errors='coerce').dt.date
             d = d.drop_duplicates(subset=['date'])
             d = d.merge(tmp, on='date', how='left')
 
-    # En azından beklenen kolonlar mevcut olsun
+    # Beklenen kolonlar yoksa oluştur
     for c in ['tavg', 'tmin', 'tmax', 'prcp']:
         if c not in d.columns:
             d[c] = np.nan
 
-    # Son olarak tarih zorunlu
     if 'date' not in d.columns:
         d['date'] = pd.NaT
 
@@ -109,11 +108,8 @@ def fetch_daily(lat: float, lon: float, start_d: date, end_d: date) -> pd.DataFr
     df = Daily(pt, start_dt, end_dt).fetch().reset_index()
     df.rename(columns={'time': 'date'}, inplace=True)
     df = normalize_existing_columns(df)
-
-    # Sadece gerekli alanları tut
     keep = ['date', 'tavg', 'tmin', 'tmax', 'prcp']
     df = df[keep]
-    # Tarihi normalize et
     df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.date
     return df
 
@@ -145,45 +141,59 @@ else:
     print("ℹ️ Güncel: indirilecek yeni gün yok.")
     new_df = pd.DataFrame(columns=['date','tavg','tmin','tmax','prcp'])
 
-# === Birleştir + türev sütunlar ===
+# === Birleştir + normalize ===
 all_df = pd.concat([base_df, new_df], ignore_index=True) if len(base_df) else new_df.copy()
 all_df = normalize_existing_columns(all_df)
 all_df['date'] = pd.to_datetime(all_df['date'], errors='coerce').dt.date
 all_df.dropna(subset=['date'], inplace=True)
 
-# Güvenli temp_range
+# Opsiyonel hafif backfill (tavg varsa)
+if FILL_TMIN_TMAX_FROM_TAVG:
+    all_df['tavg'] = pd.to_numeric(all_df['tavg'], errors='coerce')
+    all_df['tmin'] = pd.to_numeric(all_df['tmin'], errors='coerce')
+    all_df['tmax'] = pd.to_numeric(all_df['tmax'], errors='coerce')
+    m = all_df['tmin'].isna() & all_df['tavg'].notna()
+    all_df.loc[m, 'tmin'] = all_df.loc[m, 'tavg'] - 3.0
+    m = all_df['tmax'].isna() & all_df['tavg'].notna()
+    all_df.loc[m, 'tmax'] = all_df.loc[m, 'tavg'] + 3.0
+
+# --- NA-güvenli bayraklar ---
+pr = pd.to_numeric(all_df.get('prcp'), errors='coerce')
+tx = pd.to_numeric(all_df.get('tmax'), errors='coerce')
+
+all_df['is_rainy'] = (pr > 0).astype('Int64')
+all_df.loc[pr.isna(), 'is_rainy'] = pd.NA
+
+all_df['is_hot_day'] = (tx > HOT_DAY_THRESHOLD_C).astype('Int64')
+all_df.loc[tx.isna(), 'is_hot_day'] = pd.NA
+
+# temp_range
 if 'tmax' in all_df.columns and 'tmin' in all_df.columns:
     all_df['temp_range'] = all_df['tmax'] - all_df['tmin']
 else:
     all_df['temp_range'] = np.nan
 
-# Yağış ve sıcak gün bayrakları (prcp yoksa 0 gibi davranmayalım → NaN güvenliği)
-all_df['is_rainy']   = (pd.to_numeric(all_df.get('prcp', np.nan), errors='coerce').fillna(0) > 0).astype('Int64')
-all_df['is_hot_day'] = (pd.to_numeric(all_df.get('tmax', np.nan), errors='coerce') > HOT_DAY_THRESHOLD_C).astype('Int64')
-
+# Kolon sırası
 final_cols = ['date', 'tavg', 'tmin', 'tmax', 'prcp', 'temp_range', 'is_rainy', 'is_hot_day']
 for c in final_cols:
     if c not in all_df.columns:
         all_df[c] = np.nan
 all_df = all_df[final_cols]
 
-# Tekilleştir, sırala
+# Tekilleştir, sırala, pencere kırp
 all_df.drop_duplicates(subset=['date'], keep='last', inplace=True)
 all_df.sort_values('date', inplace=True)
-
-# === 5 yılı aşanı temizle ===
 mask = (all_df['date'] >= win_start) & (all_df['date'] <= win_end)
 all_df = all_df.loc[mask].copy()
 
-# === Kaydet lokal ===
+# === Kaydet (local + CRIME_DIR/sf_crime_08.csv) ===
 all_df.to_csv(OUT_CSV, index=False)
 print(f"💾 Kaydedildi: {OUT_CSV} — {len(all_df)} satır, {all_df['date'].min()} → {all_df['date'].max()}")
 
-crime_dir = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
-os.makedirs(crime_dir, exist_ok=True)
-out_08 = os.path.join(crime_dir, "sf_crime_08.csv")
+os.makedirs(CRIME_DIR, exist_ok=True)
+out_08 = os.path.join(CRIME_DIR, "sf_crime_08.csv")
 all_df.to_csv(out_08, index=False)
-print(f"📦 Ayrıca yazıldı: {out_08}")
+print(f"💾 Kaydedildi: {out_08}")
 
 # === GitHub’a yükle ===
 if not GITHUB_TOKEN:
@@ -192,7 +202,6 @@ if not GITHUB_TOKEN:
 print("🚀 GitHub’a gönderiliyor...")
 g = Github(GITHUB_TOKEN)
 repo = g.get_repo(REPO_NAME)
-
 csv_str = all_df.to_csv(index=False)
 
 try:
