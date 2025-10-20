@@ -506,7 +506,7 @@ jobs:
             echo "⚠️ sf_crime_grid_full_labeled.csv bulunamadı; stacking bazı görünümleri atlayabilir."
           fi
 
-      - name: 10) sf_crime_08 üretimi (common.py)
+      - name: 10) 08 → 09 normalize (common.py)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
@@ -514,28 +514,28 @@ jobs:
           import os
           import pandas as pd
           from pathlib import Path
-          from scripts.common import clean_and_save_crime_08
+          from scripts.common import clean_and_save_crime_09
 
           CRIME_DIR = os.getenv("CRIME_DATA_DIR","crime_prediction_data")
           candidates = [
-              Path(CRIME_DIR) / "sf_crime_07.csv",
-              Path("crime_prediction_data") / "sf_crime_07.csv",
-              Path("crime_data") / "sf_crime_07.csv",
-              Path("sf_crime_07.csv"),
-              Path("outputs") / "sf_crime_07.csv",
+              Path(CRIME_DIR) / "sf_crime_08.csv",
+              Path("crime_prediction_data") / "sf_crime_08.csv",
+              Path("crime_data") / "sf_crime_08.csv",
+              Path("sf_crime_08.csv"),
+              Path("outputs") / "sf_crime_08.csv",
           ]
           src_path = next((p for p in candidates if p.exists()), None)
           if src_path is None:
-              raise FileNotFoundError("sf_crime_07.csv not found in known locations")
+              raise FileNotFoundError("sf_crime_08.csv not found in known locations")
           src = str(src_path)
-          dst = str(Path(CRIME_DIR)/"sf_crime_08.csv")
+          dst = str(Path(CRIME_DIR)/"sf_crime_09.csv")
 
-          clean_and_save_crime_08(src, dst)
-          print("✅ sf_crime_08 hazır →", dst)
+          clean_and_save_crime_09(src, dst)
+          print("✅ sf_crime_09 hazır →", dst)
           try:
               df = pd.read_csv(dst, low_memory=False)
               with pd.option_context("display.max_columns", None, "display.width", 2000):
-                  print("📄 sf_crime_08.csv — ilk 5 satır:")
+                  print("📄 sf_crime_09.csv — ilk 5 satır:")
                   print(df.head(5).to_string(index=False))
           except Exception as e:
               print(f"⚠️ Önizleme okunamadı: {e}")
@@ -604,7 +604,7 @@ jobs:
 
           # 3) Kalite kontrol
           python - <<'PY'
-          import os, pandas as pd, sys, json, pathlib
+          import os, pandas as pd, sys
           from pathlib import Path
           p = Path(os.environ["CRIME_DATA_DIR"]) / "neighbors.csv"
           min_deg = int(os.environ.get("MIN_NEIGHBOR_DEG","3"))
@@ -639,7 +639,6 @@ jobs:
           import os, re
           from pathlib import Path
           import pandas as pd
-
           try:
               import geopandas as gpd
           except Exception:
@@ -758,9 +757,14 @@ jobs:
           echo "neighbors.csv (ilk 10 satır):"
           head -n 10 "${DEST}" || true
 
-          # 08 → 09: komşuluk özniteliğini ekleyip yeni sürüm üret
-          python -u scripts/update_neighbors.py
-
+          # (Opsiyonel) 09'a komşuluk özniteliklerini uygula
+          if [ -f "scripts/update_neighbors.py" ]; then
+            echo "🔧 Komşuluk öznitelikleri işleniyor…"
+            python -u scripts/update_neighbors.py
+          else
+            echo "ℹ️ scripts/update_neighbors.py yok, atlandı."
+          fi
+          
       - name: 11) Install ML deps for stacking
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
