@@ -899,7 +899,7 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          REQUIRE_FR: ${{ vars.REQUIRE_FR || '1' }}   # 0 yaparsan adımı atlar
+          REQUIRE_FR: ${{ vars.REQUIRE_FR || '1' }}
         run: |
           set -euo pipefail
       
@@ -909,7 +909,7 @@ jobs:
             exit 0
           fi
       
-          # Girdiler hazır mı? (14. adımda üretilmiş olmalı)
+          # Girdiler CRIME_DATA_DIR altında olmalı
           for f in "${CRIME_DATA_DIR}/yarin.csv" "${CRIME_DATA_DIR}/week.csv"; do
             if [ ! -f "$f" ]; then
               echo "⚠️ Girdi eksik: $f — FR dataset adımı zarifçe atlanıyor."
@@ -917,11 +917,27 @@ jobs:
             fi
           done
       
-          if [ -f scripts/update_forecast_crime.py ]; then
-            python -u scripts/update_forecast_crime.py
-          else
-            echo "⚠️ scripts/update_forecast_crime.py yok — adım atlandı."
-            exit 0
+          # update_forecast_crime.py olası konumları
+          CANDIDATES=(
+            "scripts/update_forecast_crime.py"
+            "${CRIME_DATA_DIR}/update_forecast_crime.py"
+          )
+      
+          FOUND=""
+          for P in "${CANDIDATES[@]}"; do
+            if [ -f "$P" ]; then
+              echo "▶︎ Çalıştırılıyor: $P"
+              python -u "$P"
+              FOUND="yes"
+              break
+            fi
+          done
+      
+          if [ -z "${FOUND}" ]; then
+            echo "❌ update_forecast_crime.py bulunamadı (scripts/ veya ${CRIME_DATA_DIR}/ altında)."
+            echo "Repo kökü (ilk iki seviye) listesi:"
+            find . -maxdepth 2 -type f -name "update_forecast_crime.py" -print || true
+            exit 2
           fi
       
           if [ -f "${CRIME_DATA_DIR}/fr_crime_grid_full_labeled.csv" ]; then
@@ -930,7 +946,7 @@ jobs:
           else
             echo "⚠️ fr_crime_grid_full_labeled.csv üretilmedi."
           fi
-    
+          
       - name: 15) Run post_patrol.py (uses risk_hourly + yarin/week)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
