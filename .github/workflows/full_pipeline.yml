@@ -530,7 +530,7 @@ jobs:
           src = str(src_path)
           dst = str(Path(CRIME_DIR)/"sf_crime_08.csv")
 
-          clean_and_save_crime_07(src, dst)
+          clean_and_save_crime_08(src, dst)
           print("✅ sf_crime_08 hazır →", dst)
           try:
               df = pd.read_csv(dst, low_memory=False)
@@ -764,6 +764,9 @@ jobs:
 
           echo "neighbors.csv (ilk 10 satır):"
           head -n 10 "${DEST}" || true
+
+          # 08 → 09: komşuluk özniteliğini ekleyip yeni sürüm üret
+          python -u scripts/update_neighbors.py
 
       - name: 11) Install ML deps for stacking
         if: ${{ steps.gate.outputs.proceed == 'true' }}
