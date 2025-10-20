@@ -13,8 +13,8 @@ DATA_DIR = ROOT / "crime_prediction_data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Girdi/Çıktı dosyaları
-IN_CSV  = Path(os.environ.get("NEIGHBOR_INPUT_CSV", str(DATA_DIR / "sf_crime_09.csv")))
-OUT_CSV = Path(os.environ.get("NEIGHBOR_OUTPUT_CSV", str(DATA_DIR / "sf_crime_09.csv")))  # in-place varsayılan
+IN_CSV  = Path(os.environ.get("NEIGHBOR_INPUT_CSV", str(DATA_DIR / "sf_crime_08.csv")))
+OUT_CSV = Path(os.environ.get("NEIGHBOR_OUTPUT_CSV", str(DATA_DIR / "sf_crime_08.csv")))  # in-place varsayılan
 
 # Komşuluk dosyası (2 kolonlu beklenir: GEOID, NEIGHBOR_GEOID)
 NEIGHBOR_FILE = Path(os.environ.get("NEIGHBOR_FILE", str(DATA_DIR / "neighbors.csv")))
