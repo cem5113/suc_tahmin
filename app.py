@@ -1203,24 +1203,9 @@ else:
 
 if df09 is not None:
     st.markdown("### 5) Hızlı Model (ZI/Hurdle + Quantile + Kalibrasyon)")
-
-    # TABLARI ÖNCE TANIMLA
-    tabs = st.tabs([
-        "Global — Sınıf (var/yok)",
-        "Global — Sayı (kuantil)",
-        "Local — Tek Satır",
-        "PDP / ICE",
-        "Sınıf Kartları"
-    ])
-
     train_btn = st.button("🧠 Modeli Eğit (örnek)")
-    if train_btn:
-        # ⬇️ Burada X_occ, shap_pos, expl_clf, q_models, X_cnt, clf, clf_tree, X_all, sample_idx vb.
-        # zaten daha önce hesaplanmış olmalı (bu örnek, var kabul ediyor)
 
-        # -------------------------------
-        # Global — Sınıf (var/yok)
-        # -------------------------------
+    if train_btn:
         with tabs[0]:
             st.caption("Pozitif sınıf (Y>0) için ortalama mutlak SHAP değerleri — ilk 10")
             mean_abs = np.abs(shap_pos).mean(axis=0)
@@ -1233,13 +1218,14 @@ if df09 is not None:
 
             # Sınıf-bazlı altkümeler (opsiyonel)
             cat_col = "category_grouped" if "category_grouped" in df09.columns else (
-                      "subcategory_grouped" if "subcategory_grouped" in df09.columns else None)
+                "subcategory_grouped" if "subcategory_grouped" in df09.columns else None)
             if cat_col:
                 col1, col2 = st.columns(2)
                 with col1:
                     pick1 = st.selectbox("Sınıf 1 (ör. Theft/Hırsızlık)", sorted(df09[cat_col].dropna().unique()))
                 with col2:
                     pick2 = st.selectbox("Sınıf 2 (ör. Assault/Saldırı)", sorted(df09[cat_col].dropna().unique()))
+
                 for pick in [pick1, pick2]:
                     sub_idx = df09.loc[sample_idx][df09.loc[sample_idx, cat_col] == pick].index
                     if len(sub_idx) >= 20:
@@ -1283,9 +1269,9 @@ if df09 is not None:
             st.caption("Seçtiğin satır için sınıf (Y>0) olasılığı ve özellik katkıları")
             idx = st.number_input("Satır indexi", min_value=0, max_value=int(len(X_all)-1), value=0, step=1)
             x_row = X_all.iloc[[idx]]
-            p_row = float(clf.predict_proba(x_row)[:, 1])
+            p_row = float(clf.predict_proba(x_row)[:,1])
             exp_row = float(df09.loc[x_row.index, "pred_expected"]) if "pred_expected" in df09.columns else np.nan
-            st.write(f"**P(Y>0)** = {p_row:.3f}  |  **Beklenen sayı** ≈ {exp_row:.2f}")
+            st.write(f"**P(Y>0)** = {p_row:.3f} | **Beklenen sayı** ≈ {exp_row:.2f}")
 
             shap_row = expl_clf.shap_values(x_row)
             shap_row_pos = shap_row[1][0] if isinstance(shap_row, list) else shap_row[0]
@@ -1301,7 +1287,8 @@ if df09 is not None:
         # -------------------------------
         with tabs[3]:
             st.caption("Marjinal etki (PDP). Sınıf modeli (Y>0, target=1) üzerinde.")
-            candidates = [c for c in ["event_hour","nei_7d_sum","nr_7d","bus_stop_count","poi_risk_score"] if c in X_occ.columns]
+            candidates = [c for c in ["event_hour","nei_7d_sum","nr_7d","bus_stop_count","poi_risk_score"]
+                          if c in X_occ.columns]
             feats = st.multiselect("PDP için özellik(ler) seç", options=candidates, default=candidates[:2])
             if len(feats) > 0:
                 for f in feats[:3]:
@@ -1314,13 +1301,8 @@ if df09 is not None:
             else:
                 st.info("Listeden en az bir özellik seç.")
 
-        # -------------------------------
-        # Sınıf kartları
-        # -------------------------------
         with tabs[4]:
             st.caption("Seçilen iki sınıf için özet kart (global SHAP ilk 5)")
-            cat_col = "category_grouped" if "category_grouped" in df09.columns else (
-                      "subcategory_grouped" if "subcategory_grouped" in df09.columns else None)
             if cat_col:
                 pick_a = st.selectbox("Kart A sınıfı", sorted(df09[cat_col].dropna().unique()), key="cardA")
                 pick_b = st.selectbox("Kart B sınıfı", sorted(df09[cat_col].dropna().unique()), key="cardB")
@@ -1344,10 +1326,10 @@ if df09 is not None:
                     st.dataframe(_topk_for_class(pick_b), use_container_width=True)
             else:
                 st.info("category_grouped / subcategory_grouped yoksa sınıf kartları oluşturulamaz.")
-
 else:
     st.markdown("### 5) Hızlı Model")
     st.info("Model eğitmek için önce sf_crime_09.csv’nin üretilmiş olması gerekiyor.")
+
     
         # -------------------------------
         # Global — Sınıf (var/yok)
