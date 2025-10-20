@@ -839,83 +839,13 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           VISUAL_CROSSING_API_KEY: ${{ secrets.VISUAL_CROSSING_API_KEY }}
-          WX_LOCATION: ${{ env.WX_LOCATION }}         # ör: "San Francisco,CA"
-          WX_UNIT: ${{ env.WX_UNIT }}                 # "metric" (önerilir) ya da "us"
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}   # ör: "crime_data"
-          HOT_THRESHOLD_C: "30"                       # is_hot eşiği istersen değiştir
+          WX_LOCATION: ${{ env.WX_LOCATION }}
+          WX_UNIT: ${{ env.WX_UNIT }}
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          HOT_THRESHOLD_C: "30"
         run: |
           set -e
-          python - <<'PY'
-          import os, io, sys, requests, pandas as pd
-          from datetime import datetime, timedelta, date
-          from zoneinfo import ZoneInfo
-          from urllib.parse import quote
-      
-          API_KEY = os.getenv("VISUAL_CROSSING_API_KEY", "")
-          if not API_KEY:
-              sys.exit("Missing VISUAL_CROSSING_API_KEY")
-      
-          LOCATION = os.getenv("WX_LOCATION", "San Francisco,CA")
-          UNIT = os.getenv("WX_UNIT", "metric")  # metric: °C & mm
-          OUTDIR = os.getenv("CRIME_DATA_DIR", "crime_data")
-          HOT_THRESHOLD = float(os.getenv("HOT_THRESHOLD_C", "30"))
-      
-          BASE = "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline"
-      
-          # SF yerel tarihleri (VC 'date1/date2' yerel saat kabul eder, biz SF'e göre hesaplıyoruz)
-          SF = ZoneInfo("America/Los_Angeles")
-          today_sf = datetime.now(SF).date()
-          tomorrow = today_sf + timedelta(days=1)
-          week_end = tomorrow + timedelta(days=6)  # yarın dahil 7 gün
-      
-          def fetch_days_csv(location: str, start: date, end: date) -> pd.DataFrame:
-              url = (
-                  f"{BASE}/{quote(location)}/{start.isoformat()}/{end.isoformat()}"
-                  f"?unitGroup={UNIT}&include=days"
-                  f"&elements=datetime,temp,tempmin,tempmax,precip"
-                  f"&contentType=csv&key={API_KEY}"
-              )
-              r = requests.get(url, timeout=60)
-              try:
-                  r.raise_for_status()
-              except requests.HTTPError:
-                  print("HTTP status:", r.status_code)
-                  print("Response preview:", r.text[:300])
-                  raise
-              df = pd.read_csv(io.StringIO(r.text))
-              need = {"datetime","temp","tempmin","tempmax","precip"}
-              miss = need - set(df.columns)
-              if miss:
-                  raise RuntimeError(f"Beklenen kolon(lar) yok: {miss} | Gelenler: {list(df.columns)}")
-              # yeniden adlandır
-              df = df.rename(columns={
-                  "datetime":"date","temp":"tavg","tempmin":"tmin","tempmax":"tmax","precip":"prcp"
-              })
-              # gün adı (TR)
-              tr_days = {0:"Pazartesi",1:"Salı",2:"Çarşamba",3:"Perşembe",4:"Cuma",5:"Cumartesi",6:"Pazar"}
-              dd = pd.to_datetime(df["date"], errors="coerce")
-              df["day"] = dd.dt.weekday.map(tr_days)
-              # türetilmişler
-              df["temp_range"] = df["tmax"] - df["tmin"]
-              df["is_rainy"] = (df["prcp"] > 0).astype(int)
-              df["is_hot"] = (df["tmax"] >= HOT_THRESHOLD).astype(int)
-              # kolon sırası
-              return df[["date","tavg","tmin","tmax","prcp","temp_range","day","is_rainy","is_hot"]]
-      
-          os.makedirs(OUTDIR, exist_ok=True)
-      
-          # yarın (tek gün)
-          df_t = fetch_days_csv(LOCATION, tomorrow, tomorrow)
-          df_t.to_csv(os.path.join(OUTDIR, "yarin.csv"), index=False, encoding="utf-8")
-          print("✓", os.path.join(OUTDIR, "yarin.csv"))
-      
-          # hafta (7 gün)
-          df_w = fetch_days_csv(LOCATION, tomorrow, week_end)
-          # güvenlik: tam 7 gün değilse (model verememişse) yine ne geldiyse yaz
-          df_w.to_csv(os.path.join(OUTDIR, "week.csv"), index=False, encoding="utf-8")
-          print("✓", os.path.join(OUTDIR, "week.csv"))
-          PY
-      
+          python scripts/fetch_weather_csv.py
           echo "---- yarin.csv (head) ----"; head -n 5 "${CRIME_DATA_DIR}/yarin.csv" || true
           echo "---- week.csv (head) ----";  head -n 5 "${CRIME_DATA_DIR}/week.csv" || true
 
