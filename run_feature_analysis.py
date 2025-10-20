@@ -329,7 +329,7 @@ def main():
     ])
     cat_pipe = Pipeline(steps=[
         ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("ohe", OneHotEncoder(handle_unknown="ignore", sparse=True))
+        ("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=True))
     ])
     pre = ColumnTransformer(
         transformers=[
