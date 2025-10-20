@@ -644,13 +644,6 @@ jobs:
               import geopandas as gpd
           except Exception:
               gpd = None
-              
-          # 5) Sert gardiyan: dosya yoksa veya min_deg < ${MIN_NEIGHBOR_DEG} ise fail et
-          if [ -f "${CRIME_DATA_DIR}/.rebuild_neighbors" ]; then
-            echo "❌ neighbors.csv kalite eşiğini geçemedi: $(cat "${CRIME_DATA_DIR}/.rebuild_neighbors")"
-            exit 2
-          fi
-          test -s "${DEST}" || { echo "❌ neighbors.csv yok/boş: ${DEST}"; exit 2; }
 
           CRIME_DIR  = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
           GEOID_LEN  = int(os.environ.get("GEOID_LEN","11"))
