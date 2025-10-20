@@ -223,12 +223,19 @@ def compute_class_weight(y: pd.Series) -> float:
     """
     XGBoost için scale_pos_weight ~ (neg/pos)
     """
-    pos = (y == 1).sum()
-    neg = (y == 0).sum()
+    # y DataFrame geldiyse tek kolona indir
+    if isinstance(y, pd.DataFrame):
+        y = y.iloc[:, 0]
+
+    # Binary + sayısal hale getir
+    y = pd.to_numeric(y, errors="coerce").fillna(0).astype(int).clip(0, 1)
+
+    pos = int(np.count_nonzero(y == 1))
+    neg = int(np.count_nonzero(y == 0))
+
     if pos == 0:
         return 1.0
     return float(neg) / float(pos)
-
 
 def plot_and_save_importance(importances: pd.Series, out_png: Path, top_n: int = 30, title: str = "Feature Importance"):
     top = importances.sort_values(ascending=False).head(top_n)
@@ -301,6 +308,13 @@ def main():
 
     # 6) Hedef/özellik ayırma
     y = df[target].copy()
+    
+    # y bir DataFrame ise ilk kolonu al
+    if isinstance(y, pd.DataFrame):
+        y = y.iloc[:, 0]
+    
+    # Her ihtimale karşı binary ve sayısal yap
+    y = pd.to_numeric(y, errors="coerce").fillna(0).astype(int).clip(0, 1)
     X = df.drop(columns=[target]).copy()
 
     # 7) Sayısal/kategorik ayrımı ve sayısallaştırma
