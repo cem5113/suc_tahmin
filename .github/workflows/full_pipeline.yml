@@ -805,18 +805,6 @@ jobs:
               print(f"⚠️ Önizleme okunamadı: {e}")
           PY
   
-      - name: 12.1) Generate Y labels
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: python -u scripts/generate_sf_crime_y.py
-
-      - name: Save Y labels
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: sf-crime-y
-          path: ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
-          if-no-files-found: warn
-            
       - name: 11) Install ML deps for stacking
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
