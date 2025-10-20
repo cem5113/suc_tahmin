@@ -1023,7 +1023,11 @@ with colA:
 with colB:
     show_missing = st.checkbox("Eksikleri de göster", value=True)
 with colC:
-    patt = st.text_input("Desen (glob)", "*.csv", help="Örn: sf_crime_*.csv")
+        patt = st.text_input(
+            "Desen (glob)", "*.csv",
+            help="Örn: sf_crime_*.csv",
+            key="glob_list_files"        
+        )
 
 asc = (order == "Eski → Yeni")
 df_files = list_files_sorted(pattern=patt, ascending=asc, include_missing=show_missing)
@@ -1035,16 +1039,34 @@ else:
 st.markdown("### 1.6) CSV → Parquet dönüştür")
 with st.expander("🔄 CSV’leri Parquet’e çevir (zstd)"):
     in_dir = st.text_input(
-        "Girdi klasörü", value=str(DATA_DIR), help="Örn: crime_prediction_data/"
+        "Girdi klasörü", value=str(DATA_DIR),
+        help="Örn: crime_prediction_data/",
+        key="csv2parquet_in_dir"                 # ✅
     )
     out_dir = st.text_input(
-        "Çıktı klasörü", value=str(ROOT / "parquet_out"), help="Örn: parquet_out/"
+        "Çıktı klasörü", value=str(ROOT / "parquet_out"),
+        help="Örn: parquet_out/",
+        key="csv2parquet_out_dir"                # ✅
     )
-    patt_in = st.text_input("Desen (glob)", "*.csv", help="Örn: sf_crime_*.csv")
-    comp = st.selectbox("Sıkıştırma", ["zstd", "snappy", "gzip", "brotli", "uncompressed"], index=0)
-    want_stats = st.checkbox("Özet/stats üret", value=True)
+    patt_in = st.text_input(
+        "Desen (glob)", "*.csv",
+        help="Örn: sf_crime_*.csv",
+        key="csv2parquet_glob"                   # ✅ 
+    )
+    comp = st.selectbox(
+        "Sıkıştırma",
+        ["zstd", "snappy", "gzip", "brotli", "uncompressed"],
+        index=0,
+        key="csv2parquet_codec"                  # ✅
+    )
+    want_stats = st.checkbox(
+        "Özet/stats üret", value=True,
+        key="csv2parquet_stats"                  # ✅
+    )
 
-    if st.button("🧰 Dönüştür (CSV → Parquet)"):
+    if st.button("🧰 Dönüştür (CSV → Parquet)", key="csv2parquet_run"):  # ✅
+        ...
+
         try:
             res = convert_csv_dir_to_parquet(
                 input_dir=Path(in_dir),
