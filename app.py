@@ -22,6 +22,16 @@ except Exception:
 
 st.set_page_config(page_title="Veri Güncelleme", layout="wide")
 
+try:
+    ROOT = Path(__file__).resolve().parent
+except NameError:
+    ROOT = Path.cwd()
+DATA_DIR = ROOT / "crime_prediction_data"
+SCRIPTS_DIR = ROOT / "scripts"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+SEARCH_DIRS = [SCRIPTS_DIR, ROOT]
+
 PIPELINE = [
     {"name": "update_crime.py",      "alts": ["build_crime_grid.py", "crime_grid_build.py"]},
     {"name": "update_911.py",        "alts": ["enrich_911.py"]},
@@ -545,42 +555,6 @@ def clean_and_save_crime_09(input_obj="sf_crime_08.csv", output_path="sf_crime_0
     except Exception as _e:
         print(f"near-repeat uyarı: {_e}")
 
-    # --- 7.6) Komşu GEOID yoğunluğu (son 7 gün toplam) + 1 gün lag
-    try:
-        neighbors_path = Path(
-            os.environ.get("NEIGHBOR_FILE", str(Path(DATA_DIR) / "neighbors.csv"))
-        )
-        if neighbors_path.exists() and {"date","GEOID"}.issubset(df.columns):
-            nbr = pd.read_csv(neighbors_path, dtype={"GEOID":str,"NEIGHBOR_GEOID":str})
-            L = int(os.environ.get("GEOID_LEN","11"))
-            for colx in ["GEOID","NEIGHBOR_GEOID"]:
-                nbr[colx] = nbr[colx].astype(str).str.extract(r"(\d+)", expand=False).str.zfill(L)
-
-            daily = (df[["date","GEOID","crime_count"]].copy())
-            daily["date"] = pd.to_datetime(daily["date"], errors="coerce").dt.date
-            daily = (daily.groupby(["GEOID","date"], as_index=False)["crime_count"].sum())
-            daily["date"] = pd.to_datetime(daily["date"])
-            # komşulukla genişlet
-            d2 = nbr.merge(daily.rename(columns={"GEOID":"NEIGHBOR_GEOID"}), on="NEIGHBOR_GEOID", how="left")
-            # komşu günlük seri → 7 günlük pencere + 1 gün lag
-            d2 = d2.sort_values(["GEOID","date"])
-            def _agg_nei(x):
-                x = x.set_index("date").asfreq("D", fill_value=0)
-                x["nei_7d_sum"] = x["crime_count"].rolling("7D").sum().shift(1)
-                return x.reset_index()
-
-            d3 = (d2.groupby("GEOID")
-                    .apply(_agg_nei)
-                    .reset_index(level=0)
-                    .reset_index(drop=True))
-            d3["date"] = d3["date"].dt.date
-            d3 = d3.groupby(["GEOID","date"], as_index=False)["nei_7d_sum"].sum()
-
-            df = df.merge(d3, on=["GEOID","date"], how="left")
-            df["nei_7d_sum"] = pd.to_numeric(df["nei_7d_sum"], errors="coerce").fillna(0).astype(float)
-    except Exception as _e:
-        print(f"komşuluk özellik uyarı: {_e}")
-
     # --- 7.7) Dışsal değişkenleri tür-eşlemeli ekleme (örnek şablon)
     try:
         # 1) Hava: df'de halihazırda 'temp','wind_speed','precip' vs varsa doğrudan kullanılır.
@@ -728,16 +702,6 @@ with st.sidebar:
             st.error("CSV-only mod: URL kabul edilmez. Yerel bir CSV yolu girin.")
         else:
             os.environ["POPULATION_PATH"] = pop_url_in or str(POPULATION_PATH)
-
-try:
-    ROOT = Path(__file__).resolve().parent
-except NameError:
-    ROOT = Path.cwd()
-DATA_DIR = ROOT / "crime_prediction_data"
-SCRIPTS_DIR = ROOT / "scripts"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-SEARCH_DIRS = [SCRIPTS_DIR, ROOT]
 
 def _mask_token(u: str) -> str:
     try:
@@ -1194,24 +1158,58 @@ if df08 is not None:
     st.dataframe(df08.head(20))
 
     # sf_crime_09 üret
-    clean_and_save_crime_09(df08, str(DATA_DIR / "sf_crime_09.csv"))
-    st.success("✅ sf_crime_09.csv kaydedildi.")
+    clean_and_save_crime_09(df08, str(DATA_DIR / "sf_crime_08_clean.csv"))
+    st.success("✅ sf_crime_08_clean.csv kaydedildi.")
+
+    # 🔁 neighbors graph + feature (08_clean → 09)
+    graph_script = resolve_script({"name": "update_neighbors_graph.py", "alts": ["neighbors_graph.py"]})
+    feat_script  = resolve_script({"name": "update_neighbors.py",        "alts": []})
+    
+    # neighbors.csv yoksa üret
+    if graph_script and not (DATA_DIR / "neighbors.csv").exists():
+        ok_graph = run_script(graph_script)
+        st.success("🗺️ neighbors.csv üretildi.") if ok_graph else st.warning("neighbors graph başarısız.")
+    
+    # 08_clean → 09 (nei_7d_sum eklenerek)
+    if feat_script:
+        os.environ["NEIGHBOR_FILE"] = os.environ.get("NEIGHBOR_FILE", str(DATA_DIR / "neighbors.csv"))
+        os.environ["NEIGHBOR_INPUT_CSV"]  = str(DATA_DIR / "sf_crime_08_clean.csv")
+        os.environ["NEIGHBOR_OUTPUT_CSV"] = str(DATA_DIR / "sf_crime_09.csv")
+        os.environ["NEIGHBOR_WINDOW_DAYS"] = os.environ.get("NEIGHBOR_WINDOW_DAYS", "7")
+        os.environ["NEIGHBOR_LAG_DAYS"]    = os.environ.get("NEIGHBOR_LAG_DAYS", "1")
+    
+        ok_feat = run_script(feat_script)
+        if ok_feat:
+            st.success("🧩 sf_crime_09.csv üretildi (nei_7d_sum eklendi).")
+        else:
+            st.warning("update_neighbors.py çalıştırılamadı; logu kontrol edin.")
+    else:
+        st.info("update_neighbors.py bulunamadı (scripts klasörüne ekleyin).")
 
 else:
     st.info("Henüz sf_crime_08.csv bulunamadı. Pipeline’ı çalıştırabilir veya artifact erişimini (GH_TOKEN) ayarlayabilirsiniz.")
 
-try:
-    df09 = pd.read_csv(DATA_DIR / "sf_crime_09.csv", low_memory=False)
-    st.markdown("### 4) Güncel sf_crime_09.csv (ilk 20 satır)")
-    st.dataframe(df09.head(20))
-except Exception as e:
-    st.warning(f"sf_crime_09.csv okunamadı: {e}")
-    df09 = None
+df09_path = DATA_DIR / "sf_crime_09.csv"
+df09 = None
+if df09_path.exists():
+    try:
+        df09 = pd.read_csv(df09_path, low_memory=False)
+        st.markdown("### 4) Güncel sf_crime_09.csv (ilk 20 satır)")
+        st.dataframe(df09.head(20))
+    except Exception as e:
+        st.warning(f"sf_crime_09.csv okunamadı: {e}")
+else:
+    st.info("sf_crime_09.csv henüz üretilmemiş görünüyor (neighbors adımını kontrol edin).")
 
 if df09 is not None:
     st.markdown("### 5) Hızlı Model (ZI/Hurdle + Quantile + Kalibrasyon)")
+    train_btn = st.button("🧠 Modeli Eğit (örnek)")
+    if train_btn:
 
-    if st.button("🧠 Modeli Eğit (örnek)"):
+else:
+    st.markdown("### 5) Hızlı Model")
+    st.info("Model eğitmek için önce sf_crime_09.csv’nin üretilmiş olması gerekiyor.")
+    
         deps = _load_ml_deps()
         np = deps["np"]; shap = deps["shap"]
         TimeSeriesSplit = deps["TimeSeriesSplit"]
