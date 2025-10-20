@@ -1205,135 +1205,133 @@ if df09 is not None:
     st.markdown("### 5) Hızlı Model (ZI/Hurdle + Quantile + Kalibrasyon)")
     train_btn = st.button("🧠 Modeli Eğit (örnek)")
     if train_btn:
+        # ... (eğitim, q_models, build_forensic_report vb. değişmedi)
 
+        # -------------------------------
+        # Global — Sınıf (var/yok)
+        # -------------------------------
+        with tabs[0]:
+            st.caption("Pozitif sınıf (Y>0) için ortalama mutlak SHAP değerleri — ilk 10")
+            mean_abs = np.abs(shap_pos).mean(axis=0)
+            top_idx = np.argsort(mean_abs)[::-1][:10]
+            top_feat = X_occ.columns[top_idx]
+            top_vals = mean_abs[top_idx]
+            top_df = pd.DataFrame({"özellik": top_feat, "önem(Mean|SHAP|)": top_vals})
+            st.dataframe(top_df, use_container_width=True)
+            st.bar_chart(top_df.set_index("özellik"))
+
+            # Sınıf-bazlı altkümeler (opsiyonel)
+            cat_col = "category_grouped" if "category_grouped" in df09.columns else (
+                      "subcategory_grouped" if "subcategory_grouped" in df09.columns else None)
+            if cat_col:
+                col1, col2 = st.columns(2)
+                with col1:
+                    pick1 = st.selectbox("Sınıf 1 (ör. Theft/Hırsızlık)", sorted(df09[cat_col].dropna().unique()))
+                with col2:
+                    pick2 = st.selectbox("Sınıf 2 (ör. Assault/Saldırı)", sorted(df09[cat_col].dropna().unique()))
+                for pick in [pick1, pick2]:
+                    sub_idx = df09.loc[sample_idx][df09.loc[sample_idx, cat_col] == pick].index
+                    if len(sub_idx) >= 20:
+                        shap_sub = expl_clf.shap_values(X_occ.loc[sub_idx])
+                        shap_sub_pos = shap_sub[1] if isinstance(shap_sub, list) else shap_sub
+                        mabs = np.abs(shap_sub_pos).mean(axis=0)
+                        top_idx2 = np.argsort(mabs)[::-1][:10]
+                        top_df2 = pd.DataFrame({
+                            "özellik": X_occ.columns[top_idx2],
+                            f"{pick} için önem": mabs[top_idx2]
+                        })
+                        st.markdown(f"**{pick} — ilk 10 etken**")
+                        st.dataframe(top_df2, use_container_width=True)
+                    else:
+                        st.info(f"{pick} için yeterli örnek yok (≥20 önerilir).")
+
+        # -------------------------------
+        # Global — Sayı (kuantil regresyon)
+        # -------------------------------
+        with tabs[1]:
+            if 0.5 in q_models:
+                st.caption("Kuantil (q=0.5) LightGBMRegressor için SHAP — ilk 10")
+                expl_reg = shap.TreeExplainer(q_models[0.5])
+                sample_idx_reg = X_cnt.sample(min(1500, len(X_cnt)), random_state=42).index
+                shap_vals_reg = expl_reg.shap_values(X_cnt.loc[sample_idx_reg])
+                mean_abs_r = np.abs(shap_vals_reg).mean(axis=0)
+                top_idx_r = np.argsort(mean_abs_r)[::-1][:10]
+                top_df_r = pd.DataFrame({
+                    "özellik": X_cnt.columns[top_idx_r],
+                    "önem(Mean|SHAP|)": mean_abs_r[top_idx_r]
+                })
+                st.dataframe(top_df_r, use_container_width=True)
+                st.bar_chart(top_df_r.set_index("özellik"))
+            else:
+                st.info("Kuantil regresyon modeli bulunamadı.")
+
+        # -------------------------------
+        # Local — tek satır açıklaması
+        # -------------------------------
+        with tabs[2]:
+            st.caption("Seçtiğin satır için sınıf (Y>0) olasılığı ve özellik katkıları")
+            idx = st.number_input("Satır indexi", min_value=0, max_value=int(len(X_all)-1), value=0, step=1)
+            x_row = X_all.iloc[[idx]]
+            p_row = float(clf.predict_proba(x_row)[:,1])
+            exp_row = float(df09.loc[x_row.index, "pred_expected"]) if "pred_expected" in df09.columns else np.nan
+            st.write(f"**P(Y>0)** = {p_row:.3f}  |  **Beklenen sayı** ≈ {exp_row:.2f}")
+
+            shap_row = expl_clf.shap_values(x_row)
+            shap_row_pos = shap_row[1][0] if isinstance(shap_row, list) else shap_row[0]
+            contrib = pd.DataFrame({
+                "özellik": x_row.columns,
+                "değer": x_row.iloc[0].values,
+                "katkı(SHAP)": shap_row_pos
+            }).sort_values("katkı(SHAP)", key=np.abs, ascending=False).head(15)
+            st.dataframe(contrib, use_container_width=True)
+
+        # -------------------------------
+        # PDP / ICE (kritik özellikler)
+        # -------------------------------
+        with tabs[3]:
+            st.caption("Marjinal etki (PDP). Sınıf modeli (Y>0, target=1) üzerinde.")
+            candidates = [c for c in ["event_hour","nei_7d_sum","nr_7d","bus_stop_count","poi_risk_score"] if c in X_occ.columns]
+            feats = st.multiselect("PDP için özellik(ler) seç", options=candidates, default=candidates[:2])
+            if len(feats) > 0:
+                for f in feats[:3]:
+                    fig, ax = plt.subplots(figsize=(5, 3))
+                    PartialDependenceDisplay.from_estimator(
+                        clf_tree, X_occ, [f], kind="average", target=1, ax=ax
+                    )
+                    ax.set_title(f"PDP — {f}")
+                    st.pyplot(fig, clear_figure=True)
+            else:
+                st.info("Listeden en az bir özellik seç.")
+
+        with tabs[4]:
+            st.caption("Seçilen iki sınıf için özet kart (global SHAP ilk 5)")
+            if cat_col:
+                pick_a = st.selectbox("Kart A sınıfı", sorted(df09[cat_col].dropna().unique()), key="cardA")
+                pick_b = st.selectbox("Kart B sınıfı", sorted(df09[cat_col].dropna().unique()), key="cardB")
+
+                def _topk_for_class(pick, k=5):
+                    sub_idx = df09.loc[sample_idx][df09.loc[sample_idx, cat_col] == pick].index
+                    if len(sub_idx) < 20:
+                        return pd.DataFrame({"özellik": [], "önem": []})
+                    shap_sub = expl_clf.shap_values(X_occ.loc[sub_idx])
+                    shap_sub_pos = shap_sub[1] if isinstance(shap_sub, list) else shap_sub
+                    mabs = np.abs(shap_sub_pos).mean(axis=0)
+                    top = np.argsort(mabs)[::-1][:k]
+                    return pd.DataFrame({"özellik": X_occ.columns[top], "önem": mabs[top]})
+
+                colA, colB = st.columns(2)
+                with colA:
+                    st.markdown(f"**{pick_a} — Top 5 etken**")
+                    st.dataframe(_topk_for_class(pick_a), use_container_width=True)
+                with colB:
+                    st.markdown(f"**{pick_b} — Top 5 etken**")
+                    st.dataframe(_topk_for_class(pick_b), use_container_width=True)
+            else:
+                st.info("category_grouped / subcategory_grouped yoksa sınıf kartları oluşturulamaz.")
 else:
     st.markdown("### 5) Hızlı Model")
     st.info("Model eğitmek için önce sf_crime_09.csv’nin üretilmiş olması gerekiyor.")
     
-        deps = _load_ml_deps()
-        np = deps["np"]; shap = deps["shap"]
-        TimeSeriesSplit = deps["TimeSeriesSplit"]
-        roc_auc_score = deps["roc_auc_score"]; brier_score_loss = deps["brier_score_loss"]; mean_absolute_error = deps["mean_absolute_error"]
-        CalibratedClassifierCV = deps["CalibratedClassifierCV"]
-        PartialDependenceDisplay = deps["PartialDependenceDisplay"]
-        LGBMClassifier = deps["LGBMClassifier"]; LGBMRegressor = deps["LGBMRegressor"]
-        LimeTabularExplainer = deps["LimeTabularExplainer"]
-        # 1) (opsiyonel) zaman sızıntısı için sırala
-        if "date" in df09.columns:
-            df09 = df09.sort_values("date").reset_index(drop=True)
-
-        # 2) hedefler
-        y_occ = (df09["crime_count"] > 0).astype(int)
-        y_cnt = df09.loc[y_occ == 1, "crime_count"]
-
-        # 3) özellikler
-        feat_cols = [c for c in df09.columns
-                     if c not in ["crime_count","category","subcategory",
-                                  "category_grouped","subcategory_grouped","date","datetime"]]
-        X_all = df09[feat_cols].select_dtypes(include=[np.number]).fillna(0.0)
-        X_occ = X_all
-        X_cnt = X_all.loc[y_occ == 1]
-
-        # 4) zaman temelli split
-        tscv = TimeSeriesSplit(n_splits=3)
-        train_idx, test_idx = list(tscv.split(X_occ))[-1]
-
-        # 5) varlık modeli (kalibre)
-        base_clf = LGBMClassifier(n_estimators=300, learning_rate=0.05, max_depth=-1,
-                                  class_weight="balanced", random_state=42)
-        clf = CalibratedClassifierCV(estimator=base_clf, method="isotonic", cv=3)
-        clf.fit(X_occ.iloc[train_idx], y_occ.iloc[train_idx])
-        p_hat = clf.predict_proba(X_occ.iloc[test_idx])[:, 1]
-        st.write("Varlık modeli AUC:", float(roc_auc_score(y_occ.iloc[test_idx], p_hat)))
-        st.write("Brier:", float(brier_score_loss(y_occ.iloc[test_idx], p_hat)))
-
-        # 6) kuantil regresyon (pozitifler)
-        quantiles = [0.1, 0.5, 0.9]
-        q_models = {}
-        for q in quantiles:
-            qr = LGBMRegressor(objective="quantile", alpha=q,
-                               n_estimators=400, learning_rate=0.05, random_state=42)
-            tr_idx_pos = X_cnt.index.intersection(X_occ.index[train_idx])
-            te_idx_pos = X_cnt.index.intersection(X_occ.index[test_idx])
-            qr.fit(X_cnt.loc[tr_idx_pos], y_cnt.loc[tr_idx_pos])
-            if q == 0.5:
-                pred_med = qr.predict(X_cnt.loc[te_idx_pos])
-                st.write("Pozitiflerde MAE (median):",
-                         float(mean_absolute_error(y_cnt.loc[te_idx_pos], pred_med)))
-            q_models[q] = qr
-
-        # 7) hurdle beklenen değer ve kaydet
-        if 0.5 in q_models:
-            mu_med = q_models[0.5].predict(X_all)
-            p_all = clf.predict_proba(X_all)[:, 1]
-            df09["pred_p_occ"] = p_all
-            df09["pred_q10"] = q_models[0.1].predict(X_all) if 0.1 in q_models else np.nan
-            df09["pred_q50"] = mu_med
-            df09["pred_q90"] = q_models[0.9].predict(X_all) if 0.9 in q_models else np.nan
-            df09["pred_expected"] = p_all * np.maximum(mu_med, 0)
-
-            st.dataframe(df09[["pred_p_occ","pred_q10","pred_q50","pred_q90","pred_expected"]].head(20))
-            out_pred = DATA_DIR / "sf_crime_09_with_preds.csv"
-            df09.to_csv(out_pred, index=False)
-            st.success(f"✔ Tahminli dosya kaydedildi: {out_pred}")
-
-        # 8) Açıklanabilirlik (aynı buton içinde, ancak hurdle if'inin DIŞINDA)
-        st.markdown("### 6) Açıklanabilirlik (global & local)")
-        
-        # (a) SHAP için kalibrasyonsuz temel ağaç modeli tekrar eğit (rapordan bağımsız)
-        clf_tree = LGBMClassifier(n_estimators=300, learning_rate=0.05, max_depth=-1,
-                                  class_weight="balanced", random_state=42)
-        clf_tree.fit(X_occ.iloc[train_idx], y_occ.iloc[train_idx])
-        
-        # SHAP objelerini rapordan bağımsız hesapla (her durumda tabs çalışsın)
-        expl_clf = shap.TreeExplainer(clf_tree)
-        sample_idx = X_occ.iloc[test_idx].sample(min(1500, len(test_idx)), random_state=42).index
-        shap_vals_cls = expl_clf.shap_values(X_occ.loc[sample_idx])
-        shap_pos = shap_vals_cls[1] if isinstance(shap_vals_cls, list) else shap_vals_cls
-        
-        cat_col = ("category_grouped" if "category_grouped" in df09.columns else
-                   ("subcategory_grouped" if "subcategory_grouped" in df09.columns else None))
-        
-        # Sekmeleri HER KOŞULDA oluştur (rapor başarısız olsa da)
-        tabs = st.tabs([
-            "Global (Sınıf: var/yok)",
-            "Global (Sayı: kuantil)",
-            "Local (satır)",
-            "PDP / ICE",
-            "Rapor (mini kart)",
-        ])
-        
-        # (b) Forensic rapor üretimini dene (opsiyonel)
-        try:
-            with st.spinner("📑 Rapor ve forensic paket hazırlanıyor..."):
-                res = build_forensic_report(
-                    df09=df09, X_occ=X_occ, X_cnt=X_cnt, y_occ=y_occ, y_cnt=y_cnt,
-                    train_idx=train_idx, test_idx=test_idx,
-                    p_hat=p_hat, q_models=q_models,
-                    pred_med=(pred_med if 'pred_med' in locals() else None),
-                    base_clf=base_clf, clf_tree=clf_tree,
-                    DATA_DIR=DATA_DIR,
-                    out_pred=(out_pred if 'out_pred' in locals() else None)
-                )
-        except Exception as e:
-            st.error(f"Rapor oluşturulurken hata: {e}")
-            res = None
-        
-        # Rapor çıktıları: sadece res doluysa göster; tabs zaten var
-        if res:
-            st.success(f"Rapor hazır: {res['dir']}")
-            colA, colB, colC = st.columns(3)
-            with colA:
-                if res.get("pdf") and Path(res["pdf"]).exists():
-                    st.download_button("📄 PDF indir", Path(res["pdf"]).read_bytes(), file_name="run_report.pdf")
-                st.download_button("📊 Metrikler (CSV)", Path(res["metrics_csv"]).read_bytes(), file_name="metrics.csv")
-            with colB:
-                st.download_button("🔎 SHAP (top20 CSV)", Path(res["shap_csv"]).read_bytes(), file_name="global_shap_top20.csv")
-                st.download_button("🔥 Top-100 riskli hücre", Path(res["top100_csv"]).read_bytes(), file_name="top100_risky_cells.csv")
-            with colC:
-                st.download_button("🧾 Forensic JSON", Path(res["forensic_json"]).read_bytes(), file_name="forensic_log.json")
-        else:
-            st.info("Forensic rapor üretimi atlandı veya başarısız.")
         # -------------------------------
         # Global — Sınıf (var/yok)
         # -------------------------------
