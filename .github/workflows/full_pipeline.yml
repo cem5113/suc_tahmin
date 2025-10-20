@@ -8,7 +8,7 @@ on:
       persist:
         description: "Sonuçları nasıl saklayalım?"
         type: choice
-        options: [artifact, commit, none]
+        options: [artifact,  release, commit, none]
         default: artifact
       force:
         description: "Manuel tetiklemede 07:00 kapısını YOK SAY"
@@ -844,24 +844,92 @@ jobs:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           HOT_THRESHOLD_C: "30"
         run: |
-          set -e
-          python scripts/fetch_weather_csv.py
+          set -euo pipefail
+          # Script çalışma dizinine yazsa bile CRIME_DATA_DIR’e kopyalayalım
+          python -u scripts/fetch_weather_csv.py
+          mkdir -p "${CRIME_DATA_DIR}"
+          # CRIME_DATA_DIR altında yoksa kopyala; varsa üzerine yaz
+          [ -f "${CRIME_DATA_DIR}/yarin.csv" ] && rm -f "${CRIME_DATA_DIR}/yarin.csv" || true
+          [ -f "${CRIME_DATA_DIR}/week.csv"  ] && rm -f "${CRIME_DATA_DIR}/week.csv"  || true
+          cp -f yarin.csv "${CRIME_DATA_DIR}/yarin.csv"
+          cp -f week.csv  "${CRIME_DATA_DIR}/week.csv"
+      
           echo "---- yarin.csv (head) ----"; head -n 5 "${CRIME_DATA_DIR}/yarin.csv" || true
-          echo "---- week.csv (head) ----";  head -n 5 "${CRIME_DATA_DIR}/week.csv" || true
+          echo "---- week.csv (head) ----";  head -n 5 "${CRIME_DATA_DIR}/week.csv"  || true
+
+
+      - name: 14.5) Upload forecast CSVs to Release (geçici kullanım için)
+        if: ${{ steps.gate.outputs.proceed == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.persist == 'release')) }}
+        env:
+          GH_TOKEN: ${{ github.token }}  # gh CLI için
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          RELEASE_TAG: forecast-latest   # sabit bir tag; her koşuda güncellenir
+          RELEASE_TITLE: "Latest Forecast CSVs"
+        run: |
+          set -euo pipefail
+          # gh CLI varsa devam; yoksa kur
+          if ! command -v gh >/dev/null; then
+            type -p curl >/dev/null && sudo curl -sSL https://raw.githubusercontent.com/cli/cli/trunk/script/install.sh | sh
+          fi
+      
+          # Release varsa kullan, yoksa oluştur (draft değil → yayınlanmış)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "ℹ️ Release var, güncellenecek: $RELEASE_TAG"
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes "Automated: yarin.csv & week.csv (latest)" || true
+          fi
+      
+          # Eski asset’leri sil (isim çakışmasını önlemek için)
+          for A in yarin.csv week.csv; do
+            if gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' | grep -Fx "$A" >/dev/null 2>&1; then
+              gh release delete-asset "$RELEASE_TAG" "$A" -y || true
+            fi
+          done
+      
+          # Yeni asset’leri yükle
+          gh release upload "$RELEASE_TAG" \
+            "${CRIME_DATA_DIR}/yarin.csv" \
+            "${CRIME_DATA_DIR}/week.csv" \
+            --clobber
+          echo "✅ Release’a yüklendi: $RELEASE_TAG → yarin.csv, week.csv"
 
       - name: 14.9) Build FR dataset (fr_crime_grid_full_labeled.csv)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          REQUIRE_FR: ${{ vars.REQUIRE_FR || '1' }}   # 0 yaparsan adımı atlar
         run: |
-          set -e
+          set -euo pipefail
+      
+          # Opsiyonel kapatma
+          if [ "${REQUIRE_FR}" = "0" ]; then
+            echo "↪️ REQUIRE_FR=0: FR dataset adımı atlandı."
+            exit 0
+          fi
+      
+          # Girdiler hazır mı? (14. adımda üretilmiş olmalı)
+          for f in "${CRIME_DATA_DIR}/yarin.csv" "${CRIME_DATA_DIR}/week.csv"; do
+            if [ ! -f "$f" ]; then
+              echo "⚠️ Girdi eksik: $f — FR dataset adımı zarifçe atlanıyor."
+              exit 0
+            fi
+          done
+      
           if [ -f scripts/update_forecast_crime.py ]; then
             python -u scripts/update_forecast_crime.py
           else
-            echo "❌ scripts/update_forecast_crime.py bulunamadı"; exit 2
+            echo "⚠️ scripts/update_forecast_crime.py yok — adım atlandı."
+            exit 0
           fi
-          echo "---- fr_crime_grid_full_labeled.csv (head) ----"
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_grid_full_labeled.csv" || true
+      
+          if [ -f "${CRIME_DATA_DIR}/fr_crime_grid_full_labeled.csv" ]; then
+            echo "---- fr_crime_grid_full_labeled.csv (head) ----"
+            head -n 5 "${CRIME_DATA_DIR}/fr_crime_grid_full_labeled.csv" || true
+          else
+            echo "⚠️ fr_crime_grid_full_labeled.csv üretilmedi."
+          fi
     
       - name: 15) Run post_patrol.py (uses risk_hourly + yarin/week)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
