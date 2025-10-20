@@ -223,6 +223,8 @@ if df_w is not None:
         m2 = merged.copy()
         if "date" not in m2.columns:
             m2["date"] = pd.to_datetime(m2["datetime"]).dt.date
+        m2["date"] = pd.to_datetime(m2["date"], errors="coerce")
+        df_w["date"] = pd.to_datetime(df_w["date"], errors="coerce")
         merged = m2.merge(df_w[["date"] + keep], on="date", how="left")
 
 # --- Population: GEOID ---
