@@ -909,7 +909,7 @@ jobs:
             exit 0
           fi
       
-          # Girdiler CRIME_DATA_DIR altında olmalı
+          # Girdiler kontrol
           for f in "${CRIME_DATA_DIR}/yarin.csv" "${CRIME_DATA_DIR}/week.csv"; do
             if [ ! -f "$f" ]; then
               echo "⚠️ Girdi eksik: $f — FR dataset adımı zarifçe atlanıyor."
@@ -917,13 +917,13 @@ jobs:
             fi
           done
       
-          # update_forecast_crime.py olası konumları
+          # update_forecast_crime.py olası konumları (+ repo kökü)
           CANDIDATES=(
             "scripts/update_forecast_crime.py"
             "${CRIME_DATA_DIR}/update_forecast_crime.py"
+            "./update_forecast_crime.py"
           )
       
-          FOUND=""
           for P in "${CANDIDATES[@]}"; do
             if [ -f "$P" ]; then
               echo "▶︎ Çalıştırılıyor: $P"
@@ -933,10 +933,18 @@ jobs:
             fi
           done
       
-          if [ -z "${FOUND}" ]; then
-            echo "❌ update_forecast_crime.py bulunamadı (scripts/ veya ${CRIME_DATA_DIR}/ altında)."
-            echo "Repo kökü (ilk iki seviye) listesi:"
-            find . -maxdepth 2 -type f -name "update_forecast_crime.py" -print || true
+          # Hiçbiri yoksa, repo kökünden hızlı tarama yap ve ilkini çalıştır
+          if [ -z "${FOUND:-}" ]; then
+            P=$(find . -maxdepth 3 -type f -name "update_forecast_crime.py" -print -quit)
+            if [ -n "$P" ]; then
+              echo "▶︎ Çalıştırılıyor (auto-detected): $P"
+              python -u "$P"
+              FOUND="yes"
+            fi
+          fi
+      
+          if [ -z "${FOUND:-}" ]; then
+            echo "❌ update_forecast_crime.py bulunamadı."
             exit 2
           fi
       
@@ -946,7 +954,32 @@ jobs:
           else
             echo "⚠️ fr_crime_grid_full_labeled.csv üretilmedi."
           fi
-          
+
+      # 14.96) Feature Analysis (FR) — SF'in arkasından
+      - name: 14.96) Feature analysis (FR pre-stacking)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -e
+          if [ -f "${CRIME_DATA_DIR}/fr_crime_grid_full_labeled.csv" ]; then
+            python -u run_feature_analysis.py --files "${CRIME_DATA_DIR}/fr_crime_grid_full_labeled.csv"
+          else
+            echo "↪️ FR grid yok; FA atlandı."
+          fi
+
+      - name: 14.97) Run stacking risk pipeline (FR)
+        if: ${{ steps.gate.outputs.proceed == 'true' && hashFiles(format('{0}/fr_crime_grid_full_labeled.csv', env.CRIME_DATA_DIR)) != '' }}
+        env:
+          STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/fr_crime_grid_full_labeled.csv
+          ENABLE_SPATIAL_TE: "1"
+          TE_ALPHA: "50"
+          NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+          ENABLE_TE_ABLATION: "1"
+          ABLASYON_BASIS: "ohe"
+        run: |
+          set -e
+          echo "▶︎ FR stacking başlıyor: ${STACKING_DATASET}"
+          python -u stacking_risk_pipeline.py
+
       - name: 15) Run post_patrol.py (uses risk_hourly + yarin/week)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
