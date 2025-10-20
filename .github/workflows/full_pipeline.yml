@@ -459,7 +459,7 @@ jobs:
           elif [ -f scripts/enrich_police_gov_06_to_07.py ]; then python -u scripts/enrich_police_gov_06_to_07.py;
           else echo "Polis/Gov adımı bulunamadı"; exit 2; fi
 
-      - name: 09) Hava durumu → sf_crime_08.csv
+      - name: 09) Hava durumu → sf_weather_5years.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}         # update_weather.py bunu okuyor
@@ -473,13 +473,14 @@ jobs:
           else
             echo "❌ Weather script not found"; exit 2
           fi
-
-          OUT="${CRIME_DATA_DIR}/sf_crime_08.csv"
-          test -f "$OUT" || { echo "❌ Beklenen çıktı yok: $OUT"; exit 2; }
-          echo "sf_crime_08.csv — ilk 5 satır:"
-          head -n 5 "$OUT" || true
-          echo "sf_crime_08.csv — satır sayısı:"
-          wc -l "$OUT" || true
+          
+          test -f "sf_weather_5years.csv" || { echo "❌ Beklenen çıktı yok: sf_weather_5years.csv"; exit 2; }
+          mkdir -p "${CRIME_DATA_DIR}"
+          cp -f sf_weather_5years.csv "${CRIME_DATA_DIR}/sf_weather_5years.csv"
+          echo "sf_weather_5years.csv — ilk 5 satır:"
+          head -n 5 "${CRIME_DATA_DIR}/sf_weather_5years.csv" || true
+          echo "sf_weather_5years.csv — satır sayısı:"
+          wc -l "${CRIME_DATA_DIR}/sf_weather_5years.csv" || true
 
       - name: Normalize grid outputs (put under CRIME_DATA_DIR)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
