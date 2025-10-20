@@ -179,12 +179,6 @@ all_df = all_df.loc[mask].copy()
 all_df.to_csv(OUT_CSV, index=False)
 print(f"💾 Kaydedildi: {OUT_CSV} — {len(all_df)} satır, {all_df['date'].min()} → {all_df['date'].max()}")
 
-crime_dir = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
-os.makedirs(crime_dir, exist_ok=True)
-out_08 = os.path.join(crime_dir, "sf_crime_08.csv")
-all_df.to_csv(out_08, index=False)
-print(f"📦 Ayrıca yazıldı: {out_08}")
-
 # === GitHub’a yükle ===
 if not GITHUB_TOKEN:
     raise SystemExit("❌ GITHUB_TOKEN tanımlı değil. Secrets’e ekleyin: GITHUB_TOKEN")
