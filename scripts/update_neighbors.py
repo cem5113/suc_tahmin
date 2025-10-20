@@ -5,34 +5,27 @@ import os, re
 from pathlib import Path
 import pandas as pd
 
-# ---------------------
-# Parametreler / ENV
-# ---------------------
-ROOT = Path(__file__).resolve().parent.parent  # proje kökü (app.py ile aynı seviye varsayımı)
+ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "crime_prediction_data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Girdi/Çıktı dosyaları
-IN_CSV  = Path(os.environ.get("NEIGHBOR_INPUT_CSV", str(DATA_DIR / "sf_crime_08.csv")))
-OUT_CSV = Path(os.environ.get("NEIGHBOR_OUTPUT_CSV", str(DATA_DIR / "sf_crime_08.csv")))  # in-place varsayılan
+IN_CSV  = Path(os.environ.get("NEIGHBOR_INPUT_CSV",  str(DATA_DIR / "sf_crime_08.csv")))
+OUT_CSV = Path(os.environ.get("NEIGHBOR_OUTPUT_CSV", str(DATA_DIR / "sf_crime_09.csv")))  # <-- 09 olarak yaz
 
-# Komşuluk dosyası (2 kolonlu beklenir: GEOID, NEIGHBOR_GEOID)
 NEIGHBOR_FILE = Path(os.environ.get("NEIGHBOR_FILE", str(DATA_DIR / "neighbors.csv")))
-
-# GEOID uzunluğu (pad/normalize için)
 GEOID_LEN = int(os.environ.get("GEOID_LEN", "11"))
-
-# Pencere ve gecikme (gün)
 WINDOW_DAYS = int(os.environ.get("NEIGHBOR_WINDOW_DAYS", "7"))
 LAG_DAYS    = int(os.environ.get("NEIGHBOR_LAG_DAYS", "1"))
 
 def _norm_geoid(s: pd.Series, L: int = GEOID_LEN) -> pd.Series:
-    return (
-        s.astype(str)
-         .str.extract(r"(\d+)", expand=False)
-         .str[:L]
-         .str.zfill(L)
-    )
+    return (s.astype(str).str.extract(r"(\d+)", expand=False).str[:L].str.zfill(L))
+
+def _pick_col(dcols, *cands):
+    low = {c.lower(): c for c in dcols}
+    for c in cands:
+        if c.lower() in low:
+            return low[c.lower()]
+    return None
 
 def main():
     if not IN_CSV.exists():
@@ -40,66 +33,68 @@ def main():
     if not NEIGHBOR_FILE.exists():
         raise FileNotFoundError(f"Komşuluk dosyası bulunamadı: {NEIGHBOR_FILE}")
 
-    # 1) Veri yükle
-    df = pd.read_csv(IN_CSV, low_memory=False, dtype={"GEOID": str})
-    if "date" not in df.columns and "datetime" in df.columns:
-        df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
-    else:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    df = pd.read_csv(IN_CSV, low_memory=False, dtype=str)
+    # tarih alanı
+    dcol = _pick_col(df.columns, "date", "datetime", "time")
+    if not dcol:
+        raise RuntimeError("Tarih kolonu bulunamadı (date/datetime/time)")
+    df["date"] = pd.to_datetime(df[dcol], errors="coerce").dt.date
 
-    df["GEOID"] = _norm_geoid(df["GEOID"], GEOID_LEN)
+    # GEOID alanı
+    gcol = _pick_col(df.columns, "GEOID", "geoid", "geography_id", "geoid10")
+    if not gcol:
+        raise RuntimeError("GEOID kolonu bulunamadı")
+    df["GEOID"] = _norm_geoid(df[gcol])
 
-    # 2) Günlük toplam (GEOID × date) — crime_count yoksa 0 kabul
-    if "crime_count" not in df.columns:
+    # crime_count yoksa 0
+    ccol = _pick_col(df.columns, "crime_count")
+    if not ccol:
         df["crime_count"] = 0
+        ccol = "crime_count"
+    df[ccol] = pd.to_numeric(df[ccol], errors="coerce").fillna(0).astype(int)
 
-    daily = (df[["GEOID", "date", "crime_count"]]
-             .groupby(["GEOID", "date"], as_index=False)["crime_count"].sum())
+    # Günlük toplam
+    daily = (df[["GEOID", "date", ccol]]
+             .groupby(["GEOID", "date"], as_index=False)[ccol].sum()
+             .rename(columns={ccol: "crime_count"}))
     daily["date"] = pd.to_datetime(daily["date"])
 
-    # 3) Komşuluk matrisi
-    nbr = pd.read_csv(NEIGHBOR_FILE, dtype={"GEOID": str, "NEIGHBOR_GEOID": str})
-    for c in ["GEOID", "NEIGHBOR_GEOID"]:
-        nbr[c] = _norm_geoid(nbr[c], GEOID_LEN)
+    # neighbors.csv oku (çeşitli başlık varyantları)
+    nbr = pd.read_csv(NEIGHBOR_FILE, dtype=str)
+    s = _pick_col(nbr.columns, "geoid", "GEOID", "src", "source")
+    t = _pick_col(nbr.columns, "neighbor", "NEIGHBOR_GEOID", "neighbor_geoid", "dst", "target")
+    if not s or not t:
+        raise RuntimeError(f"neighbors.csv başlıkları anlaşılamadı: {nbr.columns.tolist()}")
+    nbr = nbr.rename(columns={s: "geoid", t: "neighbor"})[["geoid", "neighbor"]].dropna()
+    for c in ("geoid", "neighbor"):
+        nbr[c] = _norm_geoid(nbr[c])
 
-    # 4) Komşu günlük serileri ile genişlet
-    d2 = nbr.merge(
-        daily.rename(columns={"GEOID": "NEIGHBOR_GEOID"}),
-        on="NEIGHBOR_GEOID",
-        how="left",
-        copy=False,
-    )
+    # Komşu serilerini bağla
+    d2 = nbr.merge(daily.rename(columns={"GEOID": "neighbor"}), left_on="neighbor", right_on="neighbor", how="left")
+    d2 = d2.rename(columns={"geoid": "GEOID"})  # ana GEOID
 
-    # 5) Rolling pencere (WINDOW_DAYS) ve gecikme (LAG_DAYS)
+    # Rolling + lag
     d2 = d2.sort_values(["GEOID", "date"])
-    def _agg_nei(x: pd.DataFrame) -> pd.DataFrame:
-        x = x.set_index("date").asfreq("D", fill_value=0)  # boş günleri 0 doldur
-        # önce komşu suçlarını topla → sonra lag uygula
-        roll = x["crime_count"].rolling(f"{WINDOW_DAYS}D").sum().shift(LAG_DAYS)
+    def _agg(x: pd.DataFrame) -> pd.DataFrame:
+        x = x.set_index("date").asfreq("D", fill_value=0)
+        roll = x["crime_count"].rolling(WINDOW_DAYS).sum().shift(LAG_DAYS)
         x["nei_7d_sum"] = roll
         return x.reset_index()
 
-    d3 = (d2.groupby("GEOID", group_keys=False)
-            .apply(_agg_nei)
-            .reset_index())
+    d3 = (d2.groupby("GEOID", group_keys=False).apply(_agg).reset_index(drop=True))
     d3["date"] = d3["date"].dt.date
-
-    # Aynı GEOID-date için birden çok komşudan gelen katkıyı toplayın
     d4 = (d3.groupby(["GEOID", "date"], as_index=False)["nei_7d_sum"].sum())
-    d4["nei_7d_sum"] = pd.to_numeric(d4["nei_7d_sum"], errors="coerce").fillna(0.0).astype(float)
+    d4["nei_7d_sum"] = pd.to_numeric(d4["nei_7d_sum"], errors="coerce").fillna(0.0)
 
-    # 6) Orijinal tabloya merge (in-place güncelle)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-    out = df.merge(d4, on=["GEOID", "date"], how="left")
-    out["nei_7d_sum"] = pd.to_numeric(out["nei_7d_sum"], errors="coerce").fillna(0.0).astype(float)
+    # Orijinal tabloya merge → 09
+    df_out = df.copy()
+    df_out["date"] = pd.to_datetime(df_out["date"]).dt.date
+    df_out = df_out.merge(d4, left_on=["GEOID", "date"], right_on=["GEOID", "date"], how="left")
+    df_out["nei_7d_sum"] = pd.to_numeric(df_out["nei_7d_sum"], errors="coerce").fillna(0.0)
 
-    # 7) Kaydet
     OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(OUT_CSV, index=False)
-    print(f"✅ neighbors eklendi → {OUT_CSV} (satır: {len(out)})")
-    # opsiyonel debug: günlük komşu özetini de yaz
-    (DATA_DIR / "sf_neighbors_daily.csv").write_text("")  # varlık işareti
-    d4.to_csv(DATA_DIR / "sf_neighbors_daily.csv", index=False)
+    df_out.to_csv(OUT_CSV, index=False)
+    print(f"✅ 08 → 09 tamam: {IN_CSV.name} → {OUT_CSV.name} (rows={len(df_out)})")
 
 if __name__ == "__main__":
     main()
