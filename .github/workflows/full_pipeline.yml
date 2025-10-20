@@ -203,9 +203,14 @@ jobs:
       # ---- PIPELINE ----
       - name: 01) Suç tabanı ve grid → sf_crime.csv + gridler
         if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          Y_CSV_NAME: ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv  
+          CACHE_WRITE_Y_ONLY: "1"                               
         run: |
           set -e
           python -u update_crime.py
+          echo "→ Yazılan Y:"
+          ls -l "${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv" || true
 
       - name: Restore 911 summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
