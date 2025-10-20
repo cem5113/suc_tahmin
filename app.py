@@ -1206,6 +1206,13 @@ if df09 is not None:
     train_btn = st.button("🧠 Modeli Eğit (örnek)")
 
     if train_btn:
+        tabs = st.tabs([
+            "Global — Sınıf",
+            "Global — Sayı",
+            "Local",
+            "PDP",
+            "Sınıf Kartları"
+        ])
         with tabs[0]:
             st.caption("Pozitif sınıf (Y>0) için ortalama mutlak SHAP değerleri — ilk 10")
             mean_abs = np.abs(shap_pos).mean(axis=0)
