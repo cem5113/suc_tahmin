@@ -462,10 +462,10 @@ jobs:
       - name: 09) Hava durumu → sf_crime_08.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
-          GITHUB_TOKEN: ${{ github.token }}        # <<— script bunu okuyor
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}# (aşağıdaki normalize aşamasıyla uyumlu)
+          GITHUB_TOKEN: ${{ github.token }}         # update_weather.py bunu okuyor
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }} # çıktı burada yazılacak
         run: |
-          set -e
+          set -euo pipefail
           if [ -f update_weather.py ]; then
             python -u update_weather.py
           elif [ -f scripts/update_weather.py ]; then
@@ -473,8 +473,13 @@ jobs:
           else
             echo "❌ Weather script not found"; exit 2
           fi
+
+          OUT="${CRIME_DATA_DIR}/sf_crime_08.csv"
+          test -f "$OUT" || { echo "❌ Beklenen çıktı yok: $OUT"; exit 2; }
           echo "sf_crime_08.csv — ilk 5 satır:"
-          head -n 5 "${CRIME_DATA_DIR}/sf_crime_08.csv" || head -n 5 sf_crime_08.csv || true
+          head -n 5 "$OUT" || true
+          echo "sf_crime_08.csv — satır sayısı:"
+          wc -l "$OUT" || true
 
       - name: Normalize grid outputs (put under CRIME_DATA_DIR)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -500,7 +505,7 @@ jobs:
             echo "⚠️ sf_crime_grid_full_labeled.csv bulunamadı; stacking bazı görünümleri atlayabilir."
           fi
 
-      - name: 10) sf_crime_09 üretimi (common.py)
+      - name: 10) sf_crime_08 üretimi (common.py)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
@@ -508,28 +513,28 @@ jobs:
           import os
           import pandas as pd
           from pathlib import Path
-          from scripts.common import clean_and_save_crime_09
+          from scripts.common import clean_and_save_crime_08
 
           CRIME_DIR = os.getenv("CRIME_DATA_DIR","crime_prediction_data")
           candidates = [
-              Path(CRIME_DIR) / "sf_crime_08.csv",
-              Path("crime_prediction_data") / "sf_crime_08.csv",
-              Path("crime_data") / "sf_crime_08.csv",
-              Path("sf_crime_08.csv"),
-              Path("outputs") / "sf_crime_08.csv",
+              Path(CRIME_DIR) / "sf_crime_07.csv",
+              Path("crime_prediction_data") / "sf_crime_07.csv",
+              Path("crime_data") / "sf_crime_07.csv",
+              Path("sf_crime_07.csv"),
+              Path("outputs") / "sf_crime_07.csv",
           ]
           src_path = next((p for p in candidates if p.exists()), None)
           if src_path is None:
-              raise FileNotFoundError("sf_crime_08.csv not found in known locations")
+              raise FileNotFoundError("sf_crime_07.csv not found in known locations")
           src = str(src_path)
-          dst = str(Path(CRIME_DIR)/"sf_crime_09.csv")
+          dst = str(Path(CRIME_DIR)/"sf_crime_08.csv")
 
-          clean_and_save_crime_09(src, dst)
-          print("✅ sf_crime_09 hazır →", dst)
+          clean_and_save_crime_07(src, dst)
+          print("✅ sf_crime_08 hazır →", dst)
           try:
               df = pd.read_csv(dst, low_memory=False)
               with pd.option_context("display.max_columns", None, "display.width", 2000):
-                  print("📄 sf_crime_09.csv — ilk 5 satır:")
+                  print("📄 sf_crime_08.csv — ilk 5 satır:")
                   print(df.head(5).to_string(index=False))
           except Exception as e:
               print(f"⚠️ Önizleme okunamadı: {e}")
@@ -907,7 +912,6 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
             ${{ env.CRIME_DATA_DIR }}/sf_population.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_09.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_07.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_06.csv
