@@ -1,329 +1,506 @@
-# file: run_feature_analysis.py
-import os, sys, json, math, warnings, argparse
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+crime_feature_analysis.py
+
+San Francisco suç tahmin verisi üzerinde özellik (feature) analizi, 
+ön işleme ve açıklanabilirlik (SHAP) çıktıları üreten komut satırı aracı.
+
+Kullanım örneği:
+    python crime_feature_analysis.py \
+        --csv fr_crime_grid_full_labeled.csv \
+        --target Y_label \
+        --id_col id \
+        --sample_n 300000 \
+        --test_size 0.2 \
+        --random_state 42 \
+        --outdir outputs_feature_analysis
+
+Notlar:
+- SHAP opsiyoneldir; yüklü değilse SHAP grafiklerini atlar.
+- XGBoost yüklü değilse LightGBM veya RandomForest'a otomatik düşer (kurulu olana).
+- Kategorizasyon: category, subcategory, crime_mix gibi metinsel sütunlar One-Hot ile işlenir.
+- "Q1 (..)" gibi kantil etiketleri sayısal sıraya çevrilir (Q1->1, ..., Q5->5).
+- "Assault(67%), ..." gibi karışık metinleri baseline olarak token sayımı (n-gram değil) ile basitçe işaretler.
+"""
+
+import argparse
+import re
+import json
+import warnings
+warnings.filterwarnings("ignore")
+
 import numpy as np
 import pandas as pd
 
-from sklearn.model_selection import GroupKFold, train_test_split
-from sklearn.metrics import (
-    roc_auc_score, average_precision_score, precision_recall_curve,
-    roc_curve, brier_score_loss, f1_score, precision_score, recall_score
-)
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.linear_model import LogisticRegression
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from pathlib import Path
+from typing import List, Tuple
+
+# Model ve pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, f1_score, precision_recall_fscore_support, classification_report
+)
+from sklearn.impute import SimpleImputer
+
+# Alternatif algoritmalar (yüklü olanı seçilecek)
+try:
+    from xgboost import XGBClassifier
+    HAS_XGB = True
+except Exception:
+    HAS_XGB = False
 
 try:
-    import lightgbm as lgb
-    HAS_LGB = True
+    from lightgbm import LGBMClassifier
+    HAS_LGBM = True
 except Exception:
-    HAS_LGB = False
+    HAS_LGBM = False
 
+from sklearn.ensemble import RandomForestClassifier
+
+# SHAP opsiyonel
 try:
     import shap
     HAS_SHAP = True
 except Exception:
     HAS_SHAP = False
 
-warnings.filterwarnings("ignore")
+import matplotlib
+matplotlib.use("Agg")  # dosyaya yazmak için
+import matplotlib.pyplot as plt
 
-# =========================
-# Defaults (env/backward compat)
-# =========================
-DEFAULT_DATA_FILES = [
-    "crime_prediction_data/sf_crime_grid_full_labeled.csv",
-    "crime_prediction_data/fr_crime_grid_full_labeled.csv",
-]
+from sklearn.inspection import permutation_importance
+import joblib
 
-TARGET_COL = "Y_label"
-DATETIME_COL = "datetime"
-GEOID_COL = "GEOID"
-ID_COLS = ["id"]
-DROP_ALWAYS = [TARGET_COL, DATETIME_COL, GEOID_COL] + ID_COLS
 
-TEST_DAYS = 30
-TOPK_RATIO = 0.05
-PRECISION_TARGET = 0.5
-RANDOM_STATE = 42
+# ----------------------- Yardımcı Fonksiyonlar -----------------------
 
-# Top-k sweep
-K_GRID = np.linspace(0.01, 0.25, 25)
-BENEFIT_TP = 1.0
-COST_FP = 0.25
-COST_FN = 2.0
-PRECISION_MIN = 0.50
-RECALL_MIN = None
+def sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sütun adlarını modellemeye uygun hale getirir.
+    - boşluk, parantez, eğik çizgi, yüzde vb. karakterleri alt çizgiye çevirir.
+    - birden fazla alt çizgiyi tek alt çizgiye indirger.
+    - tekrar eden sütun adlarını _dupN olarak numaralar.
+    """
+    original_cols = df.columns.tolist()
+    new_cols = []
+    seen = {}
+    for c in original_cols:
+        nc = re.sub(r"[^\w]+", "_", str(c), flags=re.UNICODE)  # non-word -> _
+        nc = re.sub(r"_+", "_", nc).strip("_")
+        if nc in seen:
+            seen[nc] += 1
+            nc = f"{nc}_dup{seen[nc]}"
+        else:
+            seen[nc] = 0
+        new_cols.append(nc)
+    df.columns = new_cols
+    return df
 
-# =========================
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Feature analysis + top-k optimization")
-    p.add_argument("--files", nargs="+", default=DEFAULT_DATA_FILES,
-                   help="Analiz edilecek CSV yolları (birden çok dosya verilebilir)")
-    return p.parse_args()
+def extract_quantile_label(val):
+    """
+    "Q1 (..)" -> 1, "Q5 (..)" -> 5; değilse None döner.
+    """
+    if pd.isna(val):
+        return np.nan
+    m = re.match(r"Q(\d+)", str(val).strip())
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return np.nan
+    return np.nan
 
-def read_df(path):
-    try:
-        cols = pd.read_csv(path, nrows=1).columns.tolist()
-    except Exception:
-        raise
-    parse_dates = [DATETIME_COL] if DATETIME_COL in cols else []
-    return pd.read_csv(path, parse_dates=parse_dates, low_memory=False)
 
-def basic_profile(df, outdir):
-    prof = {"n_rows": int(len(df)),
-            "positive_rate": float(df[TARGET_COL].mean()) if TARGET_COL in df.columns else None}
-    df.isna().mean().sort_values(ascending=False)\
-        .to_csv(os.path.join(outdir, "missingness.csv"), index_label="column", header=["missing_rate"])
-    df.describe(include="all").to_csv(os.path.join(outdir, "describe.csv"))
-    with open(os.path.join(outdir, "profile.json"), "w") as f:
-        json.dump(prof, f, indent=2)
-    return prof
+def mixed_text_to_tokens(val: str) -> List[str]:
+    """
+    "Assault(67%), Disorderly Conduct(33%)" gibi metinleri tokenlara böler.
+    Yalnızca kategori isimlerini alır (yüzdeleri atar).
+    """
+    if pd.isna(val):
+        return []
+    parts = [p.strip() for p in str(val).split(",")]
+    tokens = []
+    for p in parts:
+        # "Assault(67%)" -> "Assault"
+        t = re.sub(r"\(.*?\)", "", p).strip()
+        if t:
+            tokens.append(t)
+    return tokens
 
-def make_splits(df):
-    if DATETIME_COL in df.columns and np.issubdtype(df[DATETIME_COL].dtype, np.datetime64):
-        df_sorted = df.sort_values(DATETIME_COL)
-        cutoff = df_sorted[DATETIME_COL].max() - pd.Timedelta(days=TEST_DAYS)
-        train_idx = df_sorted[DATETIME_COL] <= cutoff
-        test_idx  = df_sorted[DATETIME_COL] > cutoff
-        return df_sorted[train_idx], df_sorted[test_idx], "time_holdout", cutoff
-    if GEOID_COL in df.columns:
-        unique_geoids = df[GEOID_COL].dropna().unique()
-        train_geo, test_geo = train_test_split(unique_geoids, test_size=0.2, random_state=RANDOM_STATE)
-        train = df[df[GEOID_COL].isin(train_geo)]
-        test  = df[df[GEOID_COL].isin(test_geo)]
-        return train, test, "group_holdout_geoid", None
-    train, test = train_test_split(df, test_size=0.2, random_state=RANDOM_STATE, stratify=df[TARGET_COL])
-    return train, test, "random_holdout", None
 
-def build_preprocessor(X):
-    num_cols = [c for c in X.columns if X[c].dtype.kind in "fc" or np.issubdtype(X[c].dtype, np.number)]
-    cat_cols = [c for c in X.columns if c not in num_cols]
-    numeric = Pipeline([("imputer", SimpleImputer(strategy="median"))])
-    categorical = Pipeline([("imputer", SimpleImputer(strategy="most_frequent")),
-                            ("ohe", OneHotEncoder(handle_unknown="ignore"))])
-    return ColumnTransformer(
-        transformers=[("num", numeric, num_cols), ("cat", categorical, cat_cols)],
+def make_mixed_text_indicators(series: pd.Series, top_k: int = 15) -> pd.DataFrame:
+    """
+    En sık geçen top_k token için 0/1 sütunlar üretir.
+    """
+    all_tokens = []
+    for v in series.fillna("").tolist():
+        all_tokens.extend(mixed_text_to_tokens(v))
+    if not all_tokens:
+        return pd.DataFrame(index=series.index)
+
+    vc = pd.Series(all_tokens).value_counts()
+    top = vc.index[:top_k].tolist()
+    out = pd.DataFrame(index=series.index)
+    for token in top:
+        out[f"mix_{re.sub(r'[^A-Za-z0-9_]+','_',token)}"] = series.fillna("").apply(
+            lambda s: 1 if token in mixed_text_to_tokens(s) else 0
+        )
+    return out
+
+
+def coerce_numeric(df: pd.DataFrame, exclude_cols: List[str]) -> Tuple[pd.DataFrame, List[str], List[str]]:
+    """
+    Sayısal dönüştürülebilen sütunları numeric'e çevirir. Dönüşemeyenler kategorik kalır.
+    exclude_cols içindekilere dokunmaz.
+    """
+    numeric_cols, categorical_cols = [], []
+    for c in df.columns:
+        if c in exclude_cols:
+            categorical_cols.append(c)
+            continue
+        # kantil etiketleri varsa önce onları sayıya çevirmeyi dene
+        if df[c].dtype == object:
+            qvals = df[c].map(extract_quantile_label)
+            if qvals.notna().mean() > 0.6:
+                df[c] = qvals
+        # sayıya çevirme denemesi
+        if df[c].dtype == object:
+            conv = pd.to_numeric(df[c], errors="coerce")
+            if conv.notna().mean() > 0.8:  # çoğunluğu sayısalsa sayısal olarak al
+                df[c] = conv
+                numeric_cols.append(c)
+            else:
+                categorical_cols.append(c)
+        else:
+            numeric_cols.append(c)
+    return df, numeric_cols, categorical_cols
+
+
+def pick_model():
+    """
+    Kurulu olan en iyi algoritmayı seç.
+    Öncelik: XGBoost > LightGBM > RandomForest
+    """
+    if HAS_XGB:
+        return "xgb", XGBClassifier(
+            n_estimators=600,
+            max_depth=6,
+            learning_rate=0.07,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_lambda=1.0,
+            tree_method="hist",
+            objective="binary:logistic",
+            eval_metric="auc",
+            n_jobs=-1
+        )
+    if HAS_LGBM:
+        return "lgbm", LGBMClassifier(
+            n_estimators=1000,
+            max_depth=-1,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_lambda=1.0,
+            n_jobs=-1
+        )
+    return "rf", RandomForestClassifier(
+        n_estimators=400,
+        max_depth=None,
+        n_jobs=-1,
+        class_weight="balanced_subsample",
+        random_state=42
+    )
+
+
+def compute_class_weight(y: pd.Series) -> float:
+    """
+    XGBoost için scale_pos_weight ~ (neg/pos)
+    """
+    pos = (y == 1).sum()
+    neg = (y == 0).sum()
+    if pos == 0:
+        return 1.0
+    return float(neg) / float(pos)
+
+
+def plot_and_save_importance(importances: pd.Series, out_png: Path, top_n: int = 30, title: str = "Feature Importance"):
+    top = importances.sort_values(ascending=False).head(top_n)
+    plt.figure(figsize=(8, max(4, int(0.25 * top_n))))
+    top.iloc[::-1].plot(kind="barh")  # tek plot, renk belirtme yok
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=200)
+    plt.close()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--csv", type=str, required=True, help="Girdi CSV yolu (örn. fr_crime_grid_full_labeled.csv)")
+    parser.add_argument("--target", type=str, default="Y_label", help="Hedef sütun adı (binary 0/1)")
+    parser.add_argument("--id_col", type=str, default="id", help="ID sütunu (varsa)")
+    parser.add_argument("--sample_n", type=int, default=0, help="İsteğe bağlı örneklem boyutu (0=hepsi)")
+    parser.add_argument("--test_size", type=float, default=0.2, help="Test oranı")
+    parser.add_argument("--random_state", type=int, default=42, help="Rastgele tohum")
+    parser.add_argument("--outdir", type=str, default="outputs_feature_analysis", help="Çıktı klasörü")
+    args = parser.parse_args()
+
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # 1) Veri yükleme
+    df = pd.read_csv(args.csv, low_memory=False)
+    df = sanitize_columns(df)
+
+    # 2) Hedef ve potansiyel sızıntı sütunları
+    target = args.target if args.target in df.columns else None
+    if target is None:
+        raise ValueError(f"Hedef sütun '{args.target}' bulunamadı. Mevcut sütunlar: {df.columns.tolist()[:20]} ...")
+
+    # Bilinen zaman damgaları (modelde kullanmak istemezsek buradan çıkarabiliriz)
+    drop_exact = [c for c in ["date", "time", "datetime"] if c in df.columns]
+
+    # Coğrafi koordinatlar (opsiyonel olarak düş)
+    coord_cols = [c for c in df.columns if re.search(r"^latitude|^longitude", c)]
+    # Hedef kaçağı: Y_label türevleri
+    leakage_cols = [c for c in df.columns if c.startswith(target) and c != target]
+
+    # ID sütunu
+    if args.id_col in df.columns:
+        drop_exact.append(args.id_col)
+
+    # 3) Basit örnekleme (isteğe bağlı)
+    if args.sample_n and args.sample_n > 0 and args.sample_n < len(df):
+        df = df.sample(n=args.sample_n, random_state=args.random_state)
+
+    # 4) Karışık metin alanları ve kategorik metinler
+    text_like_cols = []
+    for cand in ["crime_mix", "crime_mix_x", "crime_mix_y"]:
+        if cand in df.columns:
+            text_like_cols.append(cand)
+
+    mix_df_list = []
+    for col in text_like_cols:
+        md = make_mixed_text_indicators(df[col], top_k=15)
+        if md.shape[1] > 0:
+            mix_df_list.append(md.add_prefix(f"{col}_"))
+    if mix_df_list:
+        mix_block = pd.concat(mix_df_list, axis=1)
+        df = pd.concat([df, mix_block], axis=1)
+
+    # 5) Düşülecek sütunlar
+    to_drop = set(drop_exact + coord_cols + leakage_cols + text_like_cols)
+    keep_cols = [c for c in df.columns if c not in to_drop]
+    df = df[keep_cols + [target]]  # hedefi sonda garanti et
+
+    # 6) Hedef/özellik ayırma
+    y = df[target].copy()
+    X = df.drop(columns=[target]).copy()
+
+    # 7) Sayısal/kategorik ayrımı ve sayısallaştırma
+    #    category, subcategory gibi sütunları kategorik olarak zorla
+    force_categorical = [c for c in ["category", "subcategory", "season", "season_x", "season_y",
+                                     "day_of_week", "day_of_week_x", "day_of_week_y",
+                                     "hour_range", "hour_range_x", "hour_range_y"]
+                         if c in X.columns]
+
+    X, numeric_cols, categorical_cols = coerce_numeric(X, exclude_cols=force_categorical)
+
+    # Bazı bool benzeri sütunlar 0/1 float/str olabilir -> sayıya çevir
+    for col in X.columns:
+        if X[col].dtype == object and set(X[col].dropna().unique()) <= {"0", "1", "0.0", "1.0"}:
+            X[col] = pd.to_numeric(X[col], errors="coerce")
+
+    # 8) Eğitim/validasyon ayrımı
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=args.test_size, random_state=args.random_state, stratify=y
+    )
+
+    # 9) Pipeline
+    num_pipe = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler(with_mean=False))
+    ])
+    cat_pipe = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("ohe", OneHotEncoder(handle_unknown="ignore", sparse=True))
+    ])
+    pre = ColumnTransformer(
+        transformers=[
+            ("num", num_pipe, [c for c in numeric_cols if c in X.columns]),
+            ("cat", cat_pipe, [c for c in categorical_cols if c in X.columns]),
+        ],
         remainder="drop"
     )
 
-def train_lgb(pre, X_train, y_train):
-    if not HAS_LGB:
-        model = Pipeline([("pre", pre), ("clf", LogisticRegression(max_iter=1000, class_weight="balanced"))])
-        model.fit(X_train, y_train)
-        return model, "logreg_balanced"
-    clf = lgb.LGBMClassifier(
-        n_estimators=1000, learning_rate=0.05, num_leaves=63,
-        subsample=0.8, colsample_bytree=0.8, objective="binary",
-        class_weight="balanced", random_state=RANDOM_STATE
-    )
-    model = Pipeline([("pre", pre), ("clf", clf)])
-    model.fit(X_train, y_train)
-    return model, "lightgbm_balanced"
+    model_name, base_model = pick_model()
 
-def calibration_curve_simple(y_true, y_prob, n_bins=20):
-    df = pd.DataFrame({"y":y_true, "p":y_prob}).sort_values("p")
-    df["bin"] = pd.qcut(df["p"], q=n_bins, duplicates="drop")
-    grp = df.groupby("bin")
-    return grp["p"].mean().values, grp["y"].mean().values
+    # Dengesizlik ayarı (XGB/LGBM desteklerse)
+    spw = compute_class_weight(y_train)
+    if model_name == "xgb":
+        base_model.set_params(scale_pos_weight=spw)
+    elif model_name == "lgbm":
+        base_model.set_params(class_weight=None)  # LGBM farklı ölçekler kullanabilir
+    elif model_name == "rf":
+        pass
 
-def evaluate(model, X_test, y_test, outdir, label="base"):
-    proba = model.predict_proba(X_test)[:,1]
-    roc_auc = roc_auc_score(y_test, proba)
-    pr_auc  = average_precision_score(y_test, proba)
-    fpr, tpr, roc_th = roc_curve(y_test, proba)
-    pr_prec, pr_rec, pr_th = precision_recall_curve(y_test, proba)
-    pm, fp = calibration_curve_simple(y_test, proba, n_bins=20)
+    clf = Pipeline(steps=[("pre", pre), ("model", base_model)])
 
-    pd.DataFrame({"fpr":fpr, "tpr":tpr, "threshold":roc_th}).to_csv(os.path.join(outdir, f"roc_curve_{label}.csv"), index=False)
-    pd.DataFrame({"recall":pr_rec, "precision":pr_prec}).to_csv(os.path.join(outdir, f"pr_curve_{label}.csv"), index=False)
-    pd.DataFrame({"prob_mean":pm, "frac_pos":fp}).to_csv(os.path.join(outdir, f"calibration_{label}.csv"), index=False)
-    with open(os.path.join(outdir, f"metrics_{label}.json"), "w") as f:
-        json.dump({"roc_auc":float(roc_auc), "auprc":float(pr_auc), "brier":float(brier_score_loss(y_test, proba))}, f, indent=2)
-    return proba
+    # 10) Eğitim
+    clf.fit(X_train, y_train)
 
-def choose_thresholds(y_true, y_prob, precision_target=PRECISION_TARGET, topk_ratio=TOPK_RATIO):
-    pr_prec, pr_rec, pr_th = precision_recall_curve(y_true, y_prob)
-    f1_vals = 2 * (pr_prec * pr_rec) / (pr_prec + pr_rec + 1e-12)
-    f1_idx = np.nanargmax(f1_vals)
-    th_f1 = pr_th[max(f1_idx-1, 0)] if f1_idx < len(pr_th) else 0.5
+    # 11) Değerlendirme
+    y_proba = clf.predict_proba(X_test)[:, 1] if hasattr(clf.named_steps["model"], "predict_proba") else clf.predict(X_test)
+    y_pred = (y_proba >= 0.5).astype(int) if y_proba.ndim == 1 else y_proba
 
-    th_prec = None
-    for p, r, th in zip(pr_prec[:-1], pr_rec[:-1], pr_th):
-        if p >= precision_target:
-            th_prec = float(th); break
+    roc_auc = roc_auc_score(y_test, y_proba) if y_proba.ndim == 1 else np.nan
+    pr_auc = average_precision_score(y_test, y_proba) if y_proba.ndim == 1 else np.nan
+    f1 = f1_score(y_test, y_pred)
+    prec, rec, f1s, _ = precision_recall_fscore_support(y_test, y_pred, average="binary", zero_division=0)
 
-    n = len(y_prob)
-    k = max(1, int(math.ceil(topk_ratio * n)))
-    topk_idx = np.argsort(-y_prob)[:k]
-    th_topk = float(np.min(y_prob[topk_idx]))
-
-    return {"threshold_f1": float(th_f1),
-            "threshold_precision_target": th_prec,
-            "threshold_topk": th_topk,
-            "topk_k": int(k)}
-
-def confusion_at_threshold(y_true, y_prob, th):
-    y_hat = (y_prob >= th).astype(int)
-    return {"precision": float(precision_score(y_true, y_hat, zero_division=0)),
-            "recall": float(recall_score(y_true, y_hat, zero_division=0)),
-            "f1": float(f1_score(y_true, y_hat, zero_division=0))}
-
-def export_feature_importance(model, X_train, outpath):
-    try:
-        pre = model.named_steps["pre"]; clf = model.named_steps["clf"]
-        ohe = None
-        for name, trans, cols in pre.transformers_:
-            if name == "cat": ohe = trans.named_steps.get("ohe")
-        num_cols = pre.transformers_[0][2]
-        cat_cols = pre.transformers_[1][2] if len(pre.transformers_)>1 else []
-        ohe_names = list(ohe.get_feature_names_out(cat_cols)) if ohe is not None else list(cat_cols)
-        feat_names = list(num_cols) + ohe_names
-        if hasattr(clf, "feature_importances_"):
-            imp = pd.DataFrame({"feature": feat_names, "importance": clf.feature_importances_})
-            imp.sort_values("importance", ascending=False).to_csv(outpath, index=False)
-        else:
-            pd.DataFrame({"feature": feat_names}).to_csv(outpath, index=False)
-    except Exception as e:
-        pd.DataFrame({"error":[str(e)]}).to_csv(outpath.replace(".csv", "_error.csv"), index=False)
-
-def maybe_shap(model, X_sample, outdir, filename_prefix="shap_global"):
-    if not HAS_SHAP: return
-    try:
-        pre = model.named_steps["pre"]; clf = model.named_steps["clf"]
-        X_enc = pre.transform(X_sample)
-        explainer = shap.TreeExplainer(clf) if hasattr(clf, "predict_proba") else shap.Explainer(clf)
-        shap_values = explainer(X_enc)
-        sv = np.abs(shap_values.values).mean(axis=0)
-        names = []
-        for name, trans, cols in pre.transformers_:
-            if name == "num": names += list(cols)
-            elif name == "cat":
-                ohe = trans.named_steps.get("ohe")
-                names += list(ohe.get_feature_names_out(cols)) if ohe is not None else list(cols)
-        pd.DataFrame({"feature": names, "mean_abs_shap": sv}).sort_values("mean_abs_shap", ascending=False)\
-          .to_csv(os.path.join(outdir, f"{filename_prefix}.csv"), index=False)
-    except Exception as e:
-        with open(os.path.join(outdir, f"{filename_prefix}_error.txt"), "w") as f:
-            f.write(str(e))
-
-# ---- Top-k optimization helpers ----
-def topk_metrics_at_ratio(y_true, y_prob, k_ratio):
-    n = len(y_prob); k = max(1, int(math.ceil(k_ratio * n)))
-    order = np.argsort(-y_prob); sel = np.zeros(n, dtype=int); sel[order[:k]] = 1
-    TP = int(((sel == 1) & (y_true == 1)).sum())
-    FP = int(((sel == 1) & (y_true == 0)).sum())
-    FN = int(((sel == 0) & (y_true == 1)).sum())
-    TN = int(((sel == 0) & (y_true == 0)).sum())
-    prec = precision_score(y_true, sel, zero_division=0)
-    rec  = recall_score(y_true, sel, zero_division=0)
-    f1   = f1_score(y_true, sel, zero_division=0)
-    denom = math.sqrt((TP+FP)*(TP+FN)*(TN+FP)*(TN+FN)) or 1.0
-    mcc = ((TP*TN) - (FP*FN)) / denom
-    utility = BENEFIT_TP * TP - COST_FP * FP - COST_FN * FN
-    thr_equiv = float(np.min(y_prob[order[:k]]))
-    return {"k_ratio": float(k_ratio), "k_count": int(k),
-            "precision_at_k": float(prec), "recall_at_k": float(rec),
-            "f1_at_k": float(f1), "mcc_at_k": float(mcc),
-            "utility_at_k": float(utility), "threshold_equiv": thr_equiv}
-
-def pick_best_k(grid_rows):
-    df = pd.DataFrame(grid_rows)
-    mask = np.ones(len(df), dtype=bool)
-    if PRECISION_MIN is not None: mask &= (df["precision_at_k"] >= PRECISION_MIN)
-    if RECALL_MIN is not None:    mask &= (df["recall_at_k"] >= RECALL_MIN)
-    cand = df[mask] if mask.any() else df
-    cand = cand.sort_values(["utility_at_k", "f1_at_k"], ascending=[False, False]).reset_index(drop=True)
-    return cand.iloc[0].to_dict(), df
-
-def run_one(path):
-    if not os.path.isfile(path):
-        print(f"↪️ Skip (missing): {path}")
-        return
-    print(f"=== Processing: {path}")
-    name = os.path.splitext(os.path.basename(path))[0]
-    outdir = os.path.join("feature_analysis_outputs", name)
-    os.makedirs(outdir, exist_ok=True)
-
-    df = read_df(path)
-    assert TARGET_COL in df.columns, f"{TARGET_COL} bulunamadı."
-    drop_cols = [c for c in DROP_ALWAYS if c in df.columns]
-    X_cols = [c for c in df.columns if c not in drop_cols]
-
-    basic_profile(df, outdir)
-
-    train_df, test_df, split_kind, cutoff = make_splits(df)
-    with open(os.path.join(outdir, "split_info.json"), "w") as f:
-        json.dump({"split_kind": split_kind, "cutoff": str(cutoff) if cutoff is not None else None,
-                   "train_rows": int(len(train_df)), "test_rows": int(len(test_df))}, f, indent=2)
-
-    X_train, y_train = train_df[X_cols], train_df[TARGET_COL].astype(int).values
-    X_test,  y_test  = test_df[X_cols],  test_df[TARGET_COL].astype(int).values
-
-    pre = build_preprocessor(X_train)
-    model, model_name = train_lgb(pre, X_train, y_train)
-
-    proba = evaluate(model, X_test, y_test, outdir, label=model_name)
-
-    ths = choose_thresholds(y_test, proba)
-    th_summ = {k: (v if v is None else float(v)) for k, v in ths.items()}
-    details = {}
-    for key in ["threshold_f1", "threshold_precision_target", "threshold_topk"]:
-        th = ths.get(key, None)
-        if th is not None:
-            details[key] = confusion_at_threshold(y_test, proba, th)
-    with open(os.path.join(outdir, "thresholds.json"), "w") as f:
-        json.dump({"thresholds": th_summ, "metrics_at_thresholds": details}, f, indent=2)
-
-    # Top-k optimization
-    grid_rows = [topk_metrics_at_ratio(y_test, proba, kr) for kr in K_GRID]
-    best_k_row, df_grid = pick_best_k(grid_rows)
-    pd.DataFrame(grid_rows).to_csv(os.path.join(outdir, "k_sweep_metrics.csv"), index=False)
-    with open(os.path.join(outdir, "best_k_summary.json"), "w") as f:
-        json.dump(best_k_row, f, indent=2)
-    jury_report = {
-        "decision_rule": "Maximize expected utility under constraints",
-        "constraints": {"precision_min": PRECISION_MIN, "recall_min": RECALL_MIN},
-        "chosen_k_ratio": best_k_row["k_ratio"],
-        "topk_size": best_k_row["k_count"],
-        "equivalent_threshold": best_k_row["threshold_equiv"],
-        "precision_at_k": best_k_row["precision_at_k"],
-        "recall_at_k": best_k_row["recall_at_k"],
-        "f1_at_k": best_k_row["f1_at_k"],
-        "mcc_at_k": best_k_row["mcc_at_k"],
-        "utility_at_k": best_k_row["utility_at_k"]
+    metrics = {
+        "model": model_name,
+        "roc_auc": float(roc_auc) if roc_auc==roc_auc else None,
+        "pr_auc": float(pr_auc) if pr_auc==pr_auc else None,
+        "f1": float(f1),
+        "precision": float(prec),
+        "recall": float(rec),
+        "scale_pos_weight": float(spw),
+        "n_train": int(len(X_train)),
+        "n_test": int(len(X_test))
     }
-    with open(os.path.join(outdir, "jury_friendly_summary.json"), "w") as f:
-        json.dump(jury_report, f, indent=2)
+    with open(outdir / "metrics.json", "w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
 
-    # Export top-k rows
-    n = len(proba); k = best_k_row["k_count"]; order = np.argsort(-proba); top_idx = order[:k]
-    export_cols = ["pred_proba"]
-    if GEOID_COL in test_df.columns: export_cols.append(GEOID_COL)
-    if DATETIME_COL in test_df.columns: export_cols.append(DATETIME_COL)
-    top_rows = test_df.iloc[top_idx].copy(); top_rows["pred_proba"] = proba[top_idx]
-    top_rows[export_cols].sort_values("pred_proba", ascending=False)\
-        .to_csv(os.path.join(outdir, "top_predictions_at_best_k.csv"), index=False)
+    # 12) Önem grafikleri (model-based)
+    #    Not: Pipeline içindeki OHE sonrası feature isimlerini almak
+    #    için ColumnTransformer'dan üretilen adları kullanacağız.
+    feature_names = []
+    try:
+        pre_fit = clf.named_steps["pre"]
+        ohe = pre_fit.named_transformers_["cat"].named_steps["ohe"]
+        num_cols_final = pre_fit.transformers_[0][2]
+        cat_cols_final = pre_fit.transformers_[1][2]
+        ohe_feature_names = ohe.get_feature_names_out(cat_cols_final).tolist()
+        feature_names = list(num_cols_final) + ohe_feature_names
+    except Exception:
+        # Yedek: orijinal sütunlar
+        feature_names = [f"f{i}" for i in range(clf.named_steps["pre"].transform(X_train).shape[1])]
 
-    export_feature_importance(model, X_train, os.path.join(outdir, "feature_importance.csv"))
+    # Model türüne göre feature importance
+    importances = None
+    if model_name in ("xgb", "lgbm", "rf"):
+        try:
+            if model_name == "xgb":
+                booster = clf.named_steps["model"]
+                # XGBoost: 'gain' daha bilgilendirici
+                try:
+                    score_type = "gain"
+                    booster_importance = booster.get_booster().get_score(importance_type=score_type)
+                    # get_score feature index bazlı döner: "f0","f1"...
+                    imp_series = pd.Series({int(k[1:]): v for k, v in booster_importance.items()})
+                    imp_series = imp_series.reindex(range(len(feature_names))).fillna(0.0)
+                    importances = pd.Series(imp_series.values, index=feature_names)
+                except Exception:
+                    # yedek: feature_importances_
+                    importances = pd.Series(booster.feature_importances_, index=feature_names)
+            elif model_name == "lgbm":
+                booster = clf.named_steps["model"]
+                importances = pd.Series(booster.feature_importances_, index=feature_names)
+            elif model_name == "rf":
+                booster = clf.named_steps["model"]
+                importances = pd.Series(booster.feature_importances_, index=feature_names)
+        except Exception:
+            importances = None
 
-    # SHAP (global)
-    X_sample = X_test.sample(n=min(len(X_test), 5000), random_state=RANDOM_STATE)
-    maybe_shap(model, X_sample, outdir, filename_prefix="shap_global")
-    # SHAP (top-k)
-    if HAS_SHAP and k >= 5:
-        maybe_shap(model, test_df.iloc[top_idx][X_cols], outdir, filename_prefix="shap_on_best_topk")
+    if importances is not None:
+        importances.sort_values(ascending=False).to_csv(outdir / "feature_importance_model.csv", index=True)
+        plot_and_save_importance(importances, out_png=outdir / "feature_importance_model.png", top_n=30,
+                                 title=f"Model Importance ({model_name})")
 
-    print(f"✔ Done: {name} | best k={best_k_row['k_ratio']:.3f} | thr≈{best_k_row['threshold_equiv']:.4f}")
+    # 13) Permutation importance (daha ağır ama model-agnostic)
+    try:
+        pi = permutation_importance(clf, X_test, y_test, n_repeats=10, random_state=42, n_jobs=-1)
+        pi_series = pd.Series(pi.importances_mean, index=feature_names).sort_values(ascending=False)
+        pi_series.to_csv(outdir / "feature_importance_permutation.csv", index=True)
+        plot_and_save_importance(pi_series, out_png=outdir / "feature_importance_permutation.png", top_n=30,
+                                 title="Permutation Importance")
+    except Exception:
+        pass
+
+    # 14) SHAP açıklanabilirlik (opsiyonel)
+    if HAS_SHAP and model_name in ("xgb", "lgbm",):
+        try:
+            # Eğitim verisini transform et (sparse olabilir -> dense'e dikkat!)
+            Xt = clf.named_steps["pre"].transform(X_train)
+            Xs = Xt.toarray() if hasattr(Xt, "toarray") else Xt
+
+            model = clf.named_steps["model"]
+            if model_name == "xgb":
+                explainer = shap.TreeExplainer(model)
+                shap_values = explainer.shap_values(Xs)
+            else:
+                explainer = shap.TreeExplainer(model)
+                shap_values = explainer.shap_values(Xs)
+
+            # SHAP summary plot (top özellikler)
+            plt.figure()
+            shap.summary_plot(shap_values, Xs, feature_names=feature_names, show=False, max_display=30)
+            plt.tight_layout()
+            plt.savefig(outdir / "shap_summary.png", dpi=200, bbox_inches="tight")
+            plt.close()
+
+            # Global SHAP önemleri
+            if isinstance(shap_values, list):  # multiclass ise (beklemiyoruz)
+                sv = np.mean(np.abs(shap_values[0]), axis=0)
+            else:
+                sv = np.mean(np.abs(shap_values), axis=0)
+            shap_imp = pd.Series(sv, index=feature_names).sort_values(ascending=False)
+            shap_imp.to_csv(outdir / "feature_importance_shap.csv", index=True)
+            plot_and_save_importance(shap_imp, out_png=outdir / "feature_importance_shap.png", top_n=30,
+                                     title="SHAP Global Importance")
+        except Exception as e:
+            with open(outdir / "shap_error.txt", "w", encoding="utf-8") as f:
+                f.write(str(e))
+
+    # 15) Eksik değer oranları
+    na_rates = X.isna().mean().sort_values(ascending=False)
+    na_rates.to_csv(outdir / "missing_rates.csv")
+    # Basit bir bar grafiği (ilk 25 sütun)
+    top_na = na_rates.head(25)
+    plt.figure(figsize=(8, max(4, int(0.25 * len(top_na)))))
+    top_na.iloc[::-1].plot(kind="barh")
+    plt.title("Eksik Değer Oranları (İlk 25)")
+    plt.tight_layout()
+    plt.savefig(outdir / "missing_rates_top25.png", dpi=200)
+    plt.close()
+
+    # 16) Model ve öznitelik isimlerini kaydet
+    joblib.dump(clf, outdir / "model_pipeline.joblib")
+    with open(outdir / "feature_names.json", "w", encoding="utf-8") as f:
+        json.dump(feature_names, f, ensure_ascii=False, indent=2)
+
+    # 17) Rapor özetini yaz
+    summary = {
+        "metrics": metrics,
+        "n_features_after_encoding": len(feature_names),
+        "columns_numeric": [c for c in numeric_cols if c in X.columns],
+        "columns_categorical": [c for c in categorical_cols if c in X.columns],
+        "dropped_columns": sorted(list(to_drop)),
+        "model": model_name
+    }
+    with open(outdir / "summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    print("=== Özellik Analizi Tamamlandı ===")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(f"Çıktılar: {outdir.resolve()}")
 
 if __name__ == "__main__":
-    args = parse_args()
-    for f in args.files:
-        try:
-            run_one(f)
-        except FileNotFoundError:
-            print(f"↪️ Skip (not found): {f}")
-        except Exception as e:
-            print(f"⚠️ Error on {f}: {e}", file=sys.stderr)
+    main()
