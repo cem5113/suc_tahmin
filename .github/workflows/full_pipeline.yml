@@ -966,7 +966,7 @@ jobs:
         run: |
           set -e
           if [ -f "${CRIME_DATA_DIR}/fr_crime_grid_full_labeled.csv" ]; then
-            python -u run_feature_analysis.py --files "${CRIME_DATA_DIR}/fr_crime_grid_full_labeled.csv"
+            python -u run_feature_analysis.py --csv "${CRIME_DATA_DIR}/fr_crime_grid_full_labeled.csv"
           else
             echo "↪️ FR grid yok; FA atlandı."
           fi
