@@ -655,49 +655,26 @@ missing_report(final_911, "911_summary_normalize")
 # =========================
 # ROLLING (3g/7g) — GEOID ve GEOID×hr_key
 # =========================
-
-_day_unique = (final_911[["GEOID","date","911_request_count_daily(before_24_hours)"]]
-               .drop_duplicates(subset=["GEOID","date"]))
-_day_unique = _day_unique.sort_values(["GEOID","date"]).rename(columns={"911_request_count_daily(before_24_hours)":"daily_cnt"}).reset_index(drop=True)
-
-_hr_unique = (final_911[["GEOID","hr_key","date","911_request_count_hour_range"]]
-              .groupby(["GEOID","hr_key","date"], as_index=False, observed=True)["911_request_count_hour_range"].sum())
-_hr_unique = _hr_unique.rename(columns={"911_request_count_hour_range":"hr_cnt"}).sort_values(["GEOID","hr_key","date"]).reset_index(drop=True)
-
 for W in ROLL_WINDOWS:
     _day_unique[f"911_geo_last{W}d"] = (
-        _day_unique.groupby("GEOID")["daily_cnt"].transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
+        _day_unique.groupby("GEOID")["daily_cnt"]
+        .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
     ).astype("float32")
     _hr_unique[f"911_geo_hr_last{W}d"] = (
-        _hr_unique.groupby(["GEOID","hr_key"])["hr_cnt"].transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
+        _hr_unique.groupby(["GEOID","hr_key"])["hr_cnt"]
+        .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
     ).astype("float32")
-    missing_report(_day_unique, "911_day_unique_after_roll")
-    missing_report(_hr_unique, "911_hr_unique_after_roll")
-    if _neighbor_roll is not None:
-        missing_report(_neighbor_roll, "911_neighbor_roll")
+
+# ✅ Rolling sonrası raporları TEK KEZ al
+missing_report(_day_unique, "911_day_unique_after_roll")
+missing_report(_hr_unique, "911_hr_unique_after_roll")
+
 
 # =========================
 # KOMŞU GEOID ÖZELLİKLERİ (günlük baz)
 # =========================
-
 def build_neighbors(method: str = "touches", radius_m: float = 500.0) -> pd.DataFrame:
-    gdf_blocks, _ = _load_blocks()
-    tracts = gdf_blocks.dissolve(by="GEOID", as_index=False)
-    if method == "radius":
-        tr_utm = tracts.to_crs("EPSG:26910")
-        buf = tr_utm.buffer(radius_m)
-        g_buf = gpd.GeoDataFrame(tr_utm[["GEOID"]].copy(), geometry=buf, crs=tr_utm.crs)
-        join = gpd.sjoin(g_buf, tr_utm[["GEOID","geometry"]].rename(columns={"GEOID":"nbr"}), predicate="intersects")
-        edges = join[["GEOID","nbr"]]
-    else:
-        join = gpd.sjoin(tracts[["GEOID","geometry"]], tracts[["GEOID","geometry"]].rename(columns={"GEOID":"nbr"}), predicate="touches")
-        edges = join[["GEOID","nbr"]]
-    edges = edges[edges["GEOID"] != edges["nbr"]].copy()
-    edges["pair"] = edges.apply(lambda r: tuple(sorted((r["GEOID"], r["nbr"]))), axis=1)
-    edges = edges.drop_duplicates("pair").drop(columns=["pair"])
-    edges["GEOID"] = normalize_geoid(edges["GEOID"], DEFAULT_GEOID_LEN)
-    edges["nbr"] = normalize_geoid(edges["nbr"], DEFAULT_GEOID_LEN)
-    return pd.DataFrame(edges)
+    ...
 
 neighbors_df = None
 if ENABLE_NEIGHBORS:
@@ -708,24 +685,39 @@ if ENABLE_NEIGHBORS:
         log(f"⚠️ Komşu haritası üretilemedi: {e}")
         neighbors_df = None
 
+# ✅ _neighbor_roll'u bu aşamada tanımla
 _neighbor_roll = None
 if neighbors_df is not None and not neighbors_df.empty:
-    day_nbr = neighbors_df.merge(_day_unique.rename(columns={"GEOID":"nbr"}), on="nbr", how="left")
-    day_nbr = day_nbr.groupby(["GEOID","date"], as_index=False, observed=True)["daily_cnt"].sum().rename(columns={"daily_cnt":"nbr_daily_cnt"})
+    day_nbr = neighbors_df.merge(
+        _day_unique.rename(columns={"GEOID":"nbr"}), on="nbr", how="left"
+    )
+    day_nbr = (day_nbr.groupby(["GEOID","date"], as_index=False, observed=True)["daily_cnt"]
+               .sum().rename(columns={"daily_cnt":"nbr_daily_cnt"}))
     _neighbor_roll = day_nbr.sort_values(["GEOID","date"]).reset_index(drop=True)
     for W in ROLL_WINDOWS:
         _neighbor_roll[f"911_neighbors_last{W}d"] = (
-            _neighbor_roll.groupby("GEOID")["nbr_daily_cnt"].transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
+            _neighbor_roll.groupby("GEOID")["nbr_daily_cnt"]
+            .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
         ).astype("float32")
+
+# ✅ Komşu raporunu ANCAK burada al
+if _neighbor_roll is not None:
+    missing_report(_neighbor_roll, "911_neighbor_roll")
+
 
 # =========================
 # MERGE STRATEJİSİ
 # =========================
-
 _enriched = final_911.merge(_hr_unique, on=["GEOID","hr_key","date"], how="left")
 _enriched = _enriched.merge(_day_unique, on=["GEOID","date"], how="left")
 if _neighbor_roll is not None:
-    _enriched = _enriched.merge(_neighbor_roll[["GEOID","date"] + [f"911_neighbors_last{W}d" for W in ROLL_WINDOWS]], on=["GEOID","date"], how="left")
+    _enriched = _enriched.merge(
+        _neighbor_roll[["GEOID","date"] + [f"911_neighbors_last{W}d" for W in ROLL_WINDOWS]],
+        on=["GEOID","date"], how="left"
+    )
+
+# (İstersen burada da rapor al)
+missing_report(_enriched, "911_enriched_before_grid_merge")
 
 crime_grid_path = next((p for p in CRIME_GRID_CANDIDATES if p.exists()), None)
 if crime_grid_path is None:
