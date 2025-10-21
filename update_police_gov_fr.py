@@ -1,6 +1,8 @@
-# update_police_gov_fr.py
+# update_police_gov.py
 # Amaç: OLAY BAZLI (latitude/longitude) en yakın POLICE & GOV mesafeleri.
 # Fallback: lat/lon eksikse GEOID centroid kullanılır.
+# Girdi:  crime_prediction_data/fr_crime_06.csv
+# Çıktı:  crime_prediction_data/fr_crime_07.csv
 
 import os
 from pathlib import Path
@@ -13,10 +15,6 @@ pd.options.mode.copy_on_write = True
 # -------------------------- LOG/YARDIMCI --------------------------
 def log_shape(df: pd.DataFrame, label: str):
     r, c = df.shape; print(f"📊 {label}: {r} satır × {c} sütun")
-
-def log_delta(before, after, label: str):
-    br, bc = before; ar, ac = after
-    print(f"🔗 {label}: {br}×{bc} → {ar}×{ac} (Δr={ar-br}, Δc={ac-bc})")
 
 def ensure_parent(path: str):
     Path(os.path.dirname(path) or ".").mkdir(parents=True, exist_ok=True)
@@ -78,27 +76,12 @@ def prep_points(df_points: pd.DataFrame) -> pd.DataFrame:
 BASE_DIR = "crime_prediction_data"
 Path(BASE_DIR).mkdir(exist_ok=True)
 
-CRIME_IN_CANDS = [
-    os.path.join(BASE_DIR, "fr_crime_06.csv"),
-    os.path.join(BASE_DIR, "sf_crime_06.csv"),
-    os.path.join(BASE_DIR, "fr_crime_08.csv"),
-    os.path.join(BASE_DIR, "sf_crime_08.csv"),
-    os.path.join(BASE_DIR, "fr_crime.csv"),
-    os.path.join(BASE_DIR, "sf_crime.csv"),
-]
-def pick_existing(paths):
-    for p in paths:
-        if os.path.exists(p): return p
-    return None
+CRIME_IN = os.path.join(BASE_DIR, "fr_crime_06.csv")
+if not os.path.exists(CRIME_IN):
+    raise FileNotFoundError("❌ Girdi bulunamadı: crime_prediction_data/fr_crime_06.csv")
 
-CRIME_IN = pick_existing(CRIME_IN_CANDS)
-if CRIME_IN is None:
-    raise FileNotFoundError("❌ Suç girdisi bulunamadı (fr_crime_06.csv/sf_crime_06.csv/…).")
-
-# Çıkış: 06→07, 08→09, aksi halde *_pg.csv
-name = Path(CRIME_IN).name
-if name.endswith("crime_08.csv"): CRIME_OUT = os.path.join(BASE_DIR, name.replace("_08.csv","_09.csv"))
-else: CRIME_OUT = os.path.join(BASE_DIR, Path(CRIME_IN).stem + "_pg.csv")
+# 06 → 07 (sabit kural)
+CRIME_OUT = os.path.join(BASE_DIR, "fr_crime_07.csv")
 
 POLICE_CANDS = [os.path.join(BASE_DIR,"sf_police_stations.csv"), "sf_police_stations.csv"]
 GOV_CANDS    = [os.path.join(BASE_DIR,"sf_government_buildings.csv"), "sf_government_buildings.csv"]
@@ -115,11 +98,9 @@ df["GEOID"] = normalize_geoid(df["GEOID"], 11)
 # Olay LAT/LON kolonları
 lat_col = find_col(df.columns, ["latitude","lat","y"])
 lon_col = find_col(df.columns, ["longitude","lon","x"])
-# Centroid fallback kolonları (önceden hesaplanmış olabilir)
 clat_col = find_col(df.columns, ["centroid_lat"])
 clon_col = find_col(df.columns, ["centroid_lon"])
 
-# Olay bazlı koordinatları hazırla (öncelik: lat/lon; yoksa centroid; o da yoksa grup ort.)
 df["_lat_evt_"] = pd.to_numeric(df[lat_col], errors="coerce") if lat_col else np.nan
 df["_lon_evt_"] = pd.to_numeric(df[lon_col], errors="coerce") if lon_col else np.nan
 
@@ -127,7 +108,6 @@ if clat_col and clon_col:
     df["_lat_evt_"] = df["_lat_evt_"].fillna(pd.to_numeric(df[clat_col], errors="coerce"))
     df["_lon_evt_"] = df["_lon_evt_"].fillna(pd.to_numeric(df[clon_col], errors="coerce"))
 
-# GEOID bazında ortalama ile son fallback
 miss_mask = df["_lat_evt_"].isna() | df["_lon_evt_"].isna()
 if miss_mask.any():
     geo_mean = (df.loc[~(df["_lat_evt_"].isna() | df["_lon_evt_"].isna())]
@@ -135,17 +115,16 @@ if miss_mask.any():
     df.loc[miss_mask, "_lat_evt_"] = df.loc[miss_mask, "GEOID"].map(geo_mean["_lat_evt_"])
     df.loc[miss_mask, "_lon_evt_"] = df.loc[miss_mask, "GEOID"].map(geo_mean["_lon_evt_"])
 
-# Kalan eksikler (tamamen koordinatsız GEOID’ler) atılır
 n_before = len(df)
 df = df.dropna(subset=["_lat_evt_","_lon_evt_"]).copy()
 if len(df) < n_before:
-    print(f"ℹ️ Koordinatı olmayan {n_before - len(df):,} satır mesafe hesaplamasına dahil edilemedi (NaN kalmış).")
+    print(f"ℹ️ Koordinatı olmayan {n_before - len(df):,} satır atlandı (mesafe hesaplayamadık).")
 
 log_shape(df, "CRIME (olay koordinatları hazır)")
 
 # -------------------------- POLICE/GOV NOKTALARI --------------------------
-police_path = pick_existing(POLICE_CANDS)
-gov_path    = pick_existing(GOV_CANDS)
+police_path = next((p for p in POLICE_CANDS if os.path.exists(p)), None)
+gov_path    = next((p for p in GOV_CANDS if os.path.exists(p)), None)
 
 if police_path is None:
     print("⚠️ sf_police_stations.csv bulunamadı; polis mesafeleri NaN olacak.")
@@ -164,7 +143,6 @@ df_gov    = prep_points(df_gov)
 
 # -------------------------- BALLTREE (Haversine) --------------------------
 EARTH_R = 6_371_000.0  # metre
-
 events_rad = np.radians(df[["_lat_evt_","_lon_evt_"]].to_numpy(dtype=float))
 
 # POLICE
@@ -190,10 +168,8 @@ df["is_near_police"] = (df["distance_to_police"] <= 300).astype("Int64")
 df["is_near_government"] = (df["distance_to_government_building"] <= 300).astype("Int64")
 
 # Dinamik aralık etiketleri
-df["distance_to_police_range"] = make_quantile_ranges(df["distance_to_police"], max_bins=5, fallback_label="Unknown")
-df["distance_to_government_building_range"] = make_quantile_ranges(
-    df["distance_to_government_building"], max_bins=5, fallback_label="Unknown"
-)
+df["distance_to_police_range"] = make_quantile_ranges(df["distance_to_police"])
+df["distance_to_government_building_range"] = make_quantile_ranges(df["distance_to_government_building"])
 
 # Geçici kolonları temizle
 df = df.drop(columns=["_lat_evt_","_lon_evt_"], errors="ignore")
