@@ -110,9 +110,7 @@ BASE_DIR  = "crime_prediction_data"
 Path(BASE_DIR).mkdir(exist_ok=True)
 
 CRIME_INPUT_CANDIDATES = [
-    os.path.join(BASE_DIR, "sf_crime_08.csv"),   # yeni akış: 08 -> 09
-    os.path.join(BASE_DIR, "sf_crime_09.csv"),   # yeniden enrich senaryosu
-    os.path.join(BASE_DIR, "sf_crime.csv"),      # fallback
+    os.path.join(BASE_DIR, "sf_crime_06.csv"),   
 ]
 
 POLICE_CANDIDATES = [
@@ -138,8 +136,8 @@ if CRIME_IN is None:
     )
 
 # Çıktı kuralı (date kullanılmaz; sadece dosya ismine bakar)
-if CRIME_IN.endswith("sf_crime_08.csv"):
-    CRIME_OUT = os.path.join(BASE_DIR, "sf_crime_09.csv")
+if CRIME_IN.endswith("sf_crime_06.csv"):
+    CRIME_OUT = os.path.join(BASE_DIR, "sf_crime_07.csv")
 else:
     stem = Path(CRIME_IN).stem  # sf_crime → sf_crime_pg.csv
     CRIME_OUT = os.path.join(BASE_DIR, f"{stem}_pg.csv")
