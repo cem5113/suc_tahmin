@@ -59,6 +59,41 @@ def log_date_range(df, date_col="date", label="911"):
         return
     log(f"🧭 {label} tarihi aralığı: {s.min()} → {s.max()} (gün={s.nunique()})")
 
+def missing_report(df: pd.DataFrame, label: str, out_dir: str = BASE_DIR) -> pd.DataFrame:
+    """
+    Sütun bazında NaN sayısı ve oranını raporlar; CSV'ye yazar ve log'lar.
+    """
+    if df is None or df.empty:
+        log(f"🕳️ NaN raporu ({label}): DF boş.")
+        return pd.DataFrame(columns=["column", "missing", "total", "ratio"])
+
+    miss = df.isna().sum().sort_values(ascending=False)
+    rep = pd.DataFrame({
+        "missing": miss,
+        "total": len(df),
+        "ratio": (miss / max(len(df), 1)).round(6)
+    })
+    rep.index.name = "column"
+    rep = rep.reset_index()
+
+    # Dosyaya yaz
+    safe_save_csv(rep, str(Path(out_dir) / f"missing_{re.sub(r'[^A-Za-z0-9_]+','_', label)}.csv"))
+
+    # Log: sadece NaN > 0 olan ilk 10 sütunu kısaca göster
+    top = rep[rep["missing"] > 0].head(10)
+    if not top.empty:
+        summary_str = ", ".join(f"{r['column']}:{int(r['missing'])}({r['ratio']:.1%})" for _, r in top.iterrows())
+        log(f"🕳️ NaN raporu ({label}) → {summary_str}")
+    else:
+        log(f"🕳️ NaN raporu ({label}) → NaN yok.")
+
+    # Tamamen NaN olan sütunları ayrıca not düş
+    all_nan_cols = rep.loc[rep["ratio"] == 1.0, "column"].tolist()
+    if all_nan_cols:
+        log(f"⚠️ Tamamen NaN sütunlar ({label}): {all_nan_cols}")
+
+    return rep
+
 def normalize_geoid(s: pd.Series, target_len: int) -> pd.Series:
     """Sadece rakamları al, soldan L karaktere kes ve zfill(L) yap (panel ile uyumlu)."""
     s = s.astype(str).str.extract(r"(\d+)", expand=False)
@@ -615,6 +650,7 @@ final_911["season"] = final_911["month"].map(_season_map).astype("category")
 
 log_shape(final_911, "911 summary (normalize)")
 log_date_range(final_911, "date", "911")
+missing_report(final_911, "911_summary_normalize")
 
 # =========================
 # ROLLING (3g/7g) — GEOID ve GEOID×hr_key
@@ -635,6 +671,10 @@ for W in ROLL_WINDOWS:
     _hr_unique[f"911_geo_hr_last{W}d"] = (
         _hr_unique.groupby(["GEOID","hr_key"])["hr_cnt"].transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
     ).astype("float32")
+    missing_report(_day_unique, "911_day_unique_after_roll")
+    missing_report(_hr_unique, "911_hr_unique_after_roll")
+    if _neighbor_roll is not None:
+        missing_report(_neighbor_roll, "911_neighbor_roll")
 
 # =========================
 # KOMŞU GEOID ÖZELLİKLERİ (günlük baz)
@@ -740,6 +780,12 @@ fill_cols = [
 for c in fill_cols:
     if c in merged.columns:
         merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0).astype("int32")
+        missing_report(merged, "crime_x_911_after_fill")
+
+all_nan_cols = [c for c in merged.columns if merged[c].isna().all()]
+if all_nan_cols:
+    log(f"🧹 CRIME×911: tamamen NaN sütunlar atılıyor → {all_nan_cols}")
+    merged = merged.drop(columns=all_nan_cols)
 
 safe_save_csv(merged, str(merged_output_path))
 log_shape(merged, "CRIME⨯911 (kayıt öncesi)")
