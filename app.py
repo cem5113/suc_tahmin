@@ -1309,25 +1309,6 @@ with st.container():
             if st.button("📡 Son durumu yenile"):
                 _render_last_run_status(status_box)
 
-    with st.sidebar.expander("ACS Ayarları (Demografi)"):
-        acs_year_default = os.environ.get("ACS_YEAR", "LATEST")
-        whitelist_default = os.environ.get("DEMOG_WHITELIST", "")
-        level_default = os.environ.get("CENSUS_GEO_LEVEL", "auto")
-
-        acs_year_in = st.text_input(
-            label="ACS_YEAR (LATEST veya YYYY)",
-            value=str(acs_year_default or "LATEST"),
-            key="acs_year_in",
-            help="5-year ACS için en son yılı kullanmak genelde uygundur."
-        )
-
-        whitelist_in = st.text_input(
-            label="DEMOG_WHITELIST (virgüllü; boş = hepsi)",
-            value=str(whitelist_default or ""),
-            key="demog_whitelist_in",
-            help='Örn: "population,median_income,education". Metin eşleşmesiyle filtreler.'
-        )
-
         levels = ["auto", "tract", "blockgroup", "block"]
         try:
             idx = levels.index(level_default) if level_default in levels else 0
