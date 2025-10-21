@@ -206,6 +206,54 @@ jobs:
           fi
           python -u "$PY"
 
+      - name: 01.1) GEOID+Y_label → sf_crime_L.csv
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pandas as pd, re
+          cdir = os.environ["CRIME_DATA_DIR"]
+          L = int(os.environ.get("GEOID_LEN","11"))
+
+          # Öncelik: sf_crime_y.csv, yoksa sf_crime.csv
+          for name in ("sf_crime_y.csv", "sf_crime.csv"):
+              src = os.path.join(cdir, name)
+              if os.path.isfile(src):
+                  break
+          else:
+              raise SystemExit("Girdi yok: sf_crime_y.csv / sf_crime.csv bulunamadı.")
+
+          df = pd.read_csv(src, low_memory=False)
+          low = {c.lower(): c for c in df.columns}
+
+          geoid_col = low.get("geoid") or low.get("geography_id") or low.get("geoid11") or low.get("geoid_11")
+          y_col     = low.get("y_label") or low.get("y") or low.get("label") or low.get("target")
+          if not geoid_col or not y_col:
+              raise SystemExit(f"Gerekli kolon(lar) yok. Kolonlar: {list(df.columns)}")
+
+          out = df[[geoid_col, y_col]].copy()
+          out.columns = ["GEOID", "Y_label"]
+
+          # GEOID normalize
+          out["GEOID"] = (
+              out["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).str[:L].str.zfill(L)
+          )
+
+          # Her GEOID için tek satır istersen (varsa 1 yoksa 0)
+          out = out.groupby("GEOID", as_index=False)["Y_label"].max()
+
+          dest = os.path.join(cdir, "sf_crime_L.csv")
+          out.to_csv(dest, index=False)
+          print("Yazıldı:", dest, "satır:", len(out))
+          PY
+
+          echo "---- sf_crime_L.csv (head) ----"
+          head -n 5 "${CRIME_DATA_DIR}/sf_crime_L.csv" || true
+
+
       - name: Restore 911 summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         uses: actions/cache@v4
