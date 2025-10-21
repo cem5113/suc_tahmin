@@ -1,6 +1,6 @@
 # update_911.py
 from __future__ import annotations
-import os, re, io, time, requests
+import os, re, io, time, requests, sys, traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -348,7 +348,7 @@ def make_standard_summary(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw.copy()
 
     # yalnızca izin verilen alanlarla ilerleyelim (varsa filtrele)
-    allow = set(raw.columns) & ALLOWED_911_FEATURES
+    allow = set(df.columns) & ALLOWED_911_FEATURES
     if allow:
         df = df[list(allow)]
 
@@ -543,7 +543,9 @@ def fetch_range_all_chunks(start_day, end_day) -> Optional[pd.DataFrame]:
     return pd.concat(pieces, ignore_index=True)
 
 def fetch_v3_range_all_chunks(start_day, end_day) -> Optional[pd.DataFrame]:
-    from requests.adapters import HTTPAdapter, Retry
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
     sess = requests.Session()
     retries = Retry(total=5, connect=5, read=5, backoff_factor=1.2,
                     status_forcelist=[429,500,502,503,504], allowed_methods=["GET"])
@@ -659,7 +661,6 @@ def incremental_summary(start_day: datetime.date, end_day: datetime.date) -> pd.
 # =========================
 # MAIN: LOCAL (Y/regular) → RELEASE (Y → regular) → API FALLBACK → ENRICH PREP
 # =========================
-import traceback, sys  # ayrıntılı hata çıktısı için
 
 five_years_ago = datetime.now(timezone.utc).date() - timedelta(days=5*365)
 log(f"📁 911 yerel özet yolu: {local_summary_path}")
@@ -741,10 +742,8 @@ try:
     log_date_range(final_911, "date", "911")
 
     # ⬇️ final_911 için raporu BURADA tek kez al
-    if 'missing_report' in globals():
-        missing_report(final_911, "911_summary_normalize")
-    if 'dump_nan_samples' in globals():
-        dump_nan_samples(final_911, "911_summary_normalize")
+    missing_report(final_911, "911_summary_normalize")
+    dump_nan_samples(final_911, "911_summary_normalize")
 
     # Günlük toplam yoksa üret
     if "911_request_count_daily(before_24_hours)" not in final_911.columns:
@@ -866,8 +865,12 @@ try:
         missing_report(_hr_unique, "911_hr_unique_after_roll")
         dump_nan_samples(_hr_unique, "911_hr_unique_after_roll")
 
+    except Exception as e:
+        log("⚠️ Normalize sırasında uyarı; devam ediliyor:")
+        log("".join(traceback.format_exception(e)))
+
 except Exception as e:
-    log("⚠️ Normalize sırasında uyarı; devam ediliyor:")
+    log("❌ Dış normalize bloğunda hata:")
     log("".join(traceback.format_exception(e)))
 
 # 5) ARTIMLI GÜNCELLEME (mevcut taban üzerine yeni günleri ekle)
@@ -947,14 +950,19 @@ missing_report(final_911, "911_summary_normalize")
 # KOMŞU GEOID ÖZELLİKLERİ (günlük baz) — opsiyonel
 # =========================
 def build_neighbors(method: str = "touches", radius_m: float = 500.0) -> pd.DataFrame:
-    ...
-    # Burayı gerçek komşuluk hesap kodunla doldurabilirsin.
+    """
+    Yerine geçici/boş komşu üretici.
+    Gerçek komşuluk matrisini kurmak isterseniz burayı doldurun ve
+    en azından ["GEOID","nbr"] kolonlarını döndürün.
+    """
+    return pd.DataFrame(columns=["GEOID", "nbr"])
 
 neighbors_df = None
 if ENABLE_NEIGHBORS:
     try:
         neighbors_df = build_neighbors(NEIGHBOR_METHOD, NEIGHBOR_RADIUS_M)
-        log_shape(neighbors_df, f"Komşu haritası ({NEIGHBOR_METHOD})")
+        if neighbors_df is not None and not neighbors_df.empty:
+            log_shape(neighbors_df, f"Komşu haritası ({NEIGHBOR_METHOD})")
     except Exception as e:
         log(f"⚠️ Komşu haritası üretilemedi: {e}")
         neighbors_df = None
