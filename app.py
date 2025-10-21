@@ -1280,90 +1280,90 @@ def process_city_to_09(prefix: str, data_dir: Path) -> Optional[pd.DataFrame]:
         st.info("update_neighbors.py bulunamadı (scripts klasörüne ekleyin).")
     return None
 
-        # -------------------------------
-        # Global — Sayı (kuantil regresyon)
-        # -------------------------------
-        with tabs[1]:
-            if 0.5 in q_models:
-                st.caption("Kuantil (q=0.5) LightGBMRegressor için SHAP — ilk 10")
-                expl_reg = shap.TreeExplainer(q_models[0.5])
-                sample_idx_reg = X_cnt.sample(min(1500, len(X_cnt)), random_state=42).index
-                shap_vals_reg = expl_reg.shap_values(X_cnt.loc[sample_idx_reg])
-                mean_abs_r = np.abs(shap_vals_reg).mean(axis=0)
-                top_idx_r = np.argsort(mean_abs_r)[::-1][:10]
-                top_df_r = pd.DataFrame({
-                    "özellik": X_cnt.columns[top_idx_r],
-                    "önem(Mean|SHAP|)": mean_abs_r[top_idx_r]
-                })
-                st.dataframe(top_df_r, use_container_width=True)
-                st.bar_chart(top_df_r.set_index("özellik"))
-            else:
-                st.info("Kuantil regresyon modeli bulunamadı.")
+    # -------------------------------
+    # Global — Sayı (kuantil regresyon)
+    # -------------------------------
+    with tabs[1]:
+        if 0.5 in q_models:
+            st.caption("Kuantil (q=0.5) LightGBMRegressor için SHAP — ilk 10")
+            expl_reg = shap.TreeExplainer(q_models[0.5])
+            sample_idx_reg = X_cnt.sample(min(1500, len(X_cnt)), random_state=42).index
+            shap_vals_reg = expl_reg.shap_values(X_cnt.loc[sample_idx_reg])
+            mean_abs_r = np.abs(shap_vals_reg).mean(axis=0)
+            top_idx_r = np.argsort(mean_abs_r)[::-1][:10]
+            top_df_r = pd.DataFrame({
+                "özellik": X_cnt.columns[top_idx_r],
+                "önem(Mean|SHAP|)": mean_abs_r[top_idx_r]
+            })
+            st.dataframe(top_df_r, use_container_width=True)
+            st.bar_chart(top_df_r.set_index("özellik"))
+        else:
+            st.info("Kuantil regresyon modeli bulunamadı.")
 
-        # -------------------------------
-        # Local — tek satır açıklaması
-        # -------------------------------
-        with tabs[2]:
-            st.caption("Seçtiğin satır için sınıf (Y>0) olasılığı ve özellik katkıları")
-            idx = st.number_input("Satır indexi", min_value=0, max_value=int(len(X_all)-1), value=0, step=1)
-            x_row = X_all.iloc[[idx]]
-            p_row = float(clf.predict_proba(x_row)[:,1])
-            exp_row = float(df09.loc[x_row.index, "pred_expected"]) if "pred_expected" in df09.columns else np.nan
-            st.write(f"**P(Y>0)** = {p_row:.3f} | **Beklenen sayı** ≈ {exp_row:.2f}")
+    # -------------------------------
+    # Local — tek satır açıklaması
+    # -------------------------------
+    with tabs[2]:
+        st.caption("Seçtiğin satır için sınıf (Y>0) olasılığı ve özellik katkıları")
+        idx = st.number_input("Satır indexi", min_value=0, max_value=int(len(X_all)-1), value=0, step=1)
+        x_row = X_all.iloc[[idx]]
+        p_row = float(clf.predict_proba(x_row)[:,1])
+        exp_row = float(df09.loc[x_row.index, "pred_expected"]) if "pred_expected" in df09.columns else np.nan
+        st.write(f"**P(Y>0)** = {p_row:.3f} | **Beklenen sayı** ≈ {exp_row:.2f}")
 
-            shap_row = expl_clf.shap_values(x_row)
-            shap_row_pos = shap_row[1][0] if isinstance(shap_row, list) else shap_row[0]
-            contrib = pd.DataFrame({
-                "özellik": x_row.columns,
-                "değer": x_row.iloc[0].values,
-                "katkı(SHAP)": shap_row_pos
-            }).sort_values("katkı(SHAP)", key=np.abs, ascending=False).head(15)
-            st.dataframe(contrib, use_container_width=True)
+        shap_row = expl_clf.shap_values(x_row)
+        shap_row_pos = shap_row[1][0] if isinstance(shap_row, list) else shap_row[0]
+        contrib = pd.DataFrame({
+            "özellik": x_row.columns,
+            "değer": x_row.iloc[0].values,
+            "katkı(SHAP)": shap_row_pos
+        }).sort_values("katkı(SHAP)", key=np.abs, ascending=False).head(15)
+        st.dataframe(contrib, use_container_width=True)
 
-        # -------------------------------
-        # PDP / ICE (kritik özellikler)
-        # -------------------------------
-        with tabs[3]:
-            st.caption("Marjinal etki (PDP). Sınıf modeli (Y>0, target=1) üzerinde.")
-            candidates = [c for c in ["event_hour","nei_7d_sum","nr_7d","bus_stop_count","poi_risk_score"]
-                          if c in X_occ.columns]
-            feats = st.multiselect("PDP için özellik(ler) seç", options=candidates, default=candidates[:2])
-            if len(feats) > 0:
-                for f in feats[:3]:
-                    fig, ax = plt.subplots(figsize=(5, 3))
-                    PartialDependenceDisplay.from_estimator(
-                        clf_tree, X_occ, [f], kind="average", target=1, ax=ax
-                    )
-                    ax.set_title(f"PDP — {f}")
-                    st.pyplot(fig, clear_figure=True)
-            else:
-                st.info("Listeden en az bir özellik seç.")
+    # -------------------------------
+    # PDP / ICE (kritik özellikler)
+    # -------------------------------
+    with tabs[3]:
+        st.caption("Marjinal etki (PDP). Sınıf modeli (Y>0, target=1) üzerinde.")
+        candidates = [c for c in ["event_hour","nei_7d_sum","nr_7d","bus_stop_count","poi_risk_score"]
+                      if c in X_occ.columns]
+        feats = st.multiselect("PDP için özellik(ler) seç", options=candidates, default=candidates[:2])
+        if len(feats) > 0:
+            for f in feats[:3]:
+                fig, ax = plt.subplots(figsize=(5, 3))
+                PartialDependenceDisplay.from_estimator(
+                    clf_tree, X_occ, [f], kind="average", target=1, ax=ax
+                )
+                ax.set_title(f"PDP — {f}")
+                st.pyplot(fig, clear_figure=True)
+        else:
+            st.info("Listeden en az bir özellik seç.")
 
-        with tabs[4]:
-            st.caption("Seçilen iki sınıf için özet kart (global SHAP ilk 5)")
-            if cat_col:
-                pick_a = st.selectbox("Kart A sınıfı", sorted(df09[cat_col].dropna().unique()), key="cardA")
-                pick_b = st.selectbox("Kart B sınıfı", sorted(df09[cat_col].dropna().unique()), key="cardB")
+    with tabs[4]:
+        st.caption("Seçilen iki sınıf için özet kart (global SHAP ilk 5)")
+        if cat_col:
+            pick_a = st.selectbox("Kart A sınıfı", sorted(df09[cat_col].dropna().unique()), key="cardA")
+            pick_b = st.selectbox("Kart B sınıfı", sorted(df09[cat_col].dropna().unique()), key="cardB")
 
-                def _topk_for_class(pick, k=5):
-                    sub_idx = df09.loc[sample_idx][df09.loc[sample_idx, cat_col] == pick].index
-                    if len(sub_idx) < 20:
-                        return pd.DataFrame({"özellik": [], "önem": []})
-                    shap_sub = expl_clf.shap_values(X_occ.loc[sub_idx])
-                    shap_sub_pos = shap_sub[1] if isinstance(shap_sub, list) else shap_sub
-                    mabs = np.abs(shap_sub_pos).mean(axis=0)
-                    top = np.argsort(mabs)[::-1][:k]
-                    return pd.DataFrame({"özellik": X_occ.columns[top], "önem": mabs[top]})
+            def _topk_for_class(pick, k=5):
+                sub_idx = df09.loc[sample_idx][df09.loc[sample_idx, cat_col] == pick].index
+                if len(sub_idx) < 20:
+                    return pd.DataFrame({"özellik": [], "önem": []})
+                shap_sub = expl_clf.shap_values(X_occ.loc[sub_idx])
+                shap_sub_pos = shap_sub[1] if isinstance(shap_sub, list) else shap_sub
+                mabs = np.abs(shap_sub_pos).mean(axis=0)
+                top = np.argsort(mabs)[::-1][:k]
+                return pd.DataFrame({"özellik": X_occ.columns[top], "önem": mabs[top]})
 
-                colA, colB = st.columns(2)
-                with colA:
-                    st.markdown(f"**{pick_a} — Top 5 etken**")
-                    st.dataframe(_topk_for_class(pick_a), use_container_width=True)
-                with colB:
-                    st.markdown(f"**{pick_b} — Top 5 etken**")
-                    st.dataframe(_topk_for_class(pick_b), use_container_width=True)
-            else:
-                st.info("category_grouped / subcategory_grouped yoksa sınıf kartları oluşturulamaz.")
+            colA, colB = st.columns(2)
+            with colA:
+                st.markdown(f"**{pick_a} — Top 5 etken**")
+                st.dataframe(_topk_for_class(pick_a), use_container_width=True)
+            with colB:
+                st.markdown(f"**{pick_b} — Top 5 etken**")
+                st.dataframe(_topk_for_class(pick_b), use_container_width=True)
+        else:
+            st.info("category_grouped / subcategory_grouped yoksa sınıf kartları oluşturulamaz.")
 else:
     available_09 = {p: DATA_DIR / f"{p}_crime_09.csv" for p in ["sf", "fr"] if (DATA_DIR / f"{p}_crime_09.csv").exists()}
     if not available_09:
