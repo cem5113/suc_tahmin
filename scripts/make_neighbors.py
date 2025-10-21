@@ -12,7 +12,7 @@ from pathlib import Path
 CRIME_DIR = Path(os.environ.get("CRIME_DATA_DIR", "crime_prediction_data"))
 SRC = CRIME_DIR / "sf_crime_08.csv"
 DST = CRIME_DIR / "sf_crime_09.csv"
-NEIGH_FILE = CRIME_DIR / "neighbors.csv"
+NEIGH_FILE = Path(os.environ.get("NEIGH_FILE", "neighbors.csv"))
 GEOID_LEN = int(os.environ.get("GEOID_LEN", "11"))
 
 def _norm_geoid(s: pd.Series, L=GEOID_LEN):
