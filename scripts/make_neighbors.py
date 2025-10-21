@@ -1,7 +1,7 @@
 #make_neighbors.py
 """
 make_neighbors.py
-sf_crime_08.csv + sf_neighbors.csv → sf_crime_09.csv
+sf_crime_08.csv + neighbors.csv → sf_crime_09.csv
 Zaman sütunu (datetime) kullanılmaz. GEOID bazlı toplam suç etkisi hesaplanır.
 """
 
@@ -12,7 +12,7 @@ from pathlib import Path
 CRIME_DIR = Path(os.environ.get("CRIME_DATA_DIR", "crime_prediction_data"))
 SRC = CRIME_DIR / "sf_crime_08.csv"
 DST = CRIME_DIR / "sf_crime_09.csv"
-NEIGH_FILE = CRIME_DIR / "sf_neighbors.csv"
+NEIGH_FILE = CRIME_DIR / "neighbors.csv"
 GEOID_LEN = int(os.environ.get("GEOID_LEN", "11"))
 
 def _norm_geoid(s: pd.Series, L=GEOID_LEN):
@@ -24,7 +24,7 @@ def main():
     if not NEIGH_FILE.exists():
         raise FileNotFoundError(f"Komşuluk dosyası yok: {NEIGH_FILE}")
 
-    print(f"▶︎ Komşuluk bazlı zenginleştirme başlıyor: {SRC.name} + sf_neighbors.csv → {DST.name}")
+    print(f"▶︎ Komşuluk bazlı zenginleştirme başlıyor: {SRC.name} + neighbors.csv → {DST.name}")
 
     # --- Veri yükle
     df = pd.read_csv(SRC, low_memory=False)
