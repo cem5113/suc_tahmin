@@ -718,16 +718,17 @@ try:
         else:
             final_911["911_request_count_daily(before_24_hours)"] = pd.NA
 
-    # 1) Günlük baz
+    # 1) Günlük baz (GEOID × date) — dinamik kolon seçimi
+    cols_day = [c for c in ["GEOID", "date", "911_request_count_daily(before_24_hours)"] if c in final_911.columns]
     _day_unique = (
-        final_911[["GEOID","date","911_request_count_daily(before_24_hours)"]]
-        .dropna(subset=["date"])
-        .drop_duplicates(subset=["GEOID","date"])
-        .sort_values(["GEOID","date"])
+        final_911[cols_day]
+        .dropna(subset=[c for c in ["date"] if c in cols_day])
+        .drop_duplicates(subset=[c for c in ["GEOID","date"] if c in cols_day])
+        .sort_values([c for c in ["GEOID","date"] if c in cols_day])
         .rename(columns={"911_request_count_daily(before_24_hours)": "daily_cnt"})
         .reset_index(drop=True)
     )
-
+    
     # 2) Saat dilimi baz
     if {"GEOID","hr_key","date","911_request_count_hour_range"}.issubset(final_911.columns):
         _hr_unique = (
@@ -743,18 +744,19 @@ try:
     # =========================
     # ROLLING (3g/7g)
     # =========================
-    for W in ROLL_WINDOWS:  # ROLL_WINDOWS zaten global tanımlı
+    for W in ROLL_WINDOWS:
         if not _day_unique.empty:
-            _day_unique[f"911_geo_last{W}d"] = (
-                _day_unique.groupby("GEOID", observed=True)["daily_cnt"]
-                .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
-            ).astype("float32")
-
-        if not _hr_unique.empty:
-            _hr_unique[f"911_geo_hr_last{W}d"] = (
-                _hr_unique.groupby(["GEOID","hr_key"], observed=True)["hr_cnt"]
-                .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
-            ).astype("float32")
+            if "GEOID" in _day_unique.columns:
+                _day_unique[f"911_geo_last{W}d"] = (
+                    _day_unique.groupby("GEOID", observed=True)["daily_cnt"]
+                    .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
+                ).astype("float32")
+            else:
+                # GEOID yoksa şehir geneli tek seri rolling
+                _day_unique[f"911_geo_last{W}d"] = (
+                    _day_unique.sort_values("date")["daily_cnt"]
+                    .rolling(W, min_periods=1).sum().shift(1)
+                ).astype("float32")
 
     # ⬇️ Rolling sonrası raporlar
     missing_report(_day_unique, "911_day_unique_after_roll")
