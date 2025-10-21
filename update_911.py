@@ -682,8 +682,10 @@ if final_911 is None or final_911.empty:
 _day_unique = pd.DataFrame()
 _hr_unique  = pd.DataFrame()
 
+hr_pat = re.compile(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
+
 try:
-    final_911 = final_911.dropna(subset=["GEOID","date","hour_range"], errors="ignore").copy()
+    final_911 = final_911.dropna(subset=["GEOID","date","hour_range"]).copy()
     if "GEOID" in final_911.columns:
         final_911["GEOID"] = normalize_geoid(final_911["GEOID"], DEFAULT_GEOID_LEN)
     if "date" in final_911.columns:
@@ -732,6 +734,49 @@ try:
         .rename(columns={"911_request_count_daily(before_24_hours)": "daily_cnt"})
         .reset_index(drop=True)
     )
+
+    # === GEOID bazında son 3/7 gün 911 toplamı (bugün hariç) ===
+if not _day_unique.empty and {"GEOID", "date", "daily_cnt"}.issubset(_day_unique.columns):
+    _day_unique["date"] = pd.to_datetime(_day_unique["date"], errors="coerce").dt.date
+    _day_unique = _day_unique.dropna(subset=["date"]).copy()
+
+    def _expand_daily(g):
+        s = pd.Series(g["daily_cnt"].values,
+                      index=pd.to_datetime(g["date"], errors="coerce")).sort_index()
+        full_idx = pd.date_range(s.index.min(), s.index.max(), freq="D")
+        s = s.reindex(full_idx, fill_value=0)
+        out = pd.DataFrame({
+            "date_ts": s.index,
+            "daily_cnt": s.values
+        })
+        out["911_geo_last3d"] = (
+            out["daily_cnt"].rolling(3, min_periods=1).sum().shift(1)
+        )
+        out["911_geo_last7d"] = (
+            out["daily_cnt"].rolling(7, min_periods=1).sum().shift(1)
+        )
+        return out
+
+    _rolled_list = []
+    for geoid, grp in _day_unique.groupby("GEOID", observed=True, sort=False):
+        r = _expand_daily(grp)
+        r.insert(0, "GEOID", geoid)
+        _rolled_list.append(r)
+
+    _geo_roll = pd.concat(_rolled_list, ignore_index=True)
+    _geo_roll["date"] = _geo_roll["date_ts"].dt.date
+    _geo_roll = _geo_roll.drop(columns=["date_ts"])
+
+    _day_unique = _day_unique.merge(
+        _geo_roll,
+        on=["GEOID", "date"],
+        how="left"
+    )
+
+    for c in ["911_geo_last3d", "911_geo_last7d"]:
+        if c in _day_unique.columns:
+            _day_unique[c] = pd.to_numeric(_day_unique[c], errors="coerce").fillna(0).astype("int32")
+
     
     # 2) Saat dilimi baz
     if {"GEOID","hr_key","date","911_request_count_hour_range"}.issubset(final_911.columns):
@@ -799,7 +844,7 @@ try:
         subset_cols = [c for c in ["GEOID","date","hour_range"] if c in final_911.columns]
         final_911 = (
             final_911
-            .dropna(subset=["date"], errors="ignore")
+            .dropna(subset=["date"])
             .sort_values(subset_cols if subset_cols else (["date"] if "date" in final_911.columns else None))
             .drop_duplicates(subset=subset_cols if subset_cols else (["date"] if "date" in final_911.columns else None),
                              keep="last")
@@ -823,9 +868,6 @@ if final_911 is None or final_911.empty:
 # =========================
 # STANDARDIZE + DERIVED KEYS (hr_key, dow, season)
 # =========================
-
-hr_pat = re.compile(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
-
 def _hr_key_from_range(hr):
     m = hr_pat.match(str(hr))
     return int(m.group(1)) % 24 if m else None
@@ -891,6 +933,12 @@ if _neighbor_roll is not None:
 # =========================
 # MERGE STRATEJİSİ
 # =========================
+if _hr_unique is None or _hr_unique.empty:
+    _hr_unique = pd.DataFrame(columns=["GEOID","hr_key","date","hr_cnt"])
+
+if _day_unique is None or _day_unique.empty:
+    _day_unique = pd.DataFrame(columns=["GEOID","date","daily_cnt","911_geo_last3d","911_geo_last7d"])
+
 _enriched = final_911.merge(_hr_unique, on=["GEOID","hr_key","date"], how="left")
 _enriched = _enriched.merge(_day_unique, on=["GEOID","date"], how="left")
 if _neighbor_roll is not None:
