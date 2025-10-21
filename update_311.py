@@ -230,11 +230,14 @@ def _load_raw_seed_from_base(base_csv_path: str) -> pd.DataFrame:
     return df[keep + ["GEOID"] if "GEOID" in df.columns else keep].copy()
 
 # ================== DOSYA YOLLARI ==================
+MAIN_DIR = os.getenv("MAIN_DIR", "main")  
 RAW_CANDIDATES = [
     os.path.join(SAVE_DIR, RAW_311_NAME_Y),
     os.path.join(".",      RAW_311_NAME_Y),
+    os.path.join(MAIN_DIR, RAW_311_NAME_Y),     
     os.path.join(SAVE_DIR, LEGACY_311_Y),
     os.path.join(".",      LEGACY_311_Y),
+    os.path.join(MAIN_DIR, LEGACY_311_Y),      
 ]
 
 def resolve_existing_raw_path():
@@ -258,6 +261,8 @@ def load_existing_raw_or_seed(raw_path: str) -> pd.DataFrame:
     base_csv = os.path.join(SAVE_DIR, AGG_BASENAME)
     if not os.path.exists(base_csv):
         base_csv = os.path.join(".", AGG_BASENAME)
+    if not os.path.exists(base_csv):
+        base_csv = os.path.join(MAIN_DIR, AGG_BASENAME) 
     if os.path.exists(base_csv):
         print(f"🔎 Base CSV bulundu: {os.path.abspath(base_csv)}")
         seed = _load_raw_seed_from_base(base_csv)
@@ -532,9 +537,12 @@ def main():
         # Özet dosyası adayları
         summary_path = None
         for name in (AGG_BASENAME, AGG_ALIAS, "sf_311_last_5_years_3h.csv", "sf_311_last_5_years.csv"):
-            cand = os.path.join(SAVE_DIR, name)
-            if os.path.exists(cand):
-                summary_path = cand
+            for base in (SAVE_DIR, ".", MAIN_DIR):  # <— main de tara
+                cand = os.path.join(base, name)
+                if os.path.exists(cand):
+                    summary_path = cand
+                    break
+            if summary_path:
                 break
 
         if summary_path is None:
