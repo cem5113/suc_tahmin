@@ -3,6 +3,7 @@ from __future__ import annotations
 import os, re, sys, math
 import pandas as pd
 from pathlib import Path
+from datetime import timedelta
 
 # Geo stack (poligon için)
 try:
@@ -27,12 +28,12 @@ POLY_CANDIDATES = [p for p in [
     str(CRIME_DIR / "sf_grid.geojson"),
     str(CRIME_DIR / "sf_crime_grid.geojson"),
     str(CRIME_DIR / "sf_cells.geojson"),
-    # repo kökü de tara
     "sf_grid.geojson", "sf_crime_grid.geojson", "sf_cells.geojson",
 ] if p]
 
 GRID_CSV = Path(os.environ.get("STACKING_DATASET", str(CRIME_DIR / "sf_crime_grid_full_labeled.csv")))
 
+# Yardımcı fonksiyonlar
 def _norm_geoid(s: pd.Series) -> pd.Series:
     return (s.astype(str)
               .str.extract(r"(\d+)", expand=False)
@@ -55,27 +56,23 @@ def _symmetrize(df):
               .query("geoid != neighbor"))
 
 def _ensure_min_degree(df, geos, k=KNN_K, min_deg=MIN_DEG):
-    # derece hesabı
     deg = df.groupby("geoid")["neighbor"].nunique()
     need = set(deg.index[deg < min_deg])
     if not need:
         return df
 
-    # KNN ile tamamla (N^2 güvenli; hücre sayısı makul)
-    # geos: DataFrame(geoid, x, y)
-    idx = {g:i for i,g in enumerate(geos["geoid"])}
-    XY = geos[["x","y"]].to_numpy()
     import numpy as np
     from numpy.linalg import norm
+    idx = {g:i for i,g in enumerate(geos["geoid"])}
+    XY = geos[["x","y"]].to_numpy()
 
     rows = []
     for g in need:
         i = idx[g]
         d = norm(XY - XY[i], axis=1)
         order = np.argsort(d)
-        # ilk eleman kendisi; atla
         picks = []
-        for j in order[1: 1+k*2]:  # biraz geniş seç
+        for j in order[1: 1+k*2]:
             gj = geos.iloc[j]["geoid"]
             if gj != g:
                 picks.append(gj)
@@ -103,13 +100,11 @@ def _neighbors_from_polygons(poly_path: str) -> pd.DataFrame | None:
     gdf["geoid"] = _norm_geoid(gdf["geoid"])
     gdf = gdf[~gdf["geometry"].is_empty & gdf["geometry"].notna()].reset_index(drop=True)
 
-    # hızlı komşuluk (sindex.query_bulk)
-    predicate = "touches" if STRATEGY in ("rook","queen") else "touches"
+    predicate = "touches"
     pairs = gdf.sindex.query_bulk(gdf.geometry, predicate=predicate)
-    # pairs: (lhs_idx, rhs_idx)
     i, j = pairs
     m = pd.DataFrame({"i": i, "j": j})
-    m = m[m["i"] < m["j"]]  # diagonal ve çift tekrarları at
+    m = m[m["i"] < m["j"]]
     df = pd.DataFrame({
         "geoid":   gdf.loc[m["i"], "geoid"].to_numpy(),
         "neighbor":gdf.loc[m["j"], "geoid"].to_numpy(),
@@ -118,7 +113,6 @@ def _neighbors_from_polygons(poly_path: str) -> pd.DataFrame | None:
     return df
 
 def _centroid_table(poly_df: pd.DataFrame | None, grid_csv: Path) -> pd.DataFrame | None:
-    # Poligon varsa centroid’ten x,y; yoksa grid CSV’de lat/lon ara
     if poly_df is not None and gpd is not None:
         c = poly_df.copy()
         c["x"] = c["geometry"].centroid.x
@@ -138,10 +132,12 @@ def _centroid_table(poly_df: pd.DataFrame | None, grid_csv: Path) -> pd.DataFram
             return tmp
     return None
 
+
+# === ANA AKIŞ ===
 def main():
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # 1) Poligonlardan dene
+    # 1️⃣ Poligonlardan komşuluk oluştur
     poly_df = None
     for p in POLY_CANDIDATES:
         if not p:
@@ -157,27 +153,69 @@ def main():
     else:
         nb = pd.DataFrame(columns=["geoid","neighbor"])
 
-    # 2) Centroid tablosu
+    # 2️⃣ Centroid tablosu
     cent = _centroid_table(poly_df, GRID_CSV)
 
-    # 3) Eğer poligon komşuluğu zayıf/boşsa, KNN ile tamamla
+    # 3️⃣ Eksik derece tamamla (KNN)
     if cent is not None:
         nb = _ensure_min_degree(nb, cent, k=KNN_K, min_deg=MIN_DEG)
 
-    # Son temizlik
-    if len(nb) == 0:
-        # son çare: boş bir iskelet
-        nb = pd.DataFrame(columns=["geoid","neighbor"])
+    # 4️⃣ Son temizlik ve kaydetme
     nb["geoid"]    = _norm_geoid(nb["geoid"])
     nb["neighbor"] = _norm_geoid(nb["neighbor"])
     nb = (_symmetrize(nb)
             .drop_duplicates()
-            .sort_values(["geoid","neighbor"])
-         )
+            .sort_values(["geoid","neighbor"]))
     nb.to_csv(OUT_PATH, index=False, encoding="utf-8")
-    # kısa özet
+
     deg = nb.groupby("geoid")["neighbor"].nunique()
-    print(f"neighbors.csv yazıldı → {OUT_PATH} | n_edges={len(nb)} | n_nodes={len(deg)} | min_deg={int(deg.min()) if len(deg) else 0} | mean_deg={round(float(deg.mean()),2) if len(deg) else 0.0}")
+    print(f"neighbors.csv yazıldı → {OUT_PATH} | n_edges={len(nb)} | n_nodes={len(deg)} | "
+          f"min_deg={int(deg.min()) if len(deg) else 0} | mean_deg={round(float(deg.mean()),2) if len(deg) else 0.0}")
+
+    # 5️⃣ Komşuluk bazlı zenginleştirme (sf_crime_08 → sf_crime_09)
+    sf_path = CRIME_DIR / "sf_crime_08.csv"
+    dst_path = CRIME_DIR / "sf_crime_09.csv"
+
+    if not sf_path.exists():
+        print(f"⚠️ {sf_path} bulunamadı, sf_crime_09 oluşturulmadı.")
+        return
+
+    print(f"▶︎ Komşuluk bazlı zenginleştirme başlıyor: {sf_path.name} + {OUT_PATH.name} → {dst_path.name}")
+
+    sf = pd.read_csv(sf_path, parse_dates=["datetime"], low_memory=False)
+    sf["geoid"] = sf["geoid"].astype(str).str.zfill(GEOID_LEN)
+    nb["geoid"] = nb["geoid"].astype(str).str.zfill(GEOID_LEN)
+    nb["neighbor"] = nb["neighbor"].astype(str).str.zfill(GEOID_LEN)
+
+    sf_crimes = sf[sf["Y_label"] == 1][["geoid", "datetime"]].copy()
+
+    def neighbor_stats(base_time, geoid):
+        neighbors = nb.loc[nb["geoid"] == geoid, "neighbor"].tolist()
+        if not neighbors:
+            return (0, 0, 0)
+        t1 = base_time - timedelta(hours=24)
+        t3 = base_time - timedelta(hours=72)
+        t7 = base_time - timedelta(days=7)
+        recent = sf_crimes[(sf_crimes["datetime"] <= base_time) & (sf_crimes["geoid"].isin(neighbors))]
+        n24 = recent[recent["datetime"] >= t1].shape[0]
+        n72 = recent[recent["datetime"] >= t3].shape[0]
+        n7d = recent[recent["datetime"] >= t7].shape[0]
+        return (n24, n72, n7d)
+
+    records = []
+    for _, row in sf.iterrows():
+        g = row["geoid"]
+        t = row["datetime"]
+        n24, n72, n7d = neighbor_stats(t, g)
+        records.append((g, t, n24, n72, n7d))
+
+    nei_feats = pd.DataFrame(records, columns=["geoid", "datetime",
+                                               "neighbor_crime_24h", "neighbor_crime_72h", "neighbor_crime_7d"])
+    sf9 = sf.merge(nei_feats, on=["geoid", "datetime"], how="left")
+    sf9.to_csv(dst_path, index=False)
+    print(f"✅ {dst_path.name} oluşturuldu → {len(sf9):,} satır, {sf9.shape[1]} sütun")
+    print(sf9.head(5))
+
 
 if __name__ == "__main__":
     main()
