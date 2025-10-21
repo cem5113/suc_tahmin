@@ -266,7 +266,12 @@ os.environ["DEMOG_WHITELIST"] = st.secrets.get(
 
 # --- GitHub Actions entegrasyonu ---
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "cem5113/crime_prediction_data")
-GITHUB_WORKFLOW = os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml")
+GITHUB_WORKFLOW = os.environ.get("GITHUB_WORKFLOW", ".github/workflows/full_pipeline.yml")
+
+ARTIFACT_NAMES = [
+    "crime-pipeline-output",       # ✅ yeni
+    "sf-crime-pipeline-output",    # (geri uyum)
+]
 
 def _gh_headers():
     token = st.secrets.get("GH_TOKEN") or os.environ.get("GH_TOKEN")
@@ -274,26 +279,51 @@ def _gh_headers():
         raise RuntimeError("GH_TOKEN gerekli (Streamlit secrets veya env).")
     return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
 
-def fetch_file_from_latest_artifact(pick_names: List[str], artifact_name="sf-crime-pipeline-output") -> bytes | None:
+def fetch_file_from_latest_artifact(pick_names: List[str], artifact_names: Optional[List[str]] = None) -> bytes | None:
+    names_to_try = artifact_names or ARTIFACT_NAMES
     runs_url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/runs?per_page=20"
     runs = requests.get(runs_url, headers=_gh_headers(), timeout=30).json()
     run_ids = [r["id"] for r in runs.get("workflow_runs", []) if r.get("conclusion") == "success"]
+
     for rid in run_ids:
         arts_url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/runs/{rid}/artifacts"
         arts = requests.get(arts_url, headers=_gh_headers(), timeout=30).json().get("artifacts", [])
         for a in arts:
-            if a.get("name") == artifact_name and not a.get("expired", False):
-                dl = requests.get(a["archive_download_url"], headers=_gh_headers(), timeout=60)
-                zf = zipfile.ZipFile(io.BytesIO(dl.content))
-                names = zf.namelist()
-                for pick in pick_names:
-                    candidates = [pick, f"crime_prediction_data/{pick}"]
-                    for c in candidates:
-                        if c in names:
-                            return zf.read(c)
-                for n in names:
-                    if any(n.endswith(p) for p in pick_names):
-                        return zf.read(n)
+            if a.get("expired", False):
+                continue
+            if a.get("name") not in names_to_try:
+                continue
+            dl = requests.get(a["archive_download_url"], headers=_gh_headers(), timeout=60)
+            zf = zipfile.ZipFile(io.BytesIO(dl.content))
+            names = zf.namelist()
+
+            # 1) Doğrudan dosya araması
+            for pick in pick_names:
+                for cand in (pick, f"crime_prediction_data/{pick}"):
+                    if cand in names:
+                        return zf.read(cand)
+
+            # 2) "paquet_run_*.zip" içinden ara (artifact ZIP'i içinde ikinci bir zip olabilir)
+            paquet_inner = [n for n in names if re.search(r"^paquet_run_\d+\.zip$", n)]
+            for pin in paquet_inner:
+                with zf.open(pin) as inner_blob:
+                    with zipfile.ZipFile(io.BytesIO(inner_blob.read())) as inner_zip:
+                        inner_names = inner_zip.namelist()
+                        for pick in pick_names:
+                            # hem düz ad hem de fr_eda/ altından eşleşme
+                            exacts = [pick, f"fr_eda/{pick}", f"crime_prediction_data/{pick}"]
+                            for ex in exacts:
+                                if ex in inner_names:
+                                    return inner_zip.read(ex)
+                        # adın sonu eşleşsin (fallback)
+                        for n in inner_names:
+                            if any(n.endswith(p) for p in pick_names):
+                                return inner_zip.read(n)
+
+            # 3) Son-çare: isim sonu eşleşmesi
+            for n in names:
+                if any(n.endswith(p) for p in pick_names):
+                    return zf.read(n)
     return None
 
 def dispatch_workflow(persist: str = "artifact", force: bool = True) -> dict:
@@ -335,22 +365,41 @@ def fetch_latest_artifact_df() -> Optional[pd.DataFrame]:
         runs_url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/runs?per_page=20"
         runs = requests.get(runs_url, headers=_gh_headers(), timeout=30).json()
         run_ids = [r["id"] for r in runs.get("workflow_runs", []) if r.get("conclusion") == "success"]
+
         for rid in run_ids:
             arts_url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/runs/{rid}/artifacts"
             arts = requests.get(arts_url, headers=_gh_headers(), timeout=30).json().get("artifacts", [])
             for a in arts:
-                if a.get("name") == "sf-crime-pipeline-output" and not a.get("expired", False):
-                    dl = requests.get(a["archive_download_url"], headers=_gh_headers(), timeout=60)
-                    zf = zipfile.ZipFile(io.BytesIO(dl.content))
-                    for pick in ("crime_prediction_data/sf_crime_08.csv", "sf_crime_08.csv"):
-                        if pick in zf.namelist():
-                            with zf.open(pick) as f:
-                                df = pd.read_csv(f, low_memory=False)
-                                if "date" in df.columns:
-                                    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-                                elif "datetime" in df.columns:
-                                    df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
-                                return df
+                if a.get("expired", False) or a.get("name") not in ARTIFACT_NAMES:
+                    continue
+                dl = requests.get(a["archive_download_url"], headers=_gh_headers(), timeout=60)
+                zf = zipfile.ZipFile(io.BytesIO(dl.content))
+
+                # Önce düzden dene
+                for pick in ("crime_prediction_data/sf_crime_08.csv", "sf_crime_08.csv"):
+                    if pick in zf.namelist():
+                        with zf.open(pick) as f:
+                            df = pd.read_csv(f, low_memory=False)
+                            if "date" in df.columns:
+                                df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+                            elif "datetime" in df.columns:
+                                df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
+                            return df
+
+                # paquet_run_*.zip içinden dene
+                for n in zf.namelist():
+                    if re.search(r"^paquet_run_\d+\.zip$", n):
+                        with zf.open(n) as inner_blob:
+                            with zipfile.ZipFile(io.BytesIO(inner_blob.read())) as inner_zip:
+                                for pick in ("sf_crime_08.csv", "crime_prediction_data/sf_crime_08.csv"):
+                                    if pick in inner_zip.namelist():
+                                        with inner_zip.open(pick) as f:
+                                            df = pd.read_csv(f, low_memory=False)
+                                            if "date" in df.columns:
+                                                df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+                                            elif "datetime" in df.columns:
+                                                df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
+                                            return df
         return None
     except Exception as e:
         st.warning(f"Artifact indirilemedi: {e}")
@@ -927,8 +976,8 @@ DOWNLOADS = {
         "path": str(DATA_DIR / "sf_government_buildings.csv"),
     },
     "Hava Durumu": {
-        "url": "https://raw.githubusercontent.com/cem5113/crime_prediction_data/main/sf_weather_5years_y.csv",
-        "path": str(DATA_DIR / "sf_weather_5years_y.csv"),
+        "url": "https://raw.githubusercontent.com/cem5113/crime_prediction_data/main/sf_weather_5years.csv",
+        "path": str(DATA_DIR / "sf_weather_5years.csv"),
     },
 }
 
