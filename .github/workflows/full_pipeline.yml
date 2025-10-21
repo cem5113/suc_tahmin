@@ -499,7 +499,7 @@ jobs:
           echo "---- sf_crime_09.csv (head) ----"
           head -n 5 "$DST" || true
 
-      # 10.1) FR: neighbors ile 08 → 09 (scripts/make_neigbors_fr.py)
+      # 10.1) FR: neighbors ile 08 → 09 (scripts/make_neighbors_fr.py)
       - name: 10.1) FR komşuluk → fr_crime_09.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
@@ -511,12 +511,12 @@ jobs:
 
           if [ -f "$SRC" ]; then
             echo "▶︎ FR komşuluk zenginleştirme başlıyor: $SRC → $DST"
-            if [ -f "scripts/make_neigbors_fr.py" ]; then
-              python -u scripts/make_neigbors_fr.py --in "$SRC" --out "$DST" || python -u scripts/make_neigbors_fr.py
+            if [ -f "scripts/make_neighbors_fr.py" ]; then
+              python -u scripts/make_neighbors_fr.py --in "$SRC" --out "$DST" || python -u scripts/make_neighbors_fr.py
             elif [ -f "make_neigbors_fr.py" ]; then
               python -u make_neigbors_fr.py --in "$SRC" --out "$DST" || python -u make_neigbors_fr.py
             else
-              echo "❌ scripts/make_neigbors_fr.py bulunamadı"; exit 2
+              echo "❌ scripts/make_neighbors_fr.py bulunamadı"; exit 2
             fi
             test -f "$DST" || { echo "❌ Beklenen çıktı yok: $DST"; exit 2; }
             echo "---- fr_crime_09.csv (head) ----"
