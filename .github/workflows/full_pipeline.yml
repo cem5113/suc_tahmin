@@ -553,8 +553,8 @@ jobs:
             elif [ -f "scripts/enrich_police_gov_06_to_07.py" ]; then python -u scripts/enrich_police_gov_06_to_07.py;
             else echo "Polis/Gov adımı bulunamadı"; exit 2; fi
           else
-            if [ -f update_police_gov.py ]; then python -u update_police_gov.py;
-            elif [ -f scripts/enrich_police_gov_06_to_07.py ];</span> then python -u scripts/enrich_police_gov_06_to_07.py;
+            if [ -f "update_police_gov.py" ]; then python -u update_police_gov.py;
+            elif [ -f "scripts/enrich_police_gov_06_to_07.py" ]; then python -u scripts/enrich_police_gov_06_to_07.py;
             else echo "Polis/Gov adımı bulunamadı"; exit 2; fi
           fi
 
@@ -643,7 +643,7 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -euo pipefail
-          FR_IN="${CRIME_DATA_DIR}/sf_crime_08.csv"
+          SF_IN="${CRIME_DATA_DIR}/sf_crime_08.csv"
           OUTDIR="outputs_feature_analysis/sf_08"
           if [ -f "${SF_IN}" ]; then
             echo "▶︎ SF EDA başlıyor: ${SF_IN} → ${OUTDIR}"
@@ -699,7 +699,7 @@ jobs:
           fi
 
       # 11) Kalite kontrol — SF(08) / FR(09)
-      - name: 11) Kalite kontrol (SF: 08, FR: 09)
+      - name: "11) Kalite kontrol (SF: 08, FR: 09)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -771,7 +771,7 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' && env.PERSIST_MODE == 'artifact' }}
         uses: actions/upload-artifact@v4
         with:
-          name: crime-pipeline-output
+          name: sf-crime-pipeline-output
           if-no-files-found: warn
           path: |
             paquet_run_${{ github.run_number }}.zip
