@@ -57,6 +57,10 @@ def save_atomic(df, path):
 SAVE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
+# ⚙️ MAIN_DIR'i ÖNCE tanımla (FIX)
+MAIN_DIR = os.getenv("MAIN_DIR", "main")
+os.makedirs(MAIN_DIR, exist_ok=True)
+
 # 🔴 Adlandırma standardı
 # - Ham 5y kayıt:             sf_311_last_5_years_y.csv
 # - 3 saatlik özet (3h bin):  sf_311_last_5_years.csv  (alias: sf_311_last_5_years_3h.csv)
@@ -72,13 +76,13 @@ LEGACY_311   = os.getenv("LEGACY_311",   "sf_311_last_5_year.csv")
 DATASET_BASE = os.getenv("SF311_DATASET", "https://data.sfgov.org/resource/vw6y-z8j6.json")
 SOCRATA_APP_TOKEN = os.getenv("SOCS_APP_TOKEN", "").strip()
 
-# GeoJSON adayları
+# GeoJSON adayları (FIX: MAIN_DIR artık tanımlı)
 GEOJSON_NAME = os.getenv("SF_BLOCKS_GEOJSON", "sf_census_blocks_with_population.geojson")
 GEOJSON_CANDIDATES = [
     os.path.join(SAVE_DIR, GEOJSON_NAME),
     os.path.join("crime_prediction_data", GEOJSON_NAME),
     os.path.join(".", GEOJSON_NAME),
-    os.path.join(MAIN_DIR, GEOJSON_NAME),  # <— eklendi
+    os.path.join(MAIN_DIR, GEOJSON_NAME),  # ← artık güvenli
 ]
 
 # İndirme/bölütleme ayarları
@@ -199,14 +203,11 @@ def _load_raw_seed_from_base(base_csv_path: str) -> pd.DataFrame:
             print(f"ℹ️ {base_csv_path} özet (3h); ham seed olarak kullanılmayacak.")
             return pd.DataFrame()
         # — minimalist seed üret —
-        # Beklenen 'keep' alanlarını oluşturup boş/NaN ile dolduruyoruz;
-        # datetime/date/time alanlarını oluşturmak için 'date' + 'hour_range' kullanılır.
         print(f"🧯 {base_csv_path} özet (3h); ALLOW_AGG_AS_SEED=1 ile minimal seed üretiliyor.")
         seed = pd.DataFrame(columns=[
             "id","datetime","date","time","lat","long","category","subcategory",
             "agency_responsible","latitude","longitude"
         ])
-        # date + hour_range'tan sembolik datetime
         if {"date","hour_range"}.issubset(df.columns):
             _d = pd.to_datetime(df["date"], errors="coerce")
             _h = pd.to_numeric(df["hour_range"].str.extract(r"(\d{1,2})")[0], errors="coerce").fillna(0).astype(int)
@@ -250,14 +251,13 @@ def _load_raw_seed_from_base(base_csv_path: str) -> pd.DataFrame:
     return df[keep + ["GEOID"] if "GEOID" in df.columns else keep].copy()
 
 # ================== DOSYA YOLLARI ==================
-MAIN_DIR = os.getenv("MAIN_DIR", "main")  
 RAW_CANDIDATES = [
     os.path.join(SAVE_DIR, RAW_311_NAME_Y),
     os.path.join(".",      RAW_311_NAME_Y),
-    os.path.join(MAIN_DIR, RAW_311_NAME_Y),     
+    os.path.join(MAIN_DIR, RAW_311_NAME_Y),
     os.path.join(SAVE_DIR, LEGACY_311_Y),
     os.path.join(".",      LEGACY_311_Y),
-    os.path.join(MAIN_DIR, LEGACY_311_Y),      
+    os.path.join(MAIN_DIR, LEGACY_311_Y),
 ]
 
 def resolve_existing_raw_path():
@@ -282,7 +282,7 @@ def load_existing_raw_or_seed(raw_path: str) -> pd.DataFrame:
     if not os.path.exists(base_csv):
         base_csv = os.path.join(".", AGG_BASENAME)
     if not os.path.exists(base_csv):
-        base_csv = os.path.join(MAIN_DIR, AGG_BASENAME) 
+        base_csv = os.path.join(MAIN_DIR, AGG_BASENAME)
     if os.path.exists(base_csv):
         print(f"🔎 Base CSV bulundu: {os.path.abspath(base_csv)}")
         seed = _load_raw_seed_from_base(base_csv)
@@ -425,6 +425,7 @@ def download_by_date_chunks(start_date):
 def main():
     print("🔎 CWD:", os.getcwd())
     print("🔎 Tercih edilen SAVE_DIR:", os.path.abspath(SAVE_DIR))
+    print("🔎 MAIN_DIR:", os.path.abspath(MAIN_DIR))
 
     # 1) Mevcut ham dosya (artifact’tan gelmiş olabilir) veya base’den seed
     raw_path = resolve_existing_raw_path()
@@ -492,9 +493,9 @@ def main():
             save_atomic(df_raw, os.path.join(SAVE_DIR, LEGACY_311_Y))
             save_atomic(df_raw, os.path.join(SAVE_DIR, LEGACY_311))
             # — main/ kopyaları —
-            save_atomic(df_raw, os.path.join(MAIN_DIR, RAW_311_NAME_Y))   # <— eklendi
-            save_atomic(df_raw, os.path.join(MAIN_DIR, LEGACY_311_Y))     # <— eklendi
-            save_atomic(df_raw, os.path.join(MAIN_DIR, LEGACY_311))       # <— eklendi
+            save_atomic(df_raw, os.path.join(MAIN_DIR, RAW_311_NAME_Y))   # ← güvenli
+            save_atomic(df_raw, os.path.join(MAIN_DIR, LEGACY_311_Y))     # ← güvenli
+            save_atomic(df_raw, os.path.join(MAIN_DIR, LEGACY_311))       # ← güvenli
         except Exception as e:
             print(f"⚠️ Legacy kopya yazım uyarısı: {e}")
 
@@ -516,7 +517,7 @@ def main():
             df_empty_raw = pd.DataFrame(columns=empty_raw_cols)
             save_atomic(df_empty_raw, os.path.join(SAVE_DIR, p))
             try:
-                save_atomic(df_empty_raw, os.path.join(MAIN_DIR, p))  # <— eklendi
+                save_atomic(df_empty_raw, os.path.join(MAIN_DIR, p))  # ← güvenli
             except Exception as e:
                 print(f"⚠️ main/ ham boş yazılamadı: {e}")
     
@@ -526,7 +527,7 @@ def main():
                 df_empty_agg = pd.DataFrame(columns=empty_agg_cols)
                 save_atomic(df_empty_agg, os.path.join(SAVE_DIR, p))
                 try:
-                    save_atomic(df_empty_agg, os.path.join(MAIN_DIR, p))  # <— eklendi
+                    save_atomic(df_empty_agg, os.path.join(MAIN_DIR, p))  # ← güvenli
                 except Exception as e:
                     print(f"⚠️ main/ özet boş yazılamadı: {e}")
     
@@ -557,9 +558,9 @@ def main():
             save_atomic(grouped, agg_alias_path)
         # — main/ için de özet kopyaları —
         try:
-            save_atomic(grouped, os.path.join(MAIN_DIR, AGG_BASENAME))     # <— eklendi
+            save_atomic(grouped, os.path.join(MAIN_DIR, AGG_BASENAME))     # ← güvenli
             if AGG_ALIAS and AGG_ALIAS != AGG_BASENAME:
-                save_atomic(grouped, os.path.join(MAIN_DIR, AGG_ALIAS))     # <— eklendi
+                save_atomic(grouped, os.path.join(MAIN_DIR, AGG_ALIAS))     # ← güvenli
         except Exception as e:
             print(f"⚠️ main/ özet kopyası uyarısı: {e}")
         print(f"📁 Özet yazıldı: {os.path.abspath(agg_path)}")
@@ -583,7 +584,7 @@ def main():
         # Özet dosyası adayları
         summary_path = None
         for name in (AGG_BASENAME, AGG_ALIAS, "sf_311_last_5_years_3h.csv", "sf_311_last_5_years.csv"):
-            for base in (SAVE_DIR, ".", MAIN_DIR):  # <— main de tara
+            for base in (SAVE_DIR, ".", MAIN_DIR):  # ← main de tara
                 cand = os.path.join(base, name)
                 if os.path.exists(cand):
                     summary_path = cand
