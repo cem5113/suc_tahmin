@@ -72,6 +72,10 @@ RAW_911_URL_CANDIDATES = [
 # LOG / HELPERS
 # =========================
 
+def safe_dropna(df: pd.DataFrame, subset: list[str]) -> pd.DataFrame:
+    cols = [c for c in subset if c in df.columns]
+    return df if not cols else df.dropna(subset=cols)
+
 def log(msg: str):
     print(msg, flush=True)
 
@@ -842,16 +846,6 @@ missing_report(final_911, "911_summary_normalize")
 # =========================
 # ROLLING (3g/7g) — GEOID ve GEOID×hr_key
 # =========================
-for W in ROLL_WINDOWS:
-    _day_unique[f"911_geo_last{W}d"] = (
-        _day_unique.groupby("GEOID")["daily_cnt"]
-        .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
-    ).astype("float32")
-    _hr_unique[f"911_geo_hr_last{W}d"] = (
-        _hr_unique.groupby(["GEOID","hr_key"])["hr_cnt"]
-        .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
-    ).astype("float32")
-
 missing_report(_day_unique, "911_day_unique_after_roll")
 dump_nan_samples(_day_unique, "911_day_unique_after_roll")
 
