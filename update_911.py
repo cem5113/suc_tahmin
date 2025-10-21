@@ -15,7 +15,7 @@ try:
     SF_TZ = zoneinfo.ZoneInfo("America/Los_Angeles")
 except Exception:
     SF_TZ = None
-    
+
 # =========================
 # CONFIG & PATHS
 # =========================
@@ -63,7 +63,7 @@ SF911_RECENT_HOURS = int(os.getenv("SF911_RECENT_HOURS", "6"))
 RAW_911_URL_ENV = os.getenv("RAW_911_URL", "").strip()
 
 RAW_911_URL_CANDIDATES = [
-    RAW_911_URL_ENV or "",  
+    RAW_911_URL_ENV or "",
     "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year_y.csv",
     "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year.csv",
 ]
@@ -242,6 +242,21 @@ SF_BBOX = (-123.2, 37.6, -122.3, 37.9)
 # Zaman pencereleri (rolling)
 ROLL_WINDOWS = (3, 7)
 
+# İzin verilen 911 alanları (zenginleştirmede)
+ALLOWED_911_FEATURES = {
+    "event_hour",
+    "911_request_count_hour_range",
+    "received_time",
+    "911_request_count_daily(before_24_hours)",
+    "date",
+    "hour_range",
+    "GEOID",
+    "hr_key",
+    "day_of_week",
+    "season",
+    "month"
+}
+
 # --- KOMBİNE KAYIT HELPER ---
 def save_911_both(df: pd.DataFrame):
     """911 özetini hem normal ada hem _y ada kaydet."""
@@ -331,15 +346,23 @@ def make_standard_summary(raw: pd.DataFrame) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame(columns=["GEOID","date","hour_range","911_request_count_hour_range","911_request_count_daily(before_24_hours)"])
     df = raw.copy()
+
+    # yalnızca izin verilen alanlarla ilerleyelim (varsa filtrele)
+    allow = set(raw.columns) & ALLOWED_911_FEATURES
+    if allow:
+        df = df[list(allow)]
+
     ts_col = None
     for cand in ["received_time","received_datetime","date","datetime","timestamp","call_received_datetime"]:
         if cand in df.columns:
             ts_col = cand; break
     if ts_col is None:
         raise ValueError("Zaman kolonu bulunamadı (received_time/received_datetime/date).")
+
     df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
     df["date"] = df[ts_col].dt.date
     df["event_hour"] = df[ts_col].dt.hour
+
     eh = pd.to_numeric(df["event_hour"], errors="coerce").fillna(0).astype(int) % 24
     start = (eh // 3) * 3
     df["hour_range"] = start.apply(lambda s: f"{int(s):02d}-{int(min(s+3,24)):02d}")
@@ -372,12 +395,14 @@ def summary_from_local(path: Path | str, min_date=None) -> pd.DataFrame:
         df["date"] = to_date(df["date"])
         if "GEOID" in df.columns:
             df["GEOID"] = normalize_geoid(df["GEOID"], DEFAULT_GEOID_LEN)
+
         def _fmt_hr(hr):
             m = re.match(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$", str(hr))
             if not m: return None
             a = int(m.group(1)) % 24; b = int(m.group(2)); b = b if b > a else min(a+3, 24)
             return f"{a:02d}-{b:02d}"
         df["hour_range"] = df["hour_range"].apply(_fmt_hr)
+
         if "911_request_count_daily(before_24_hours)" not in df.columns:
             keys = (["GEOID"] if "GEOID" in df.columns else []) + ["date"]
             day = df.groupby(keys, dropna=False, observed=True)["911_request_count_hour_range"] \
@@ -387,7 +412,11 @@ def summary_from_local(path: Path | str, min_date=None) -> pd.DataFrame:
             df = df[df["date"] >= min_date]
         cols_tail = [c for c in ["date","hour_range","GEOID"] if c in df.columns]
         cols = [c for c in df.columns if c not in cols_tail] + cols_tail
-        return df[cols]
+
+        # yalnızca izin verilen 911 alanlarını tut
+        keep = [c for c in cols if c in ALLOWED_911_FEATURES or c in {
+            "911_request_count_hour_range","911_request_count_daily(before_24_hours)"}]
+        return df[keep]
     # değilse ham → özet
     std = make_standard_summary(df)
     if min_date is not None:
@@ -458,7 +487,10 @@ def summary_from_release(url: str, min_date=None) -> pd.DataFrame:
             df = df[df["date"] >= min_date]
         cols_tail = [c for c in ["date","hour_range","GEOID"] if c in df.columns]
         cols = [c for c in df.columns if c not in cols_tail] + cols_tail
-        return df[cols]
+
+        keep = [c for c in cols if c in ALLOWED_911_FEATURES or c in {
+            "911_request_count_hour_range","911_request_count_daily(before_24_hours)"}]
+        return df[keep]
     # değilse ham → özet
     std = make_standard_summary(df)
     if min_date is not None:
@@ -756,6 +788,18 @@ try:
             _day_unique["daily_cnt"] = 0
     _day_unique["daily_cnt"] = pd.to_numeric(_day_unique["daily_cnt"], errors="coerce").fillna(0).astype("int32")
 
+    # 2) Saat dilimi baz
+    if {"GEOID","hr_key","date","911_request_count_hour_range"}.issubset(final_911.columns):
+        _hr_unique = (
+            final_911.groupby(["GEOID","hr_key","date"], as_index=False, observed=True)["911_request_count_hour_range"]
+            .sum()
+            .rename(columns={"911_request_count_hour_range": "hr_cnt"})
+            .sort_values(["GEOID","hr_key","date"])
+            .reset_index(drop=True)
+        )
+    else:
+        _hr_unique = pd.DataFrame(columns=["GEOID","hr_key","date","hr_cnt"])
+
     # === GEOID bazında son 3/7 gün 911 toplamı (bugün hariç) ===
     try:
         if not _day_unique.empty and {"GEOID", "date", "daily_cnt"}.issubset(_day_unique.columns):
@@ -799,54 +843,35 @@ try:
                 if c in _day_unique.columns:
                     _day_unique[c] = pd.to_numeric(_day_unique[c], errors="coerce").fillna(0).astype("int32")
 
-            # 2) Saat dilimi baz
-            if {"GEOID","hr_key","date","911_request_count_hour_range"}.issubset(final_911.columns):
-                _hr_unique = (
-                    final_911.groupby(["GEOID","hr_key","date"], as_index=False, observed=True)["911_request_count_hour_range"]
-                    .sum()
-                    .rename(columns={"911_request_count_hour_range": "hr_cnt"})
-                    .sort_values(["GEOID","hr_key","date"])
-                    .reset_index(drop=True)
-                )
-            else:
-                _hr_unique = pd.DataFrame(columns=["GEOID","hr_key","date","hr_cnt"])
+        # =========================
+        # ROLLING (3g/7g) — güvenli
+        # =========================
+        for W in ROLL_WINDOWS:
+            if not _day_unique.empty:
+                val_col = "daily_cnt"
+                if "GEOID" in _day_unique.columns:
+                    _day_unique[f"911_geo_last{W}d"] = (
+                        _day_unique.groupby("GEOID", observed=True)[val_col]
+                        .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
+                    ).astype("float32")
+                else:
+                    _day_unique[f"911_geo_last{W}d"] = (
+                        _day_unique.sort_values("date")[val_col]
+                        .rolling(W, min_periods=1).sum().shift(1)
+                    ).astype("float32")
 
-            # =========================
-            # ROLLING (3g/7g)
-            # =========================
-            for W in ROLL_WINDOWS:
-                if not _day_unique.empty:
-                    # günlük rolling için güvenli kolon seçimi
-                    val_col = "daily_cnt" if "daily_cnt" in _day_unique.columns else (
-                        "911_request_count_daily(before_24_hours)" if "911_request_count_daily(before_24_hours)" in _day_unique.columns else None
-                    )
-                    if val_col is None:
-                        _day_unique["daily_cnt"] = 0
-                        val_col = "daily_cnt"
+        # ⬇️ Rolling sonrası raporlar
+        missing_report(_day_unique, "911_day_unique_after_roll")
+        dump_nan_samples(_day_unique, "911_day_unique_after_roll")
+        missing_report(_hr_unique, "911_hr_unique_after_roll")
+        dump_nan_samples(_hr_unique, "911_hr_unique_after_roll")
 
-                    if "GEOID" in _day_unique.columns:
-                        _day_unique[f"911_geo_last{W}d"] = (
-                            _day_unique.groupby("GEOID", observed=True)[val_col]
-                            .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
-                        ).astype("float32")
-                    else:
-                        # GEOID yoksa şehir geneli tek seri rolling
-                        _day_unique[f"911_geo_last{W}d"] = (
-                            _day_unique.sort_values("date")[val_col]
-                            .rolling(W, min_periods=1).sum().shift(1)
-                        ).astype("float32")
+except Exception as e:
+    log("⚠️ Normalize sırasında uyarı; devam ediliyor:")
+    log("".join(traceback.format_exception(e)))
 
-            # ⬇️ Rolling sonrası raporlar
-            missing_report(_day_unique, "911_day_unique_after_roll")
-            dump_nan_samples(_day_unique, "911_day_unique_after_roll")
-            missing_report(_hr_unique, "911_hr_unique_after_roll")
-            dump_nan_samples(_hr_unique, "911_hr_unique_after_roll")
-
-    except Exception as e:
-        log("⚠️ Normalize sırasında uyarı; devam ediliyor:")
-        log("".join(traceback.format_exception(e)))
-
-    # 5) ARTIMLI GÜNCELLEME (mevcut taban üzerine yeni günleri ekle)
+# 5) ARTIMLI GÜNCELLEME (mevcut taban üzerine yeni günleri ekle)
+try:
     base_max_date = to_date(final_911["date"]).max() if "date" in final_911.columns and not final_911.empty else None
     today_sf = (datetime.now(SF_TZ) if SF_TZ is not None else datetime.now()).date()
 
@@ -859,45 +884,39 @@ try:
 
     log(f"🗓️ İndirme aralığı: {fetch_start} → {fetch_end} ({(fetch_end - fetch_start).days + 1} gün)")
 
-    try:
-        inc = incremental_summary(fetch_start, fetch_end)
-        if inc is not None and not inc.empty:
-            if "GEOID" in inc.columns:
-                inc["GEOID"] = normalize_geoid(inc["GEOID"], DEFAULT_GEOID_LEN)
-            if "date" in inc.columns:
-                inc["date"] = to_date(inc["date"])
+    inc = incremental_summary(fetch_start, fetch_end)
+    if inc is not None and not inc.empty:
+        if "GEOID" in inc.columns:
+            inc["GEOID"] = normalize_geoid(inc["GEOID"], DEFAULT_GEOID_LEN)
+        if "date" in inc.columns:
+            inc["date"] = to_date(inc["date"])
 
-            before = len(final_911)
-            final_911 = pd.concat([final_911, inc], ignore_index=True)
+        before = len(final_911)
+        final_911 = pd.concat([final_911, inc], ignore_index=True)
 
-            subset_cols = [c for c in ["GEOID","date","hour_range"] if c in final_911.columns]
-            final_911 = (
-                final_911
-                .dropna(subset=["date"])
-                .sort_values(subset_cols if subset_cols else (["date"] if "date" in final_911.columns else None))
-                .drop_duplicates(subset=subset_cols if subset_cols else (["date"] if "date" in final_911.columns else None),
-                                 keep="last")
-            )
-            if "date" in final_911.columns:
-                final_911 = final_911[final_911["date"] >= five_years_ago]
+        subset_cols = [c for c in ["GEOID","date","hour_range"] if c in final_911.columns]
+        final_911 = (
+            final_911
+            .dropna(subset=["date"])
+            .sort_values(subset_cols if subset_cols else (["date"] if "date" in final_911.columns else None))
+            .drop_duplicates(subset=subset_cols if subset_cols else (["date"] if "date" in final_911.columns else None),
+                             keep="last")
+        )
+        if "date" in final_911.columns:
+            final_911 = final_911[final_911["date"] >= five_years_ago]
 
-            save_911_both(final_911)
-            log(f"💾 911 özet GÜNCELLENDİ (base+API) → {local_summary_path} & {y_summary_path} (+{len(final_911)-before:,} satır)")
-        else:
-            log("ℹ️ API tarafında yeni gün yok veya boş döndü; mevcut taban veri kullanılacak.")
-    except Exception as e:
-        log("⚠️ Artımlı güncelleme sırasında hata (mevcut taban veri kullanılacak):")
-        log("".join(traceback.format_exception(e)))
-
-    # 6) SON KONTROL
-    if final_911 is None or final_911.empty:
-        log("⚠️ 911 özeti üretilemedi (boş). Çıkılıyor.")
-        sys.exit(1)
-
+        save_911_both(final_911)
+        log(f"💾 911 özet GÜNCELLENDİ (base+API) → {local_summary_path} & {y_summary_path} (+{len(final_911)-before:,} satır)")
+    else:
+        log("ℹ️ API tarafında yeni gün yok veya boş döndü; mevcut taban veri kullanılacak.")
 except Exception as e:
-    log("❌ Dış normalize+incremental try bloğunda hata:")
-    import traceback
+    log("⚠️ Artımlı güncelleme sırasında hata (mevcut taban veri kullanılacak):")
     log("".join(traceback.format_exception(e)))
+
+# 6) SON KONTROL
+if final_911 is None or final_911.empty:
+    log("⚠️ 911 özeti üretilemedi (boş). Çıkılıyor.")
+    sys.exit(1)
 
 # =========================
 # STANDARDIZE + DERIVED KEYS (hr_key, dow, season)
@@ -915,22 +934,17 @@ final_911["month"] = pd.to_datetime(final_911["date"]).dt.month.astype("int8")
 _season_map = {12:"Winter",1:"Winter",2:"Winter",3:"Spring",4:"Spring",5:"Spring",6:"Summer",7:"Summer",8:"Summer",9:"Fall",10:"Fall",11:"Fall"}
 final_911["season"] = final_911["month"].map(_season_map).astype("category")
 
+# Sadece izinli 911 alanlarını tut (downstream için sadeleşme)
+keep_cols_911 = [c for c in final_911.columns if c in (ALLOWED_911_FEATURES | {
+    "911_request_count_hour_range","911_request_count_daily(before_24_hours)","hr_key","day_of_week","season","month"})]
+final_911 = final_911[keep_cols_911]
+
 log_shape(final_911, "911 summary (normalize)")
 log_date_range(final_911, "date", "911")
 missing_report(final_911, "911_summary_normalize")
 
 # =========================
-# ROLLING (3g/7g) — GEOID ve GEOID×hr_key
-# =========================
-missing_report(_day_unique, "911_day_unique_after_roll")
-dump_nan_samples(_day_unique, "911_day_unique_after_roll")
-
-missing_report(_hr_unique, "911_hr_unique_after_roll")
-dump_nan_samples(_hr_unique, "911_hr_unique_after_roll")
-
-
-# =========================
-# KOMŞU GEOID ÖZELLİKLERİ (günlük baz)
+# KOMŞU GEOID ÖZELLİKLERİ (günlük baz) — opsiyonel
 # =========================
 def build_neighbors(method: str = "touches", radius_m: float = 500.0) -> pd.DataFrame:
     ...
@@ -945,9 +959,8 @@ if ENABLE_NEIGHBORS:
         log(f"⚠️ Komşu haritası üretilemedi: {e}")
         neighbors_df = None
 
-# ✅ _neighbor_roll'u bu aşamada tanımla
 _neighbor_roll = None
-if neighbors_df is not None and not neighbors_df.empty:
+if neighbors_df is not None and not neighbors_df.empty and not _day_unique.empty:
     day_nbr = neighbors_df.merge(
         _day_unique.rename(columns={"GEOID":"nbr"}), on="nbr", how="left"
     )
@@ -964,9 +977,8 @@ if _neighbor_roll is not None:
     missing_report(_neighbor_roll, "911_neighbor_roll")
     dump_nan_samples(_neighbor_roll, "911_neighbor_roll")
 
-
 # =========================
-# MERGE STRATEJİSİ
+# MERGE STRATEJİSİ (suffix _x/_y önleme)
 # =========================
 if _hr_unique is None or _hr_unique.empty:
     _hr_unique = pd.DataFrame(columns=["GEOID","hr_key","date","hr_cnt"])
@@ -974,17 +986,29 @@ if _hr_unique is None or _hr_unique.empty:
 if _day_unique is None or _day_unique.empty:
     _day_unique = pd.DataFrame(columns=["GEOID","date","daily_cnt","911_geo_last3d","911_geo_last7d"])
 
+# final_911 + hr_unique + day_unique
 _enriched = final_911.merge(_hr_unique, on=["GEOID","hr_key","date"], how="left")
 _enriched = _enriched.merge(_day_unique, on=["GEOID","date"], how="left")
+
+# yalnızca izinli 911 özellikleri + türetilenler kalsın
+allowed_keep = {
+    "GEOID","date","hour_range","hr_key","day_of_week","season","month",
+    "event_hour","received_time",
+    "911_request_count_hour_range","911_request_count_daily(before_24_hours)",
+    "hr_cnt","daily_cnt","911_geo_last3d","911_geo_last7d"
+}
 if _neighbor_roll is not None:
-    _enriched = _enriched.merge(
-        _neighbor_roll[["GEOID","date"] + [f"911_neighbors_last{W}d" for W in ROLL_WINDOWS if f"911_neighbors_last{W}d" in _neighbor_roll.columns]],
-        on=["GEOID","date"], how="left"
-    )
+    for W in ROLL_WINDOWS:
+        allowed_keep.add(f"911_neighbors_last{W}d")
+
+_enriched = _enriched[[c for c in _enriched.columns if c in allowed_keep]]
 
 missing_report(_enriched, "911_enriched_before_grid_merge")
 dump_nan_samples(_enriched, "911_enriched_before_grid_merge")
 
+# =========================
+# CRIME GRID OKUMA (nüfus/hava vs. at)
+# =========================
 crime_grid_path = next((p for p in CRIME_GRID_CANDIDATES if p.exists()), None)
 if crime_grid_path is None:
     raise FileNotFoundError("❌ Suç grid yok: crime_prediction_data/sf_crime_grid_full_labeled.csv (veya kökte).")
@@ -992,42 +1016,44 @@ crime = pd.read_csv(crime_grid_path, dtype={"GEOID": str}, low_memory=False)
 log(f"📥 Suç grid yüklendi: {len(crime)} satır ({crime_grid_path})")
 log_shape(crime, "CRIME grid — ham")
 
+# istenmeyen alanları doğrudan at (varsa)
+for col in ["population","temp_range","temp.range","tempRange"]:
+    if col in crime.columns:
+        crime = crime.drop(columns=[col])
+
 crime["GEOID"] = normalize_geoid(crime["GEOID"], DEFAULT_GEOID_LEN)
 
 if "event_hour" not in crime.columns:
     raise ValueError("❌ Suç grid dosyasında 'event_hour' yok.")
 crime["hr_key"] = ((pd.to_numeric(crime["event_hour"], errors="coerce").fillna(0).astype(int)) // 3) * 3
 
+# =========================
+# MERGE: DATE-BASED veya CALENDAR-BASED
+#  - _x/_y oluşmaması için çakışan kolonları önceden düş
+# =========================
 has_date_col = ("date" in crime.columns) or ("datetime" in crime.columns)
 if has_date_col:
     if "date" not in crime.columns:
         crime["date"] = pd.to_datetime(crime["datetime"], errors="coerce").dt.date
     else:
         crime["date"] = to_date(crime["date"])
+
     keys = ["GEOID","date","hr_key"]
-    merged = crime.merge(_enriched, on=keys, how="left")
+
+    # Anahtarlar dışındaki çakışmaları kaldır (suffix önleme)
+    overlap = (set(_enriched.columns) & set(crime.columns)) - set(keys)
+    if overlap:
+        _enriched_for_merge = _enriched.drop(columns=list(overlap))
+    else:
+        _enriched_for_merge = _enriched
+
+    merged = crime.merge(_enriched_for_merge, on=keys, how="left")
     log("🔗 Join modu: DATE-BASED (GEOID, date, hr_key)")
 else:
+    # Calendar-based: GEOID, hr_key, day_of_week, season
     cal_keys = ["GEOID","hr_key","day_of_week","season"]
 
-    base_agg_candidates = [
-        "911_request_count_hour_range",
-        "911_request_count_daily(before_24_hours)",
-        "911_geo_last3d", "911_geo_last7d",
-        # "911_geo_hr_last3d", "911_geo_hr_last7d",  # üretilmiyor → listeye ekleme
-    ]
-    neighbor_agg_candidates = [f"911_neighbors_last{W}d" for W in ROLL_WINDOWS]
-
-    agg_cols = [c for c in (base_agg_candidates + neighbor_agg_candidates) if c in _enriched.columns]
-
-    if agg_cols:
-        cal_agg = (_enriched.groupby(cal_keys, as_index=False, observed=True)[agg_cols]
-                            .median(numeric_only=True))
-    else:
-        # hiç metrik yoksa, yine de groupby sonucu boş kalmasın
-        cal_agg = (_enriched.groupby(cal_keys, as_index=False, observed=True)
-                            .size().rename(columns={"size":"rows"}))
-
+    # crime tarafında eksikse doldur
     if "day_of_week" not in crime.columns:
         log("ℹ️ crime grid’de day_of_week yok → 0 atanıyor (düşük etkili).")
         crime["day_of_week"] = 0
@@ -1037,16 +1063,70 @@ else:
             crime["season"] = crime["month"].map(_smap).fillna("Summer")
         else:
             crime["season"] = "Summer"
+
+    base_agg_candidates = [
+        "911_request_count_hour_range",
+        "911_request_count_daily(before_24_hours)",
+        "911_geo_last3d","911_geo_last7d",
+        "hr_cnt","daily_cnt"
+    ]
+    neighbor_agg_candidates = [f"911_neighbors_last{W}d" for W in ROLL_WINDOWS]
+    agg_cols = [c for c in (base_agg_candidates + neighbor_agg_candidates) if c in _enriched.columns]
+
+    if agg_cols:
+        cal_agg = (_enriched.groupby(cal_keys, as_index=False, observed=True)[agg_cols]
+                            .median(numeric_only=True))
+    else:
+        cal_agg = (_enriched.groupby(cal_keys, as_index=False, observed=True)
+                            .size().rename(columns={"size":"rows"}))
+
+    # Anahtarlar dışındaki çakışmaları kaldır (suffix önleme)
+    overlap = (set(cal_agg.columns) & set(crime.columns)) - set(cal_keys)
+    if overlap:
+        cal_agg = cal_agg.drop(columns=list(overlap))
+
     merged = crime.merge(cal_agg, on=cal_keys, how="left")
     log("🔗 Join modu: CALENDAR-BASED (GEOID, hr_key, day_of_week, season)")
 
+# Son temizlik: yalnızca 911 ile ilgili ve gerekli kolonları tut
+final_keep = set(crime.columns) | {
+    "event_hour",
+    "hr_key","day_of_week","season","month","date",
+    "911_request_count_hour_range","911_request_count_daily(before_24_hours)",
+    "hr_cnt","daily_cnt","911_geo_last3d","911_geo_last7d"
+}
+if _neighbor_roll is not None:
+    for W in ROLL_WINDOWS:
+        final_keep.add(f"911_neighbors_last{W}d")
+
+merged = merged[[c for c in merged.columns if c in final_keep]]
+
+# _x/_y kalmış mı? (güvence için) → tamamen temizle
+suffix_cols = [c for c in merged.columns if c.endswith("_x") or c.endswith("_y")]
+if suffix_cols:
+    log(f"ℹ️ Güvence: suffix'li kolonlar temizleniyor: {suffix_cols}")
+    base_names = {c[:-2] for c in suffix_cols}
+    for b in base_names:
+        cx, cy = b+"_x", b+"_y"
+        if cx in merged.columns and cy in merged.columns:
+            merged[b] = merged[cy].combine_first(merged[cx])
+            merged.drop(columns=[cx, cy], inplace=True, errors="ignore")
+        elif cx in merged.columns:
+            merged.rename(columns={cx: b}, inplace=True)
+        elif cy in merged.columns:
+            merged.rename(columns={cy: b}, inplace=True)
+
+# Tip & NaN doldurma (sadece 911 metrikleri)
 fill_candidates = [
     "911_request_count_hour_range",
     "911_request_count_daily(before_24_hours)",
     "911_geo_last3d","911_geo_last7d",
-] + ([f"911_neighbors_last{W}d" for W in ROLL_WINDOWS] if _neighbor_roll is not None else [])
-fill_cols = [c for c in fill_candidates if c in merged.columns]
+    "hr_cnt","daily_cnt"
+]
+if _neighbor_roll is not None:
+    fill_candidates += [f"911_neighbors_last{W}d" for W in ROLL_WINDOWS]
 
+fill_cols = [c for c in fill_candidates if c in merged.columns]
 for c in fill_cols:
     merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0).astype("int32")
 
