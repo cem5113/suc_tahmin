@@ -674,7 +674,10 @@ if final_911 is None or final_911.empty:
     log("⚠️ 911 özeti üretilemedi (boş). Çıkılıyor.")
     sys.exit(1)
 
-# hour_range/GEOID/date yoksa errors='ignore' ile düşmeden ilerle
+# Bu iki değişkeni try'dan ÖNCE başlat → NameError riski yok
+_day_unique = pd.DataFrame()
+_hr_unique  = pd.DataFrame()
+
 try:
     final_911 = final_911.dropna(subset=["GEOID","date","hour_range"], errors="ignore").copy()
     if "GEOID" in final_911.columns:
@@ -682,7 +685,7 @@ try:
     if "date" in final_911.columns:
         final_911["date"] = to_date(final_911["date"])
 
-    hr_pat = re.compile(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
+    # hr_pat zaten yukarıda tanımlı → tekrar etmiyoruz
     def _hr_key_from_range(hr):
         m = hr_pat.match(str(hr))
         return int(m.group(1)) % 24 if m else None
@@ -699,15 +702,70 @@ try:
     log_shape(final_911, "911 summary (normalize)")
     log_date_range(final_911, "date", "911")
 
-    # İsteğe bağlı raporlar (tanımlıysa)
+    # ⬇️ final_911 için raporu BURADA tek kez al
     if 'missing_report' in globals():
         missing_report(final_911, "911_summary_normalize")
     if 'dump_nan_samples' in globals():
         dump_nan_samples(final_911, "911_summary_normalize")
+
+    # Günlük toplam yoksa üret
+    if "911_request_count_daily(before_24_hours)" not in final_911.columns:
+        keys_day = [k for k in ["GEOID", "date"] if k in final_911.columns]
+        if {"GEOID","date","hour_range","911_request_count_hour_range"}.issubset(final_911.columns):
+            _tmp_day = (final_911.groupby(keys_day, observed=True)["911_request_count_hour_range"]
+                        .sum().reset_index(name="911_request_count_daily(before_24_hours)"))
+            final_911 = final_911.merge(_tmp_day, on=keys_day, how="left")
+        else:
+            final_911["911_request_count_daily(before_24_hours)"] = pd.NA
+
+    # 1) Günlük baz
+    _day_unique = (
+        final_911[["GEOID","date","911_request_count_daily(before_24_hours)"]]
+        .dropna(subset=["date"])
+        .drop_duplicates(subset=["GEOID","date"])
+        .sort_values(["GEOID","date"])
+        .rename(columns={"911_request_count_daily(before_24_hours)": "daily_cnt"})
+        .reset_index(drop=True)
+    )
+
+    # 2) Saat dilimi baz
+    if {"GEOID","hr_key","date","911_request_count_hour_range"}.issubset(final_911.columns):
+        _hr_unique = (
+            final_911.groupby(["GEOID","hr_key","date"], as_index=False, observed=True)["911_request_count_hour_range"]
+            .sum()
+            .rename(columns={"911_request_count_hour_range": "hr_cnt"})
+            .sort_values(["GEOID","hr_key","date"])
+            .reset_index(drop=True)
+        )
+    else:
+        _hr_unique = pd.DataFrame(columns=["GEOID","hr_key","date","hr_cnt"])
+
+    # =========================
+    # ROLLING (3g/7g)
+    # =========================
+    for W in ROLL_WINDOWS:  # ROLL_WINDOWS zaten global tanımlı
+        if not _day_unique.empty:
+            _day_unique[f"911_geo_last{W}d"] = (
+                _day_unique.groupby("GEOID", observed=True)["daily_cnt"]
+                .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
+            ).astype("float32")
+
+        if not _hr_unique.empty:
+            _hr_unique[f"911_geo_hr_last{W}d"] = (
+                _hr_unique.groupby(["GEOID","hr_key"], observed=True)["hr_cnt"]
+                .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
+            ).astype("float32")
+
+    # ⬇️ Rolling sonrası raporlar
+    missing_report(_day_unique, "911_day_unique_after_roll")
+    dump_nan_samples(_day_unique, "911_day_unique_after_roll")
+    missing_report(_hr_unique, "911_hr_unique_after_roll")
+    dump_nan_samples(_hr_unique, "911_hr_unique_after_roll")
+
 except Exception as e:
     log("⚠️ Normalize sırasında uyarı; devam ediliyor:")
     log("".join(traceback.format_exception(e)))
-
+    
 # 5) ARTIMLI GÜNCELLEME (mevcut taban üzerine yeni günleri ekle)
 base_max_date = to_date(final_911["date"]).max() if "date" in final_911.columns and not final_911.empty else None
 today_sf = (datetime.now(SF_TZ) if SF_TZ is not None else datetime.now()).date()
