@@ -722,9 +722,17 @@ try:
                         .sum().reset_index(name="911_request_count_daily(before_24_hours)"))
             final_911 = final_911.merge(_tmp_day, on=keys_day, how="left")
         else:
-            final_911["911_request_count_daily(before_24_hours)"] = pd.NA
+            # hiçbiri yoksa yine de kolonu yarat (0) → downstream garanti
+            final_911["911_request_count_daily(before_24_hours)"] = 0
 
-    # 1) Günlük baz (GEOID × date) — dinamik kolon seçimi
+    # 1) Günlük baz (GEOID × date) — dinamik kolon seçimi (daily_cnt'yi GARANTİ yarat)
+    if "911_request_count_daily(before_24_hours)" not in final_911.columns:
+        final_911["911_request_count_daily(before_24_hours)"] = 0
+    # emniyet: sayısal yap
+    final_911["911_request_count_daily(before_24_hours)"] = pd.to_numeric(
+        final_911["911_request_count_daily(before_24_hours)"], errors="coerce"
+    ).fillna(0).astype("int32")
+
     cols_day = [c for c in ["GEOID", "date", "911_request_count_daily(before_24_hours)"] if c in final_911.columns]
     _day_unique = (
         final_911[cols_day]
@@ -735,12 +743,23 @@ try:
         .reset_index(drop=True)
     )
 
+    # emniyet: eğer bir şekilde daily_cnt gelmemişse oluştur
+    if "daily_cnt" not in _day_unique.columns:
+        if "911_request_count_hour_range" in final_911.columns:
+            _tmp_day2 = (final_911.groupby([c for c in ["GEOID","date"] if c in final_911.columns], observed=True)
+                         ["911_request_count_hour_range"].sum().reset_index())
+            _tmp_day2 = _tmp_day2.rename(columns={"911_request_count_hour_range": "daily_cnt"})
+            _day_unique = _day_unique.merge(_tmp_day2, on=[c for c in ["GEOID","date"] if c in _day_unique.columns], how="left")
+        else:
+            _day_unique["daily_cnt"] = 0
+    _day_unique["daily_cnt"] = pd.to_numeric(_day_unique["daily_cnt"], errors="coerce").fillna(0).astype("int32")
+
     # === GEOID bazında son 3/7 gün 911 toplamı (bugün hariç) ===
     try:
         if not _day_unique.empty and {"GEOID", "date", "daily_cnt"}.issubset(_day_unique.columns):
             _day_unique["date"] = pd.to_datetime(_day_unique["date"], errors="coerce").dt.date
             _day_unique = _day_unique.dropna(subset=["date"]).copy()
-        
+
             def _expand_daily(g):
                 s = pd.Series(g["daily_cnt"].values,
                               index=pd.to_datetime(g["date"], errors="coerce")).sort_index()
@@ -757,28 +776,27 @@ try:
                     out["daily_cnt"].rolling(7, min_periods=1).sum().shift(1)
                 )
                 return out
-        
+
             _rolled_list = []
             for geoid, grp in _day_unique.groupby("GEOID", observed=True, sort=False):
                 r = _expand_daily(grp)
                 r.insert(0, "GEOID", geoid)
                 _rolled_list.append(r)
-        
+
             _geo_roll = pd.concat(_rolled_list, ignore_index=True)
             _geo_roll["date"] = _geo_roll["date_ts"].dt.date
             _geo_roll = _geo_roll.drop(columns=["date_ts"])
-        
+
             _day_unique = _day_unique.merge(
                 _geo_roll,
                 on=["GEOID", "date"],
                 how="left"
             )
-        
+
             for c in ["911_geo_last3d", "911_geo_last7d"]:
                 if c in _day_unique.columns:
                     _day_unique[c] = pd.to_numeric(_day_unique[c], errors="coerce").fillna(0).astype("int32")
-        
-            
+
             # 2) Saat dilimi baz
             if {"GEOID","hr_key","date","911_request_count_hour_range"}.issubset(final_911.columns):
                 _hr_unique = (
@@ -790,7 +808,7 @@ try:
                 )
             else:
                 _hr_unique = pd.DataFrame(columns=["GEOID","hr_key","date","hr_cnt"])
-        
+
             # =========================
             # ROLLING (3g/7g)
             # =========================
@@ -807,30 +825,30 @@ try:
                             _day_unique.sort_values("date")["daily_cnt"]
                             .rolling(W, min_periods=1).sum().shift(1)
                         ).astype("float32")
-        
+
             # ⬇️ Rolling sonrası raporlar
             missing_report(_day_unique, "911_day_unique_after_roll")
             dump_nan_samples(_day_unique, "911_day_unique_after_roll")
             missing_report(_hr_unique, "911_hr_unique_after_roll")
             dump_nan_samples(_hr_unique, "911_hr_unique_after_roll")
-        
+
     except Exception as e:
         log("⚠️ Normalize sırasında uyarı; devam ediliyor:")
         log("".join(traceback.format_exception(e)))
-        
+
     # 5) ARTIMLI GÜNCELLEME (mevcut taban üzerine yeni günleri ekle)
     base_max_date = to_date(final_911["date"]).max() if "date" in final_911.columns and not final_911.empty else None
     today_sf = (datetime.now(SF_TZ) if SF_TZ is not None else datetime.now()).date()
-    
+
     if base_max_date is None:
         fetch_start, fetch_end = today_sf, today_sf
     else:
         fetch_start, fetch_end = base_max_date + timedelta(days=1), today_sf
         if fetch_start > fetch_end:
             fetch_start = fetch_end
-    
+
     log(f"🗓️ İndirme aralığı: {fetch_start} → {fetch_end} ({(fetch_end - fetch_start).days + 1} gün)")
-    
+
     try:
         inc = incremental_summary(fetch_start, fetch_end)
         if inc is not None and not inc.empty:
@@ -838,10 +856,10 @@ try:
                 inc["GEOID"] = normalize_geoid(inc["GEOID"], DEFAULT_GEOID_LEN)
             if "date" in inc.columns:
                 inc["date"] = to_date(inc["date"])
-    
+
             before = len(final_911)
             final_911 = pd.concat([final_911, inc], ignore_index=True)
-    
+
             subset_cols = [c for c in ["GEOID","date","hour_range"] if c in final_911.columns]
             final_911 = (
                 final_911
@@ -852,7 +870,7 @@ try:
             )
             if "date" in final_911.columns:
                 final_911 = final_911[final_911["date"] >= five_years_ago]
-    
+
             save_911_both(final_911)
             log(f"💾 911 özet GÜNCELLENDİ (base+API) → {local_summary_path} & {y_summary_path} (+{len(final_911)-before:,} satır)")
         else:
@@ -860,7 +878,7 @@ try:
     except Exception as e:
         log("⚠️ Artımlı güncelleme sırasında hata (mevcut taban veri kullanılacak):")
         log("".join(traceback.format_exception(e)))
-    
+
     # 6) SON KONTROL
     if final_911 is None or final_911.empty:
         log("⚠️ 911 özeti üretilemedi (boş). Çıkılıyor.")
