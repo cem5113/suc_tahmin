@@ -1193,66 +1193,121 @@ def download_and_preview(name, url, file_path, is_json=False, allow_artifact_fal
 # -----------------------------------------------------------------------------
 st.title("📦 Günlük Suç Tahmin Zenginleştirme ve Güncelleme Paneli")
 
+# --- SIDEBAR ---
 with st.sidebar:
     st.markdown("### GitHub Actions")
 
-with st.expander("🕵️ Workflow tanı (dispatch)"):
-    wf_in = st.text_input(
-        "Workflow (dosya adı veya görünen ad)",
-        os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml")
-    )
-    ref_in = st.text_input("Ref (branch/tag)", "main")
-    if st.button("Tanıyı Çalıştır"):
-        diag_workflow(target=wf_in, ref=ref_in)
+    # Sidebar içinde expander açacaksan 'st.sidebar.expander' kullan
+    with st.sidebar.expander("ACS Ayarları (Demografi)"):
+        acs_year_default = os.environ.get("ACS_YEAR", "LATEST")
+        whitelist_default = os.environ.get("DEMOG_WHITELIST", "")
+        level_default = os.environ.get("CENSUS_GEO_LEVEL", "auto")
 
-    with st.expander("🕵️ Workflow tanı (dispatch)"):
-        wf_in = st.text_input("Workflow (dosya adı veya görünen ad)",
-                              os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml"))
+        acs_year_in = st.text_input(
+            label="ACS_YEAR (LATEST veya YYYY)",
+            value=str(acs_year_default or "LATEST"),
+            key="acs_year_in",
+            help="5-year ACS için en son yılı kullanmak genelde uygundur."
+        )
+
+        whitelist_in = st.text_input(
+            label="DEMOG_WHITELIST (virgüllü; boş = hepsi)",
+            value=str(whitelist_default or ""),
+            key="demog_whitelist_in",
+            help='Örn: "population,median_income,education". Metin eşleşmesiyle filtreler.'
+        )
+
+        levels = ["auto", "tract", "blockgroup", "block"]
+        try:
+            idx = levels.index(level_default) if level_default in levels else 0
+        except Exception:
+            idx = 0
+        level_in = st.selectbox(
+            "CENSUS_GEO_LEVEL",
+            levels,
+            index=idx,
+            key="census_geo_level_in",
+            help="Nüfus GEOID eşleşme seviyesi. `auto` çoğu durumda yeterlidir."
+        )
+        os.environ["CENSUS_GEO_LEVEL"] = level_in
+
+        pop_default = os.environ.get("POPULATION_PATH", str(POPULATION_PATH))
+        pop_url_in = st.text_input(
+            label="POPULATION_PATH (YEREL CSV YOLU)",
+            value=str(pop_default or ""),
+            key="population_path_in",
+            help="Örn: crime_prediction_data/sf_population.csv (URL kabul edilmez)."
+        )
+
+        _v = str(acs_year_in).strip()
+        if _v.upper() == "LATEST":
+            os.environ["ACS_YEAR"] = "LATEST"
+        else:
+            _digits = re.sub(r"\D", "", _v)
+            os.environ["ACS_YEAR"] = _digits if len(_digits) == 4 else "LATEST"
+
+        os.environ["DEMOG_WHITELIST"] = str(whitelist_in or "")
+
+        if re.match(r"^https?://", str(pop_url_in), flags=re.I):
+            st.error("CSV-only mod: URL kabul edilmez. Yerel bir CSV yolu girin.")
+        else:
+            os.environ["POPULATION_PATH"] = pop_url_in or str(POPULATION_PATH)
+
+# --- ANA SAYFA (sidebar DIŞI) ---
+with st.container():
+    exp = st.expander("🕵️ Workflow tanı (dispatch)", expanded=False)
+    with exp:
+        # (BURASI TEK EXPANDER — iç içe expander YOK!)
+        wf_in = st.text_input(
+            "Workflow (dosya adı veya görünen ad)",
+            os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml")
+        )
         ref_in = st.text_input("Ref (branch/tag)", "main")
+
         if st.button("Tanıyı Çalıştır"):
             diag_workflow(target=wf_in, ref=ref_in)
 
-    VARIANTS = ["default", "fr"]
-    variant = st.selectbox(
-        "Pipeline varyantı",
-        VARIANTS, index=0,
-        help="default: update_*.py • fr: update_*.fr.py / update_*_fr.py"
-    )
-    os.environ["PIPELINE_VARIANT"] = variant
+        VARIANTS = ["default", "fr"]
+        variant = st.selectbox(
+            "Pipeline varyantı",
+            VARIANTS, index=0,
+            help="default: update_*.py • fr: update_*.fr.py / update_*_fr.py"
+        )
+        os.environ["PIPELINE_VARIANT"] = variant
 
-    persist = st.selectbox(
-        "Çıktıyı saklama modu",
-        ["artifact", "commit", "none"], index=0,
-        help="artifact: repo’yu bozmadan sakla • commit: repo’ya yaz • none: sadece log"
-    )
+        persist = st.selectbox(
+            "Çıktıyı saklama modu",
+            ["artifact", "commit", "none"], index=0,
+            help="artifact: repo’yu bozmadan sakla • commit: repo’ya yaz • none: sadece log"
+        )
 
-    force_bypass = st.checkbox(
-        "07:00 kapısını yok say (force)",
-        value=True,
-        help="İşaretli ise saat filtresi devre dışı kalır ve pipeline her saatte çalışır."
-    )
+        force_bypass = st.checkbox(
+            "07:00 kapısını yok say (force)",
+            value=True,
+            help="İşaretli ise saat filtresi devre dışı kalır ve pipeline her saatte çalışır."
+        )
 
-    status_box = st.empty()
-    _render_last_run_status(status_box)
+        status_box = st.empty()
+        _render_last_run_status(status_box)
 
-    col_run, col_refresh = st.columns(2)
-    with col_run:
-        if st.button("🚀 Full pipeline’ı Actions’ta çalıştır"):
-            if not (st.secrets.get("GH_TOKEN") or os.environ.get("GH_TOKEN")):
-                st.error("GH_TOKEN tanımlı değil (Streamlit secrets veya env).")
-            else:
-                try:
-                    r = dispatch_workflow(persist=persist, force=force_bypass)
-                    if r["ok"]:
-                        st.success(f"Workflow tetiklendi (persist={persist}, force={force_bypass}). Runs’ı kontrol et.")
-                    else:
-                        st.error(f"Tetikleme başarısız: {r['status']} {r['text']}")
-                except Exception as e:
-                    st.error(f"Hata: {e}")
+        col_run, col_refresh = st.columns(2)
+        with col_run:
+            if st.button("🚀 Full pipeline’ı Actions’ta çalıştır"):
+                if not (st.secrets.get("GH_TOKEN") or os.environ.get("GH_TOKEN")):
+                    st.error("GH_TOKEN tanımlı değil (Streamlit secrets veya env).")
+                else:
+                    try:
+                        r = dispatch_workflow(persist=persist, force=force_bypass)
+                        if r["ok"]:
+                            st.success(f"Workflow tetiklendi (persist={persist}, force={force_bypass}). Runs’ı kontrol et.")
+                        else:
+                            st.error(f"Tetikleme başarısız: {r['status']} {r['text']}")
+                    except Exception as e:
+                        st.error(f"Hata: {e}")
 
-    with col_refresh:
-        if st.button("📡 Son durumu yenile"):
-            _render_last_run_status(status_box)
+        with col_refresh:
+            if st.button("📡 Son durumu yenile"):
+                _render_last_run_status(status_box)
 
     with st.sidebar.expander("ACS Ayarları (Demografi)"):
         acs_year_default = os.environ.get("ACS_YEAR", "LATEST")
