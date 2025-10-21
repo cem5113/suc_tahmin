@@ -421,13 +421,12 @@ def clean_and_save_crime_09(input_obj: Union[str, pd.DataFrame] = "sf_crime_08.c
     else:
         df = pd.read_csv(input_obj, dtype={"GEOID": str})
 
+    # 🛠 FIX-1: GEOID normalizasyonu (zfill kaldırıldı, sadece sayısal çekirdek)
     if "GEOID" in df.columns:
-        target_len = int(os.environ.get("GEOID_LEN", "11"))
         df["GEOID"] = (
             df["GEOID"]
             .astype(str)
             .str.extract(r"(\d+)", expand=False)
-            .str.zfill(target_len)
         )
 
     if "category" in df.columns:
@@ -531,7 +530,13 @@ def clean_and_save_crime_09(input_obj: Union[str, pd.DataFrame] = "sf_crime_08.c
 
     # POI dominant type
     if "poi_dominant_type" in df.columns:
-        df["poi_dominant_type"] = df["poi_dominant_type"].fillna("None").astype(str)
+        # 🛠 FIX-2: Boş stringleri de None say, sonra "None" ile doldur
+        df["poi_dominant_type"] = (
+            df["poi_dominant_type"]
+            .replace({"": np.nan})
+            .fillna("None")
+            .astype(str)
+        )
 
     # Tarih normalize
     if "date" in df.columns:
@@ -539,12 +544,27 @@ def clean_and_save_crime_09(input_obj: Union[str, pd.DataFrame] = "sf_crime_08.c
     elif "datetime" in df.columns and "date" not in df.columns:
         df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
 
-    # Near-repeat: 7/14 gün (GEOID × kategori)
+    # 🛠 FIX-3: Near-repeat güvenli hale getirildi (crime_count yoksa Y_label'dan türet)
     try:
-        if {"date", "GEOID"}.issubset(df.columns):
-            cat_col = "category_grouped" if "category_grouped" in df.columns else (
-                      "subcategory_grouped" if "subcategory_grouped" in df.columns else
-                      ("category" if "category" in df.columns else None))
+        need = {"date", "GEOID"}
+        has_crime_count = "crime_count" in df.columns
+
+        if not has_crime_count and "Y_label" in df.columns:
+            df["crime_count"] = (
+                pd.to_numeric(df["Y_label"], errors="coerce")
+                .fillna(0)
+                .astype(int)
+            )
+            has_crime_count = True
+
+        if need.issubset(df.columns) and has_crime_count:
+            # kategori kolonu öncelik sırası
+            cat_col = None
+            for cc in ["category_grouped", "subcategory_grouped", "category"]:
+                if cc in df.columns:
+                    cat_col = cc
+                    break
+
             if cat_col:
                 tmp = df[["date", "GEOID", cat_col, "crime_count"]].copy()
                 tmp["date"] = pd.to_datetime(tmp["date"], errors="coerce").dt.date
