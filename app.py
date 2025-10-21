@@ -326,10 +326,29 @@ def fetch_file_from_latest_artifact(pick_names: List[str], artifact_names: Optio
                     return zf.read(n)
     return None
 
-def dispatch_workflow(persist: str = "artifact", force: bool = True) -> dict:
-    import json as _json
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{GITHUB_WORKFLOW}/dispatches"
-    payload = {"ref": "main", "inputs": {"persist": persist, "force": "true" if force else "false"}}
+def _resolve_workflow_id(target: str):
+    import requests, os
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows?per_page=100"
+    r = requests.get(url, headers=_gh_headers(), timeout=30); r.raise_for_status()
+    ws = r.json().get("workflows", [])
+    # 1) Dosya adıyla eşleşme
+    for w in ws:
+        if os.path.basename(str(w.get("path",""))) == target:
+            return w.get("id")
+    # 2) Görünen adla eşleşme (yedek)
+    for w in ws:
+        if str(w.get("name","")).strip().lower() == target.strip().lower():
+            return w.get("id")
+    return None
+
+def dispatch_workflow(persist="artifact", force=True, ref="main"):
+    import json as _json, requests
+    target = os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml")
+    wid = _resolve_workflow_id(target)
+    if not wid:
+        return {"ok": False, "status": 404, "text": f"Workflow bulunamadı: {target}"}
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{wid}/dispatches"
+    payload = {"ref": ref, "inputs": {"persist": persist, "force": "true" if force else "false"}}
     r = requests.post(url, headers=_gh_headers(), data=_json.dumps(payload), timeout=30)
     return {"ok": r.status_code in (204, 201), "status": r.status_code, "text": r.text}
 
