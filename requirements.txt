@@ -25,3 +25,5 @@ zstandard==0.22.0
 # Hava verisi ve GitHub API
 meteostat==1.7.1
 PyGithub==2.3.0
+
+PyYAML>=6
