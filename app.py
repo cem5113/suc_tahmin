@@ -273,6 +273,46 @@ ARTIFACT_NAMES = [
     "sf-crime-pipeline-output",    # (geri uyum)
 ]
 
+def make_sf_crime_L(data_dir: Path, unique_per_geoid: bool = True) -> Path:
+    """
+    sf_crime_y.csv veya sf_crime.csv içinden sadece GEOID ve Y_label kolonlarını
+    alıp crime_prediction_data/sf_crime_L.csv olarak yazar.
+    unique_per_geoid=True ise aynı GEOID için Y_label'ların max'ını alır.
+    """
+    import pandas as pd, os
+
+    cdir = Path(data_dir)
+    candidates = [cdir / "sf_crime_y.csv", cdir / "sf_crime.csv"]
+    src = next((p for p in candidates if p.exists()), None)
+    if src is None:
+        raise FileNotFoundError("sf_crime_y.csv veya sf_crime.csv bulunamadı.")
+
+    df = pd.read_csv(src, low_memory=False)
+
+    low = {c.lower(): c for c in df.columns}
+    geoid_col = low.get("geoid") or low.get("geography_id") or low.get("geoid11") or low.get("geoid_11")
+    y_col     = low.get("y_label") or low.get("y") or low.get("label") or low.get("target")
+    if not geoid_col or not y_col:
+        raise ValueError(f"Gerekli kolonlar yok. Mevcut kolonlar: {list(df.columns)}")
+
+    out = df[[geoid_col, y_col]].copy()
+    out.columns = ["GEOID", "Y_label"]
+
+    # GEOID normalize (11 haneli; senin ortam değişkenine uy)
+    L = int(os.environ.get("GEOID_LEN", "11"))
+    out["GEOID"] = (
+        out["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).str[:L].str.zfill(L)
+    )
+
+    if unique_per_geoid:
+        out = out.groupby("GEOID", as_index=False)["Y_label"].max()
+
+    dest = cdir / "sf_crime_L.csv"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(dest, index=False)
+    return dest
+
+
 def _gh_headers():
     token = st.secrets.get("GH_TOKEN") or os.environ.get("GH_TOKEN")
     if not token:
