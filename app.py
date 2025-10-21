@@ -822,9 +822,9 @@ def list_files_sorted(
             include += [str(bdir / f"{prefix}_crime_y.csv")]
         include += [str(bdir / "sf_crime_grid_full_labeled.csv")]
 
-        # Ayrıca glob ile genişlet
-        for p in bdir.glob(pattern):
-            include.append(str(p))
+    # Ayrıca glob ile genişlet
+    for p in bdir.glob(pattern):
+        include.append(str(p))
 
     seen = set()
     for x in include:
