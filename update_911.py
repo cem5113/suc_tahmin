@@ -866,6 +866,10 @@ try:
         log("⚠️ 911 özeti üretilemedi (boş). Çıkılıyor.")
         sys.exit(1)
 
+except Exception as e:
+    log("❌ Dış normalize+incremental try bloğunda hata:")
+    import traceback
+    log("".join(traceback.format_exception(e)))
 # =========================
 # STANDARDIZE + DERIVED KEYS (hr_key, dow, season)
 # =========================
