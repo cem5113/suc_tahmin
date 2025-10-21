@@ -645,7 +645,7 @@ def incremental_summary(start_day: datetime.date, end_day: datetime.date) -> pd.
     return make_standard_summary(raw)
 
 # =========================
-# MAIN: LOCAL (Y/regular) → RELEASE (Y → regular) → API FALLBACK → ENRICH → MERGE
+# MAIN: LOCAL (Y/regular) → RELEASE (Y → regular) → API FALLBACK → ENRICH PREP
 # =========================
 import traceback, sys  # ayrıntılı hata çıktısı için
 
@@ -654,7 +654,7 @@ log(f"📁 911 yerel özet yolu: {local_summary_path}")
 
 final_911 = None
 
-# 1) Önce YEREL tabanı dene (artifact/çalışma alanı; Y öncelikli)
+# 1) YEREL TABAN (önce Y, yoksa regular)
 try:
     base_csv_path = ensure_local_911_base()
     if base_csv_path is not None:
@@ -667,7 +667,7 @@ except Exception as e:
     log("⚠️ Yerel 911 özet okunurken hata:")
     log("".join(traceback.format_exception(e)))
 
-# 2) Yerel başarısız/boş ise RELEASE (önce _y.csv, yoksa orijinal csv)
+# 2) RELEASE (önce _y.csv, olmazsa orijinal csv)
 if final_911 is None or final_911.empty:
     try:
         release_url = _pick_working_release_url(RAW_911_URL_CANDIDATES)
@@ -678,7 +678,7 @@ if final_911 is None or final_911.empty:
         log("⚠️ Release fallback başarısız; API fallback denenecek:")
         log("".join(traceback.format_exception(e)))
 
-# 3) RELEASE da başarısız/boş ise API’den 5 yıl aralığını indir (tam fallback)
+# 3) API FALLBACK (release da başarısız/boşsa)
 if final_911 is None or final_911.empty:
     try:
         today_sf = (datetime.now(SF_TZ) if SF_TZ is not None else datetime.now()).date()
@@ -693,8 +693,47 @@ if final_911 is None or final_911.empty:
         log("".join(traceback.format_exception(e)))
         sys.exit(1)
 
-# 4) Artımlı aralığı belirle ve varsa yeni günleri ekle
-base_max_date = to_date(final_911["date"]).max() if not final_911.empty else None
+# 4) NORMALIZE ( güvenli / kolonlar yoksa kırmaz )
+if final_911 is None or final_911.empty:
+    log("⚠️ 911 özeti üretilemedi (boş). Çıkılıyor.")
+    sys.exit(1)
+
+# hour_range/GEOID/date yoksa errors='ignore' ile düşmeden ilerle
+try:
+    final_911 = final_911.dropna(subset=["GEOID","date","hour_range"], errors="ignore").copy()
+    if "GEOID" in final_911.columns:
+        final_911["GEOID"] = normalize_geoid(final_911["GEOID"], DEFAULT_GEOID_LEN)
+    if "date" in final_911.columns:
+        final_911["date"] = to_date(final_911["date"])
+
+    hr_pat = re.compile(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
+    def _hr_key_from_range(hr):
+        m = hr_pat.match(str(hr))
+        return int(m.group(1)) % 24 if m else None
+
+    if "hour_range" in final_911.columns:
+        final_911["hr_key"] = final_911["hour_range"].apply(_hr_key_from_range).astype("int16")
+
+    if "date" in final_911.columns:
+        final_911["day_of_week"] = pd.to_datetime(final_911["date"]).dt.weekday.astype("int8")
+        final_911["month"] = pd.to_datetime(final_911["date"]).dt.month.astype("int8")
+        _season_map = {12:"Winter",1:"Winter",2:"Winter",3:"Spring",4:"Spring",5:"Spring",6:"Summer",7:"Summer",8:"Summer",9:"Fall",10:"Fall",11:"Fall"}
+        final_911["season"] = final_911["month"].map(_season_map).astype("category")
+
+    log_shape(final_911, "911 summary (normalize)")
+    log_date_range(final_911, "date", "911")
+
+    # İsteğe bağlı raporlar (tanımlıysa)
+    if 'missing_report' in globals():
+        missing_report(final_911, "911_summary_normalize")
+    if 'dump_nan_samples' in globals():
+        dump_nan_samples(final_911, "911_summary_normalize")
+except Exception as e:
+    log("⚠️ Normalize sırasında uyarı; devam ediliyor:")
+    log("".join(traceback.format_exception(e)))
+
+# 5) ARTIMLI GÜNCELLEME (mevcut taban üzerine yeni günleri ekle)
+base_max_date = to_date(final_911["date"]).max() if "date" in final_911.columns and not final_911.empty else None
 today_sf = (datetime.now(SF_TZ) if SF_TZ is not None else datetime.now()).date()
 
 if base_max_date is None:
@@ -711,18 +750,23 @@ try:
     if inc is not None and not inc.empty:
         if "GEOID" in inc.columns:
             inc["GEOID"] = normalize_geoid(inc["GEOID"], DEFAULT_GEOID_LEN)
-        inc["date"] = to_date(inc["date"])
+        if "date" in inc.columns:
+            inc["date"] = to_date(inc["date"])
+
         before = len(final_911)
         final_911 = pd.concat([final_911, inc], ignore_index=True)
 
         subset_cols = [c for c in ["GEOID","date","hour_range"] if c in final_911.columns]
         final_911 = (
             final_911
-            .dropna(subset=["date"])
-            .sort_values(subset_cols if subset_cols else ["date"])
-            .drop_duplicates(subset=subset_cols if subset_cols else ["date"], keep="last")
+            .dropna(subset=["date"], errors="ignore")
+            .sort_values(subset_cols if subset_cols else (["date"] if "date" in final_911.columns else None))
+            .drop_duplicates(subset=subset_cols if subset_cols else (["date"] if "date" in final_911.columns else None),
+                             keep="last")
         )
-        final_911 = final_911[final_911["date"] >= five_years_ago]
+        if "date" in final_911.columns:
+            final_911 = final_911[final_911["date"] >= five_years_ago]
+
         save_911_both(final_911)
         log(f"💾 911 özet GÜNCELLENDİ (base+API) → {local_summary_path} & {y_summary_path} (+{len(final_911)-before:,} satır)")
     else:
@@ -731,7 +775,7 @@ except Exception as e:
     log("⚠️ Artımlı güncelleme sırasında hata (mevcut taban veri kullanılacak):")
     log("".join(traceback.format_exception(e)))
 
-# 5) Son kontrol
+# 6) SON KONTROL
 if final_911 is None or final_911.empty:
     log("⚠️ 911 özeti üretilemedi (boş). Çıkılıyor.")
     sys.exit(1)
