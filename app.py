@@ -816,9 +816,10 @@ def list_files_sorted(
 
     # Varsayılan adaylar: DOWNLOADS[path] + pipeline çıktı dosyaları
     if include is None:
-        include = [info["path"] for info in DOWNLOADS.values() if "path" in info]
-        include += [str(bdir / f"sf_crime_{i:02d}.csv") for i in range(1, 10)]
-        include += [str(bdir / "sf_crime_y.csv"), str(bdir / "sf_crime_grid_full_labeled.csv")]
+       for prefix in ["sf", "fr"]:
+           include += [str(bdir / f"{prefix}_crime_{i:02d}.csv") for i in range(1, 10)]
+           include += [str(bdir / f"{prefix}_crime_y.csv")]
+       include += [str(bdir / "sf_crime_grid_full_labeled.csv")]
     
         # Ayrıca glob ile genişlet
         for p in bdir.glob(pattern):
@@ -1187,102 +1188,93 @@ if st.button("⚙️ Güncelleme ve Zenginleştirme (01 → 09)"):
     else:
         st.warning("ℹ️ Pipeline tamamlandı; eksik/hatalı adımlar var. Logları kontrol edin.")
 
-st.markdown("### 3) Güncel sf_crime_08.csv (ilk 20 satır)")
-df08 = load_sf_crime_08((DATA_DIR / "sf_crime_08.csv"))
-if df08 is not None:
-    st.dataframe(df08.head(20))
+st.markdown("### 3) Güncel _08 → _09 üret (sf + fr)")
 
-    # sf_crime_09 üret
-    clean_and_save_crime_09(df08, str(DATA_DIR / "sf_crime_08_clean.csv"))
-    st.success("✅ sf_crime_08_clean.csv kaydedildi.")
+for prefix in ["sf", "fr"]:
+    st.subheader(f"🔹 {prefix.upper()} akışı")
 
-    # 🔁 neighbors graph + feature (08_clean → 09)
+    # Eğer 09 zaten varsa üretim adımını atlayalım; yoksa üretelim
+    p09 = DATA_DIR / f"{prefix}_crime_09.csv"
+    if not p09.exists():
+        _ = process_city_to_09(prefix, DATA_DIR)
+
+    # Önizleme: 08 ve 09
+    p08 = DATA_DIR / f"{prefix}_crime_08.csv"
+    if p08.exists():
+        try:
+            st.markdown(f"**{p08.name} — ilk 20 satır**")
+            st.dataframe(pd.read_csv(p08, nrows=20, low_memory=False), use_container_width=True)
+        except Exception as e:
+            st.info(f"{p08.name} önizlenemedi: {e}")
+
+    if p09.exists():
+        try:
+            st.markdown(f"**{p09.name} — ilk 20 satır**")
+            st.dataframe(pd.read_csv(p09, nrows=20, low_memory=False), use_container_width=True)
+        except Exception as e:
+            st.info(f"{p09.name} önizlenemedi: {e}")
+            
+def load_city_crime_08(prefix: str, data_dir: Path) -> Optional[pd.DataFrame]:
+    """{prefix}_crime_08.csv'yi yükler ve date kolonunu normalize eder."""
+    path = data_dir / f"{prefix}_crime_08.csv"
+    if prefix.lower() == "sf":
+        return load_sf_crime_08(path)
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path, low_memory=False)
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        elif "datetime" in df.columns:
+            df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
+        return df
+    except Exception as e:
+        st.warning(f"{path.name} okunamadı: {e}")
+        return None
+
+
+def process_city_to_09(prefix: str, data_dir: Path) -> Optional[pd.DataFrame]:
+    """{prefix}_crime_08 → {prefix}_crime_08_clean → (neighbors) → {prefix}_crime_09 üretir."""
+    df08 = load_city_crime_08(prefix, data_dir)
+    if df08 is None:
+        st.info(f"{prefix}_crime_08.csv bulunamadı.")
+        return None
+
+    out_clean = data_dir / f"{prefix}_crime_08_clean.csv"
+    clean_and_save_crime_09(df08, str(out_clean))
+    st.success(f"✅ {out_clean.name} kaydedildi.")
+
     graph_script = resolve_script({"name": "update_neighbors_graph.py", "alts": ["neighbors_graph.py"]})
     feat_script  = resolve_script({"name": "update_neighbors.py",        "alts": []})
-    
-    # neighbors.csv yoksa üret
-    if graph_script and not (DATA_DIR / "neighbors.csv").exists():
+
+    # prefix'e özel neighbors varsa onu kullan; yoksa genel
+    neighbor_file_pref = data_dir / f"{prefix}_neighbors.csv"
+    neighbor_file_gen  = data_dir / "neighbors.csv"
+    neighbor_file_use  = neighbor_file_pref if neighbor_file_pref.exists() else neighbor_file_gen
+
+    if not neighbor_file_use.exists() and graph_script:
         ok_graph = run_script(graph_script)
         st.success("🗺️ neighbors.csv üretildi.") if ok_graph else st.warning("neighbors graph başarısız.")
-    
-    # 08_clean → 09 (nei_7d_sum eklenerek)
+
     if feat_script:
-        os.environ["NEIGHBOR_FILE"] = os.environ.get("NEIGHBOR_FILE", str(DATA_DIR / "neighbors.csv"))
-        os.environ["NEIGHBOR_INPUT_CSV"]  = str(DATA_DIR / "sf_crime_08_clean.csv")
-        os.environ["NEIGHBOR_OUTPUT_CSV"] = str(DATA_DIR / "sf_crime_09.csv")
+        os.environ["NEIGHBOR_FILE"]        = os.environ.get("NEIGHBOR_FILE", str(neighbor_file_use))
+        os.environ["NEIGHBOR_INPUT_CSV"]   = str(out_clean)
+        os.environ["NEIGHBOR_OUTPUT_CSV"]  = str(data_dir / f"{prefix}_crime_09.csv")
         os.environ["NEIGHBOR_WINDOW_DAYS"] = os.environ.get("NEIGHBOR_WINDOW_DAYS", "7")
         os.environ["NEIGHBOR_LAG_DAYS"]    = os.environ.get("NEIGHBOR_LAG_DAYS", "1")
-    
+
         ok_feat = run_script(feat_script)
         if ok_feat:
-            st.success("🧩 sf_crime_09.csv üretildi (nei_7d_sum eklendi).")
+            st.success(f"🧩 {prefix}_crime_09.csv üretildi (nei_7d_sum eklendi).")
+            try:
+                return pd.read_csv(data_dir / f"{prefix}_crime_09.csv", low_memory=False)
+            except Exception:
+                return None
         else:
             st.warning("update_neighbors.py çalıştırılamadı; logu kontrol edin.")
     else:
         st.info("update_neighbors.py bulunamadı (scripts klasörüne ekleyin).")
-
-else:
-    st.info("Henüz sf_crime_08.csv bulunamadı. Pipeline’ı çalıştırabilir veya artifact erişimini (GH_TOKEN) ayarlayabilirsiniz.")
-
-df09_path = DATA_DIR / "sf_crime_09.csv"
-df09 = None
-if df09_path.exists():
-    try:
-        df09 = pd.read_csv(df09_path, low_memory=False)
-        st.markdown("### 4) Güncel sf_crime_09.csv (ilk 20 satır)")
-        st.dataframe(df09.head(20))
-    except Exception as e:
-        st.warning(f"sf_crime_09.csv okunamadı: {e}")
-else:
-    st.info("sf_crime_09.csv henüz üretilmemiş görünüyor (neighbors adımını kontrol edin).")
-
-if df09 is not None:
-    st.markdown("### 5) Hızlı Model (ZI/Hurdle + Quantile + Kalibrasyon)")
-    train_btn = st.button("🧠 Modeli Eğit (örnek)")
-
-    if train_btn:
-        tabs = st.tabs([
-            "Global — Sınıf",
-            "Global — Sayı",
-            "Local",
-            "PDP",
-            "Sınıf Kartları"
-        ])
-        with tabs[0]:
-            st.caption("Pozitif sınıf (Y>0) için ortalama mutlak SHAP değerleri — ilk 10")
-            mean_abs = np.abs(shap_pos).mean(axis=0)
-            top_idx = np.argsort(mean_abs)[::-1][:10]
-            top_feat = X_occ.columns[top_idx]
-            top_vals = mean_abs[top_idx]
-            top_df = pd.DataFrame({"özellik": top_feat, "önem(Mean|SHAP|)": top_vals})
-            st.dataframe(top_df, use_container_width=True)
-            st.bar_chart(top_df.set_index("özellik"))
-
-            # Sınıf-bazlı altkümeler (opsiyonel)
-            cat_col = "category_grouped" if "category_grouped" in df09.columns else (
-                "subcategory_grouped" if "subcategory_grouped" in df09.columns else None)
-            if cat_col:
-                col1, col2 = st.columns(2)
-                with col1:
-                    pick1 = st.selectbox("Sınıf 1 (ör. Theft/Hırsızlık)", sorted(df09[cat_col].dropna().unique()))
-                with col2:
-                    pick2 = st.selectbox("Sınıf 2 (ör. Assault/Saldırı)", sorted(df09[cat_col].dropna().unique()))
-
-                for pick in [pick1, pick2]:
-                    sub_idx = df09.loc[sample_idx][df09.loc[sample_idx, cat_col] == pick].index
-                    if len(sub_idx) >= 20:
-                        shap_sub = expl_clf.shap_values(X_occ.loc[sub_idx])
-                        shap_sub_pos = shap_sub[1] if isinstance(shap_sub, list) else shap_sub
-                        mabs = np.abs(shap_sub_pos).mean(axis=0)
-                        top_idx2 = np.argsort(mabs)[::-1][:10]
-                        top_df2 = pd.DataFrame({
-                            "özellik": X_occ.columns[top_idx2],
-                            f"{pick} için önem": mabs[top_idx2]
-                        })
-                        st.markdown(f"**{pick} — ilk 10 etken**")
-                        st.dataframe(top_df2, use_container_width=True)
-                    else:
-                        st.info(f"{pick} için yeterli örnek yok (≥20 önerilir).")
+    return None
 
         # -------------------------------
         # Global — Sayı (kuantil regresyon)
@@ -1369,5 +1361,18 @@ if df09 is not None:
             else:
                 st.info("category_grouped / subcategory_grouped yoksa sınıf kartları oluşturulamaz.")
 else:
+    available_09 = {p: DATA_DIR / f"{p}_crime_09.csv" for p in ["sf", "fr"] if (DATA_DIR / f"{p}_crime_09.csv").exists()}
+    if not available_09:
+        st.markdown("### 5) Hızlı Model")
+        st.info("Model eğitmek için önce sf_crime_09.csv veya fr_crime_09.csv’nin üretilmiş olması gerekiyor.")
+        st.stop()
+    
+    st.markdown("### 5) Hızlı Model (ZI/Hurdle + Quantile + Kalibrasyon)")
+    pick_city = st.selectbox("Model verisi (09)", list(available_09.keys()), index=0, format_func=lambda x: x.upper())
+    try:
+        df09 = pd.read_csv(available_09[pick_city], low_memory=False)
+    except Exception as e:
+        st.warning(f"{pick_city}_crime_09.csv okunamadı: {e}")
+        st.stop()
     st.markdown("### 5) Hızlı Model")
     st.info("Model eğitmek için önce sf_crime_09.csv’nin üretilmiş olması gerekiyor.")
