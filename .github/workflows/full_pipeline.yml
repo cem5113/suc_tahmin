@@ -17,6 +17,11 @@ on:
       top_k:
         description: "Stacking: her saat dilimi için önerilecek GEOID sayısı"
         default: "50"
+      variant:
+        description: "Pipeline varyantı (default | fr)"
+        type: choice
+        options: [default, fr]
+        default: default
 
 permissions:
   actions: read
@@ -49,6 +54,7 @@ env:
   ACS_YEAR: ${{ vars.ACS_YEAR || 'LATEST' }}
   DEMOG_WHITELIST: ${{ vars.DEMOG_WHITELIST || '' }}
   CENSUS_GEO_LEVEL: ${{ vars.CENSUS_GEO_LEVEL || 'auto' }}
+  PIPELINE_VARIANT: ${{ github.event.inputs.variant || vars.PIPELINE_VARIANT || 'default' }}
 
 jobs:
   run:
@@ -208,9 +214,12 @@ jobs:
           CACHE_WRITE_Y_ONLY: "1"                               
         run: |
           set -e
-          python -u update_crime.py
-          echo "→ Yazılan Y:"
-          ls -l "${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv" || true
+          PY="update_crime.py"
+          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
+            if   [ -f "update_crime.fr.py" ]; then PY="update_crime.fr.py";
+            elif [ -f "update_crime_fr.py" ]; then PY="update_crime_fr.py"; fi
+          fi
+          python -u "$PY"
 
       - name: Restore 911 summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -287,7 +296,12 @@ jobs:
           BACKFILL_DAYS:         ${{ env.BACKFILL_DAYS }}
         run: |
           set -e
-          python -u update_911.py
+          PY="update_911.py"
+          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
+            if   [ -f "update_911.fr.py" ]; then PY="update_911.fr.py";
+            elif [ -f "update_911_fr.py" ]; then PY="update_911_fr.py"; fi
+          fi
+          python -u "$PY"
 
       - name: Restore 311 summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -361,11 +375,17 @@ jobs:
           BACKFILL_DAYS:         ${{ env.BACKFILL_DAYS }}
         run: |
           set -e
-          if [ -f update_311.py ]; then
-            python -u update_311.py
+          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
+            if   [ -f "update_311.fr.py" ];      then PY="update_311.fr.py";
+            elif [ -f "update_311_fr.py" ];      then PY="update_311_fr.py";
+            elif [ -f "scripts/update_311.fr.py" ]; then PY="scripts/update_311.fr.py";
+            elif [ -f "scripts/update_311_fr.py" ]; then PY="scripts/update_311_fr.py";
+            elif [ -f "update_311.py" ];         then PY="update_311.py";
+            else PY="scripts/update_311.py"; fi
           else
-            python -u scripts/update_311.py
+            if [ -f "update_311.py" ]; then PY="update_311.py"; else PY="scripts/update_311.py"; fi
           fi
+          python -u "$PY"
 
       - name: Ensure population CSV (local file)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -434,35 +454,66 @@ jobs:
           set -e
           echo "---- update_population.py (ilk 30 satır) ----"
           sed -n '1,30p' update_population.py || true
-          python -u update_population.py
+          PY="update_population.py"
+          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
+            if   [ -f "update_population.fr.py" ]; then PY="update_population.fr.py";
+            elif [ -f "update_population_fr.py" ]; then PY="update_population_fr.py"; fi
+          fi
+          python -u "$PY"
 
       - name: 05) Otobüs → sf_crime_04.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
-          python -u update_bus.py
+          PY="update_bus.py"
+          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
+            if   [ -f "update_bus.fr.py" ]; then PY="update_bus.fr.py";
+            elif [ -f "update_bus_fr.py" ]; then PY="update_bus_fr.py"; fi
+          fi
+          python -u "$PY"
 
       - name: 06) Tren (BART) → sf_crime_05.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
-          python -u update_train.py
+          PY="update_train.py"
+          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
+            if   [ -f "update_train.fr.py" ]; then PY="update_train.fr.py";
+            elif [ -f "update_train_fr.py" ]; then PY="update_train_fr.py"; fi
+          fi
+          python -u "$PY"
 
       - name: 07) POI zenginleştirme → sf_crime_06.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
-          if [ -f update_poi.py ]; then python -u update_poi.py;
-          elif [ -f pipeline_make_sf_crime_06.py ]; then python -u pipeline_make_sf_crime_06.py;
-          else echo "POI adımı bulunamadı"; exit 2; fi
+          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
+            if   [ -f "update_poi.fr.py" ]; then python -u update_poi.fr.py;
+            elif [ -f "update_poi_fr.py" ]; then python -u update_poi_fr.py;
+            elif [ -f "update_poi.py" ];    then python -u update_poi.py;
+            elif [ -f "pipeline_make_sf_crime_06.py" ]; then python -u pipeline_make_sf_crime_06.py;
+            else echo "POI adımı bulunamadı"; exit 2; fi
+          else
+            if [ -f update_poi.py ]; then python -u update_poi.py;
+            elif [ -f pipeline_make_sf_crime_06.py ]; then python -u pipeline_make_sf_crime_06.py;
+            else echo "POI adımı bulunamadı"; exit 2; fi
+          fi
 
       - name: 08) Polis & Devlet binaları → sf_crime_07.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
-          if [ -f update_police_gov.py ]; then python -u update_police_gov.py;
-          elif [ -f scripts/enrich_police_gov_06_to_07.py ]; then python -u scripts/enrich_police_gov_06_to_07.py;
-          else echo "Polis/Gov adımı bulunamadı"; exit 2; fi
+          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
+            if   [ -f "update_police_gov.fr.py" ]; then python -u update_police_gov.fr.py;
+            elif [ -f "update_police_gov_fr.py" ]; then python -u update_police_gov_fr.py;
+            elif [ -f "update_police_gov.py" ];    then python -u update_police_gov.py;
+            elif [ -f "scripts/enrich_police_gov_06_to_07.py" ]; then python -u scripts/enrich_police_gov_06_to_07.py;
+            else echo "Polis/Gov adımı bulunamadı"; exit 2; fi
+          else
+            if [ -f update_police_gov.py ]; then python -u update_police_gov.py;
+            elif [ -f scripts/enrich_police_gov_06_to_07.py" ]; then python -u scripts/enrich_police_gov_06_to_07.py;
+            else echo "Polis/Gov adımı bulunamadı"; exit 2; fi
+          fi
 
       # 09) Hava durumu → sadece arşiv (sf_weather_5years.csv)
       - name: 09) Hava durumu → sf_weather_5years.csv
@@ -472,12 +523,16 @@ jobs:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }} # çıktı burada yazılacak
         run: |
           set -euo pipefail
-          if [ -f update_weather.py ]; then
-            python -u update_weather.py
-          elif [ -f scripts/update_weather.py ]; then
-            python -u scripts/update_weather.py
+          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
+            if   [ -f "update_weather.fr.py" ]; then python -u update_weather.fr.py;
+            elif [ -f "update_weather_fr.py" ]; then python -u update_weather_fr.py;
+            elif [ -f "update_weather.py" ];    then python -u update_weather.py;
+            elif [ -f "scripts/update_weather.py" ]; then python -u scripts/update_weather.py;
+            else echo "❌ Weather script not found"; exit 2; fi
           else
-            echo "❌ Weather script not found"; exit 2
+            if   [ -f "update_weather.py" ]; then python -u update_weather.py;
+            elif [ -f "scripts/update_weather.py" ]; then python -u scripts/update_weather.py;
+            else echo "❌ Weather script not found"; exit 2; fi
           fi
           
           test -f "sf_weather_5years.csv" || { echo "❌ Beklenen çıktı yok: sf_weather_5years.csv"; exit 2; }
