@@ -1,10 +1,11 @@
-# make_neighbors_fr.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 make_neighbors_fr.py
 --------------------
-fr_crime_08.csv + sf_neighbors.csv → fr_crime_09.csv
+fr_crime_08.csv + neighbors.csv → fr_crime_09.csv
 
-Komşuluklar yeniden hesaplanmaz; son sf_neighbors.csv kullanılır.
+Komşuluklar yeniden hesaplanmaz; son neighbors.csv kullanılır.
 Her GEOID için komşu bölgelerdeki son 24h / 72h / 7d suç yoğunluğu hesaplanır.
 """
 from __future__ import annotations
@@ -21,7 +22,9 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # === Girdi / Çıktı ===
 IN_CSV  = Path(os.environ.get("NEIGHBOR_INPUT_CSV",  str(DATA_DIR / "fr_crime_08.csv")))
 OUT_CSV = Path(os.environ.get("NEIGHBOR_OUTPUT_CSV", str(DATA_DIR / "fr_crime_09.csv")))
-NEIGHBOR_FILE = Path(os.environ.get("NEIGHBOR_FILE", str(DATA_DIR / "sf_neighbors.csv")))
+
+# 🔁 1) BURASI: Ortam değişkeni + varsayılan kök dosya
+NEIGH_FILE = Path(os.environ.get("NEIGH_FILE", "neighbors.csv"))
 
 # === Parametreler ===
 GEOID_LEN = int(os.environ.get("GEOID_LEN", "11"))
@@ -40,10 +43,12 @@ def _pick_col(cols, *cands):
 def main():
     if not IN_CSV.exists():
         raise FileNotFoundError(f"Girdi bulunamadı: {IN_CSV}")
-    if not NEIGHBOR_FILE.exists():
-        raise FileNotFoundError(f"Komşuluk dosyası bulunamadı: {NEIGHBOR_FILE}")
 
-    print(f"▶︎ {IN_CSV.name} + sf_neighbors.csv → {OUT_CSV.name}")
+    # 🔁 2) BURASI: Dosya var mı? Yoksa bilgi ver
+    if not NEIGH_FILE.exists():
+        raise FileNotFoundError(f"Komşuluk dosyası bulunamadı: {NEIGH_FILE.resolve()}")
+
+    print(f"▶︎ {IN_CSV.name} + {NEIGH_FILE.name} → {OUT_CSV.name}")
 
     # 1️⃣ Veri yükleme
     df = pd.read_csv(IN_CSV, low_memory=False)
@@ -67,18 +72,19 @@ def main():
     df["crime_count"] = pd.to_numeric(df[ccol], errors="coerce").fillna(0).astype(int)
 
     # 2️⃣ Komşuluk verisi
-    nb = pd.read_csv(NEIGHBOR_FILE, dtype=str).dropna()
+    # 🔁 3) BURASI: Okurken de NEIGH_FILE kullan
+    nb = pd.read_csv(NEIGH_FILE, dtype=str).dropna()
     s = _pick_col(nb.columns, "geoid", "src", "source")
     t = _pick_col(nb.columns, "neighbor", "dst", "target")
     if not s or not t:
-        raise RuntimeError(f"sf_neighbors.csv başlıkları anlaşılamadı: {nb.columns.tolist()}")
+        raise RuntimeError(f"neighbors.csv başlıkları anlaşılamadı: {nb.columns.tolist()}")
 
     nb = nb.rename(columns={s: "geoid", t: "neighbor"})[["geoid", "neighbor"]].dropna()
     for c in ("geoid", "neighbor"):
         nb[c] = _norm_geoid(nb[c])
 
     if nb.empty:
-        raise RuntimeError("❌ sf_neighbors.csv boş görünüyor — komşuluk hesaplanamamış.")
+        raise RuntimeError("❌ neighbors.csv boş görünüyor — komşuluk hesaplanamamış.")
 
     # 3️⃣ Sadece suç işlenmiş satırlar (verimlilik için)
     crimes = df[df["crime_count"] > 0][["geoid", "datetime"]].copy()
