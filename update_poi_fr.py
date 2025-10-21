@@ -37,8 +37,7 @@ CRIME_IN = next((p for p in CAND_CRIME_IN if os.path.exists(p)), None)
 if not CRIME_IN:
     raise FileNotFoundError("❌ Suç girdisi bulunamadı: fr_crime_05.csv")
 
-_prefix = "fr" if Path(CRIME_IN).name.startswith("fr_") else ("sf" if Path(CRIME_IN).name.startswith("sf_") else "fr")
-CRIME_OUT = os.path.join(BASE_DIR, f"{_prefix}_crime_06.csv")
+CRIME_OUT = os.path.join(BASE_DIR, "fr_crime_06.csv")
 
 # POI kaynakları
 POI_GEOJSON_1 = os.path.join(BASE_DIR, "sf_pois.geojson")
