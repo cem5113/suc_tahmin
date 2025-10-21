@@ -474,7 +474,7 @@ jobs:
           echo "sf_weather_5years.csv — ilk 5 satır:"
           head -n 5 "${CRIME_DATA_DIR}/sf_weather_5years.csv" || true
 
-      # 10) SF: neighbors ile 08 → 09 (scripts /make_neighbors.py)
+      # 10) SF: neighbors ile 08 → 09 (scripts/make_neighbors.py)
       - name: 10) SF komşuluk → sf_crime_09.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
@@ -486,13 +486,13 @@ jobs:
           test -f "$SRC" || { echo "❌ Girdi eksik: $SRC"; exit 2; }
 
           echo "▶︎ SF komşuluk zenginleştirme başlıyor: $SRC → $DST"
-          if [ -f "scripts /make_neighbors.py" ]; then
+          if [ -f "scripts/make_neighbors.py" ]; then
             # Argümanlı çağrı (varsa), yoksa argümansız fallback
-            python -u scripts /make_neighbors.py --in "$SRC" --out "$DST" || python -u scripts /make_neighbors.py
+            python -u scripts/make_neighbors.py --in "$SRC" --out "$DST" || python -u scripts/make_neighbors.py
           elif [ -f "make_neigbors.py" ]; then
             python -u make_neigbors.py --in "$SRC" --out "$DST" || python -u make_neigbors.py
           else
-            echo "❌ scripts /make_neighbors.py bulunamadı"; exit 2
+            echo "❌ scripts/make_neighbors.py bulunamadı"; exit 2
           fi
 
           test -f "$DST" || { echo "❌ Beklenen çıktı yok: $DST"; exit 2; }
