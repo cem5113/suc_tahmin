@@ -341,16 +341,128 @@ def _resolve_workflow_id(target: str):
             return w.get("id")
     return None
 
-def dispatch_workflow(persist="artifact", force=True, ref="main"):
+def dispatch_workflow(persist="artifact", force=True, ref="main", variant=None, top_k=None):
     import json as _json, requests
     target = os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml")
     wid = _resolve_workflow_id(target)
     if not wid:
         return {"ok": False, "status": 404, "text": f"Workflow bulunamadı: {target}"}
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{wid}/dispatches"
-    payload = {"ref": ref, "inputs": {"persist": persist, "force": "true" if force else "false"}}
+    inputs = {"persist": persist, "force": "true" if force else "false"}
+    if variant: inputs["variant"] = str(variant)
+    if top_k:   inputs["top_k"]   = str(top_k)
+    payload = {"ref": ref, "inputs": inputs}
     r = requests.post(url, headers=_gh_headers(), data=_json.dumps(payload), timeout=30)
     return {"ok": r.status_code in (204, 201), "status": r.status_code, "text": r.text}
+
+def diag_workflow(target: str | None = None, ref: str | None = None):
+    """
+    Workflow dispatch 422 tanısı:
+      - Hangi workflow'lar var, ID/isim/yol
+      - Hedef workflow ID'si dosya adı veya görünen ad ile bulunuyor mu
+      - YAML içeriğinde 'workflow_dispatch' var mı, inputs neler
+      - Hedef branch (ref) mevcut mu
+    Ekrana okunaklı bir özet basar.
+    """
+    import requests, base64, yaml, urllib.parse
+
+    try:
+        target = target or os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml")
+        ref = ref or "main"
+
+        st.write(f"🎯 Hedef workflow: `{target}` · ref: `{ref}`")
+        # 1) Tüm workflow'ları getir
+        url_list = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows?per_page=100"
+        r = requests.get(url_list, headers=_gh_headers(), timeout=30)
+        if r.status_code != 200:
+            st.error(f"Workflow listesi okunamadı: {r.status_code} {r.text}")
+            return
+        ws = r.json().get("workflows", [])
+        if not ws:
+            st.warning("Repo’da hiç workflow görünmüyor.")
+        else:
+            st.caption(f"Toplam {len(ws)} workflow bulundu.")
+            st.code("\n".join([f"- {w.get('name')}  | id={w.get('id')}  | path={w.get('path')}" for w in ws]) or "-", language="text")
+
+        # 2) ID çöz: önce dosya adı, olmazsa görünen ad
+        wid = None
+        for w in ws:
+            p = str(w.get("path", ""))
+            if os.path.basename(p) == target:
+                wid = w.get("id"); break
+        if wid is None:
+            for w in ws:
+                if str(w.get("name", "")).strip().lower() == target.strip().lower():
+                    wid = w.get("id"); break
+
+        if wid is None:
+            st.error(f"❌ Hedef workflow bulunamadı: `{target}` (dosya adı ya da görünen ad eşleşmedi)")
+            return
+
+        st.success(f"✅ Çözülen workflow id: {wid}")
+
+        # 3) YAML içeriğini getir (contents API)
+        #    Not: path'i bulmak için ID'den tekrar sorgu yapalım
+        url_w = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{wid}"
+        rw = requests.get(url_w, headers=_gh_headers(), timeout=30)
+        if rw.status_code != 200:
+            st.warning(f"Workflow ayrıntısı okunamadı: {rw.status_code} {rw.text}")
+            return
+        wobj = rw.json()
+        wpath = wobj.get("path", "")
+        st.write(f"🗂️ Dosya yolu: `{wpath}`")
+
+        url_contents = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{urllib.parse.quote(wpath)}?ref={urllib.parse.quote(ref)}"
+        rc = requests.get(url_contents, headers=_gh_headers(), timeout=30)
+        if rc.status_code != 200:
+            st.error(f"YAML okunamadı: {rc.status_code} {rc.text}")
+            return
+        content_b64 = rc.json().get("content", "")
+        yaml_text = base64.b64decode(content_b64.encode()).decode("utf-8", errors="ignore")
+        st.code(yaml_text, language="yaml")
+
+        # 4) YAML parse et ve workflow_dispatch var mı bak
+        try:
+            y = yaml.safe_load(yaml_text) or {}
+        except Exception as e:
+            st.error(f"YAML parse hatası: {e}")
+            return
+
+        on_section = (y.get("on") or y.get(True) or {})
+        # 'on' anahtarının dict/ list vs. olabileceğine karşı normalize
+        has_dispatch = False
+        inputs_info = {}
+        if isinstance(on_section, dict):
+            if "workflow_dispatch" in on_section:
+                has_dispatch = True
+                wd = on_section.get("workflow_dispatch") or {}
+                if isinstance(wd, dict):
+                    inputs_info = wd.get("inputs", {}) or {}
+        elif isinstance(on_section, list):
+            has_dispatch = "workflow_dispatch" in on_section
+
+        if has_dispatch:
+            st.success("✅ Bu workflow YAML'ında `workflow_dispatch` tanımlı.")
+        else:
+            st.error("❌ Bu workflow YAML'ında `workflow_dispatch` YOK. 422 sebebi budur.")
+
+        if inputs_info:
+            st.write("🧩 `workflow_dispatch.inputs` tanımı:")
+            st.json(inputs_info)
+        else:
+            st.caption("Bu workflow için özel inputs tanımı yok (veya boş).")
+
+        # 5) Branch/Ref var mı (basit check)
+        url_branch = f"https://api.github.com/repos/{GITHUB_REPO}/branches/{urllib.parse.quote(ref)}"
+        rb = requests.get(url_branch, headers=_gh_headers(), timeout=30)
+        if rb.status_code == 200:
+            st.success(f"✅ Branch mevcut: {ref}")
+        else:
+            st.warning(f"⚠️ Branch bulunamadı: {ref} ({rb.status_code})")
+
+        st.info("Tanı tamam. Eğer dispatch butonunda hâlâ 422 alıyorsan, YAML dosyanda mutlaka `workflow_dispatch:` olmalı ve doğru branch’tan okunuyor olmalı.")
+    except Exception as e:
+        st.error(f"Diag hata: {e}")
 
 def _get_last_run_by_workflow():
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{GITHUB_WORKFLOW}/runs?per_page=1"
@@ -1082,19 +1194,33 @@ st.title("📦 Günlük Suç Tahmin Zenginleştirme ve Güncelleme Paneli")
 with st.sidebar:
     st.markdown("### GitHub Actions")
 
+with st.expander("🕵️ Workflow tanı (dispatch)"):
+    wf_in = st.text_input(
+        "Workflow (dosya adı veya görünen ad)",
+        os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml")
+    )
+    ref_in = st.text_input("Ref (branch/tag)", "main")
+    if st.button("Tanıyı Çalıştır"):
+        diag_workflow(target=wf_in, ref=ref_in)
+
+    with st.expander("🕵️ Workflow tanı (dispatch)"):
+        wf_in = st.text_input("Workflow (dosya adı veya görünen ad)",
+                              os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml"))
+        ref_in = st.text_input("Ref (branch/tag)", "main")
+        if st.button("Tanıyı Çalıştır"):
+            diag_workflow(target=wf_in, ref=ref_in)
+
     VARIANTS = ["default", "fr"]
     variant = st.selectbox(
         "Pipeline varyantı",
-        VARIANTS,
-        index=0,
+        VARIANTS, index=0,
         help="default: update_*.py • fr: update_*.fr.py / update_*_fr.py"
     )
     os.environ["PIPELINE_VARIANT"] = variant
 
     persist = st.selectbox(
         "Çıktıyı saklama modu",
-        ["artifact", "commit", "none"],
-        index=0,
+        ["artifact", "commit", "none"], index=0,
         help="artifact: repo’yu bozmadan sakla • commit: repo’ya yaz • none: sadece log"
     )
 
