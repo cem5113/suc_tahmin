@@ -17,6 +17,57 @@ except Exception:
     SF_TZ = None
 
 # =========================
+# CONFIG & PATHS
+# =========================
+
+# ✅ Panel ile tutarlılık: varsayılan GEOID uzunluğu 11
+DEFAULT_GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
+
+# Çalışma dizini ENV ile yönetilebilir
+BASE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
+Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
+
+# 911 summary dosya adları
+LOCAL_NAME = "sf_911_last_5_year.csv"
+local_summary_path = Path(BASE_DIR) / LOCAL_NAME
+Y_NAME = "sf_911_last_5_year_y.csv"
+y_summary_path = Path(BASE_DIR) / Y_NAME
+
+# Crime grid
+CRIME_GRID_CANDIDATES = [
+    Path(BASE_DIR) / "sf_crime_grid_full_labeled.csv",
+    Path("./sf_crime_grid_full_labeled.csv"),
+]
+merged_output_path = Path(BASE_DIR) / "sf_crime_01.csv"
+
+# Census blocks (komşu için)
+CENSUS_CANDIDATES = [
+    Path(BASE_DIR) / "sf_census_blocks_with_population.geojson",
+    Path("./sf_census_blocks_with_population.geojson"),
+]
+
+# API / kaynak
+SF911_API_URL   = os.getenv("SF911_API_URL", "https://data.sfgov.org/resource/2zdj-bwza.json")
+SF_APP_TOKEN    = os.getenv("SF911_API_TOKEN", "")
+AGENCY_FILTER   = os.getenv("SF911_AGENCY_FILTER", "agency like '%Police%'")
+REQUEST_TIMEOUT = int(os.getenv("SF911_REQUEST_TIMEOUT", "60"))
+CHUNK_LIMIT     = int(os.getenv("SF911_CHUNK_LIMIT", "50000"))
+MAX_RETRIES     = int(os.getenv("SF911_MAX_RETRIES", "4"))
+SLEEP_BETWEEN_REQS = float(os.getenv("SF911_SLEEP", "0.2"))
+BULK_RANGE      = os.getenv("SF911_BULK_RANGE", "1").lower() in ("1","true","yes","on")
+IS_V3           = "/api/v3/views/" in SF911_API_URL
+V3_PAGE_LIMIT   = int(os.getenv("SF_V3_PAGE_LIMIT", "1000"))
+SF911_RECENT_HOURS = int(os.getenv("SF911_RECENT_HOURS", "6"))
+
+# Release taban URL — `_y` ÖNCELİKLİ, sonra eski ada düş
+RAW_911_URL_ENV = os.getenv("RAW_911_URL", "").strip()
+RAW_911_URL_CANDIDATES = [
+    RAW_911_URL_ENV or "",
+    "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year_y.csv",
+    "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year.csv",
+]
+
+# =========================
 # LOG / HELPERS
 # =========================
 
@@ -109,57 +160,6 @@ def is_lfs_pointer_file(p: Path) -> bool:
         return "git-lfs.github.com/spec/v1" in p.read_text(errors="ignore")[:200]
     except Exception:
         return False
-
-# =========================
-# CONFIG & PATHS
-# =========================
-
-# ✅ Panel ile tutarlılık: varsayılan GEOID uzunluğu 11
-DEFAULT_GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
-
-# Çalışma dizini ENV ile yönetilebilir
-BASE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
-Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
-
-# 911 summary dosya adları
-LOCAL_NAME = "sf_911_last_5_year.csv"
-local_summary_path = Path(BASE_DIR) / LOCAL_NAME
-Y_NAME = "sf_911_last_5_year_y.csv"
-y_summary_path = Path(BASE_DIR) / Y_NAME
-
-# Crime grid
-CRIME_GRID_CANDIDATES = [
-    Path(BASE_DIR) / "sf_crime_grid_full_labeled.csv",
-    Path("./sf_crime_grid_full_labeled.csv"),
-]
-merged_output_path = Path(BASE_DIR) / "sf_crime_01.csv"
-
-# Census blocks (komşu için)
-CENSUS_CANDIDATES = [
-    Path(BASE_DIR) / "sf_census_blocks_with_population.geojson",
-    Path("./sf_census_blocks_with_population.geojson"),
-]
-
-# API / kaynak
-SF911_API_URL   = os.getenv("SF911_API_URL", "https://data.sfgov.org/resource/2zdj-bwza.json")
-SF_APP_TOKEN    = os.getenv("SF911_API_TOKEN", "")
-AGENCY_FILTER   = os.getenv("SF911_AGENCY_FILTER", "agency like '%Police%'")
-REQUEST_TIMEOUT = int(os.getenv("SF911_REQUEST_TIMEOUT", "60"))
-CHUNK_LIMIT     = int(os.getenv("SF911_CHUNK_LIMIT", "50000"))
-MAX_RETRIES     = int(os.getenv("SF911_MAX_RETRIES", "4"))
-SLEEP_BETWEEN_REQS = float(os.getenv("SF911_SLEEP", "0.2"))
-BULK_RANGE      = os.getenv("SF911_BULK_RANGE", "1").lower() in ("1","true","yes","on")
-IS_V3           = "/api/v3/views/" in SF911_API_URL
-V3_PAGE_LIMIT   = int(os.getenv("SF_V3_PAGE_LIMIT", "1000"))
-SF911_RECENT_HOURS = int(os.getenv("SF911_RECENT_HOURS", "6"))
-
-# Release taban URL — `_y` ÖNCELİKLİ, sonra eski ada düş
-RAW_911_URL_ENV = os.getenv("RAW_911_URL", "").strip()
-RAW_911_URL_CANDIDATES = [
-    RAW_911_URL_ENV or "",
-    "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year_y.csv",
-    "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year.csv",
-]
 
 def _pick_working_release_url(candidates: list[str]) -> str:
     """
