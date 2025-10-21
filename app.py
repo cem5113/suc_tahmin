@@ -33,15 +33,15 @@ SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 SEARCH_DIRS = [SCRIPTS_DIR, ROOT]
 
 PIPELINE = [
-    {"name": "update_crime.py",      "alts": ["build_crime_grid.py", "crime_grid_build.py"]},
-    {"name": "update_911.py",        "alts": ["enrich_911.py"]},
-    {"name": "update_311.py",        "alts": ["enrich_311.py"]},
-    {"name": "update_population.py", "alts": ["enrich_population.py"]},
-    {"name": "update_bus.py",        "alts": ["enrich_bus.py"]},
-    {"name": "update_train.py",      "alts": ["enrich_train.py"]},
-    {"name": "update_poi.py",        "alts": ["pipeline_make_sf_crime_06.py", "app_poi_to_06.py", "enrich_poi.py"]},
-    {"name": "update_police_gov.py", "alts": ["enrich_police_gov_06_to_07.py", "enrich_police_gov.py", "enrich_police.py"]},
-    {"name": "update_weather.py",    "alts": ["enrich_weather.py"]},
+    {"name": "update_crime",      "alts": ["build_crime_grid", "crime_grid_build"]},
+    {"name": "update_911",        "alts": ["enrich_911"]},
+    {"name": "update_311",        "alts": ["enrich_311"]},
+    {"name": "update_population", "alts": ["enrich_population"]},
+    {"name": "update_bus",        "alts": ["enrich_bus"]},
+    {"name": "update_train",      "alts": ["enrich_train"]},
+    {"name": "update_poi",        "alts": ["pipeline_make_sf_crime_06", "app_poi_to_06", "enrich_poi"]},
+    {"name": "update_police_gov", "alts": ["enrich_police_gov_06_to_07", "enrich_police_gov", "enrich_police"]},
+    {"name": "update_weather",    "alts": ["enrich_weather"]},
 ]
 
 # --- AĞIR BAĞIMLILIKLAR İÇİN LAZY IMPORT ---
@@ -602,6 +602,15 @@ st.title("📦 Günlük Suç Tahmin Zenginleştirme ve Güncelleme Paneli")
 with st.sidebar:
     st.markdown("### GitHub Actions")
 
+    VARIANTS = ["default", "fr"]
+    variant = st.selectbox(
+        "Pipeline varyantı",
+        VARIANTS,
+        index=0,
+        help="default: update_*.py • fr: update_*.fr.py / update_*_fr.py"
+    )
+    os.environ["PIPELINE_VARIANT"] = variant
+
     # Çıktı saklama modu
     persist = st.selectbox(
         "Çıktıyı saklama modu",
@@ -1098,26 +1107,30 @@ if st.button("♻️ Streamlit cache temizle"):
 # -----------------------------------------------------------------------------
 # Script bul/çalıştır
 # -----------------------------------------------------------------------------
-def ensure_script(local_name: str) -> Optional[Path]:
-    for d in SEARCH_DIRS:
-        p = d / local_name
-        if p.exists():
-            return p
-    return None
+def _candidate_names(base: str, locale: str) -> List[str]:
+    # arama sırası: locale > default
+    if locale and locale != "default":
+        return [
+            f"{base}.fr.py",      # update_xxx.fr.py
+            f"{base}_fr.py",      # update_xxx_fr.py
+            f"{base}.{locale}.py",
+            f"{base}-{locale}.py",
+            f"{base}.py",         # en sonda default'a düş
+        ]
+    else:
+        return [f"{base}.py"]
 
-def resolve_script(entry: dict) -> Optional[Path]:
-    p = ensure_script(entry["name"])
-    if p:
-        return p
+def resolve_script(entry: dict, locale: str = "default") -> Optional[Path]:
+    # 1) asıl ad için
+    for cand in _candidate_names(entry["name"], locale):
+        p = ensure_script(cand)
+        if p:
+            return p
+    # 2) alternatif adlar için
     for alt in entry.get("alts", []):
-        pp = ensure_script(alt)
-        if pp:
-            target = SCRIPTS_DIR / entry["name"]
-            try:
-                target.write_text(Path(pp).read_text(encoding="utf-8"), encoding="utf-8")
-                st.info(f"🔁 {alt} → {entry['name']} olarak kopyalandı.")
-                return target
-            except Exception:
+        for cand in _candidate_names(alt, locale):
+            pp = ensure_script(cand)
+            if pp:
                 return pp
     return None
 
@@ -1162,7 +1175,7 @@ if st.button("⚙️ Güncelleme ve Zenginleştirme (01 → 09)"):
     with st.spinner("⏳ Scriptler çalıştırılıyor..."):
         all_ok = True
         for entry in PIPELINE:
-            sp = resolve_script(entry)
+            sp = resolve_script(entry, locale=os.environ.get("PIPELINE_VARIANT", "default"))
             if not sp:
                 st.warning(f"⏭️ {entry['name']} bulunamadı/indirilemedi, atlanıyor.")
                 all_ok = False
