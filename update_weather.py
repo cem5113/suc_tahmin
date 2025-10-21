@@ -1,4 +1,4 @@
-# update_weather.py — weather'ı güncelle + sf_crime_07 ile birleştir → sf_crime_08.csv
+# update_weather.py — weather'ı güncelle + *_crime_07 ile birleştir → *_crime_08.csv
 # Robust, header-safe, çok-kent destekli (prefix: sf, fr, ...)
 
 from datetime import datetime, timedelta, date
@@ -164,7 +164,7 @@ def upsert_github_csv(df: pd.DataFrame, target_path: str):
         print("⚠️ GitHub yükleme hatası:", e)
 
 def normalize_crime07(df: pd.DataFrame) -> pd.DataFrame:
-    """sf_crime_07 için tarih kolonunu güvenle normalize et; GEOID vb. dokunma."""
+    """*_crime_07 için tarih kolonunu güvenle normalize et; GEOID vb. dokunma."""
     d = df.copy()
     cols = {c.lower(): c for c in d.columns}
     date_col = None
@@ -208,6 +208,27 @@ def merge_07_weather_to_08(crime07_path: str, weather_df: pd.DataFrame, out_path
     return merged
 
 # =====================================================================================
+# (YENİ) WEATHER DF CACHE: Aynı script içinde tekrar kullanmak için
+# =====================================================================================
+_WEATHER_LATEST: pd.DataFrame | None = None
+
+def get_weather_df() -> pd.DataFrame:
+    """Script içinde daha sonra tekrar kullanmak için güncel weather DF'ini getirir."""
+    global _WEATHER_LATEST
+    if _WEATHER_LATEST is not None:
+        return _WEATHER_LATEST
+    if os.path.exists(WEATHER_CSV):
+        try:
+            df = pd.read_csv(WEATHER_CSV, low_memory=False)
+            return normalize_weather_columns(df)
+        except Exception:
+            pass
+    # Yedek: boş şema
+    return pd.DataFrame(
+        columns=["date","tavg","tmin","tmax","prcp","temp_range","is_rainy","is_hot_day"]
+    )
+
+# =====================================================================================
 # WEATHER GÜNCELLE
 # =====================================================================================
 existing = read_existing_weather(WEATHER_CSV)
@@ -234,12 +255,15 @@ os.makedirs(os.path.dirname(WEATHER_CSV), exist_ok=True)
 allw.to_csv(WEATHER_CSV, index=False)
 print(f"💾 Weather kaydedildi: {WEATHER_CSV} — {len(allw)} satır, {allw['date'].min()} → {allw['date'].max()}")
 
+# (YENİ) Bellek içi cache: aynı scriptte tekrar kullanım için
+_WEATHER_LATEST = allw.copy()
+
 # İstenirse GitHub'a yükle
 if UPLOAD_WEATHER_TO_GH:
     upsert_github_csv(allw, WEATHER_TARGET_PATH)
 
 # =====================================================================================
-# CRIME_07 → CRIME_08 BİRLEŞTİRME
+# CRIME_07 → CRIME_08 BİRLEŞTİRME (çok-kent)
 # =====================================================================================
 produced_any = False
 for pref in CITY_PREFIXES:
@@ -249,11 +273,10 @@ for pref in CITY_PREFIXES:
     in07  = os.path.join(DATA_DIR, f"{pref}_crime_07.csv")
     out08 = os.path.join(DATA_DIR, f"{pref}_crime_08.csv")
     print(f"🔗 Birleştiriliyor: {os.path.basename(in07)} + weather → {os.path.basename(out08)}")
-    m = merge_07_weather_to_08(in07, allw, out08)
+    m = merge_07_weather_to_08(in07, get_weather_df(), out08)
     if m is not None:
         produced_any = True
         if UPLOAD_08_TO_GH:
-            # her şehir için ayrı hedef yolu isimlendir
             target08 = f"{DATA_DIR}/{os.path.basename(out08)}"
             upsert_github_csv(m, target08)
 
