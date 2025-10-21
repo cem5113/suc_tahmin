@@ -1,8 +1,8 @@
 # update_population_fr.py — nüfus (GEOID + population) zenginleştirme → fr_crime_03.csv
 # Amaç: Latitude/longitude YOK → GEOID bazlı birleştirme.
-# İsimler: Varsayılan giriş 'fr_crime_02.csv' 
-#           Çıkış otomatik: 'fr_crime_03.csv' 
-# Nüfus CSV: Yerel dosya; aranan adlar:'sf_population.csv' → 'population.csv'
+# Girdi (varsayılan):  fr_crime_02.csv        (ENV: CRIME_INPUT ile değiştirilebilir)
+# Çıktı (sabit):       fr_crime_03.csv        (ENV: CRIME_OUTPUT ile değiştirilebilir)
+# Nüfus CSV arama sırası: fr_population.csv → sf_population.csv → population.csv (yerel)
 
 import os
 import re
@@ -37,21 +37,17 @@ def _find_geoid_col(df: pd.DataFrame) -> str | None:
     for n in cands:
         if n.lower() in low:
             return low[n.lower()]
-    # fallback: içinde 'geoid' geçen herhangi bir kolon
     for c in df.columns:
         if "geoid" in c.lower():
             return c
     return None
 
 def _find_population_col(df: pd.DataFrame) -> str | None:
-    cands = [
-        "population","pop","total_population","B01003_001E","estimate","total",
-    ]
+    cands = ["population","pop","total_population","B01003_001E","estimate","total"]
     low = {c.lower(): c for c in df.columns}
     for n in cands:
         if n.lower() in low:
             return low[n.lower()]
-    # çok sade dosyalarda 'value' gibi gelebilir
     for c in df.columns:
         if re.fullmatch(r"(pop.*|.*population.*|value)", c, flags=re.I):
             return c
@@ -68,40 +64,38 @@ def _level_name(L: int) -> str:
 BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Crime input otomatik bul (öncelik FR → SF)
-CRIME_INPUT = os.getenv("CRIME_INPUT", "") or None
-if not CRIME_INPUT:
-    for p in [
-        BASE_DIR / "fr_crime_02.csv",
-        Path("fr_crime_02.csv"),
-    ]:
-        if p.exists():
-            CRIME_INPUT = str(p); break
-if not CRIME_INPUT or not Path(CRIME_INPUT).exists():
-    raise FileNotFoundError("CRIME_INPUT bulunamadı. 'fr_crime_02.csv') bekleniyor.")
+# Girdi (FR sabit) — varsayılan fr_crime_02.csv
+CRIME_INPUT = (os.getenv("CRIME_INPUT", "") or str(BASE_DIR / "fr_crime_02.csv")).strip()
+if not Path(CRIME_INPUT).exists():
+    # kök dizini de dene
+    alt = Path("fr_crime_02.csv")
+    if alt.exists():
+        CRIME_INPUT = str(alt)
+if not Path(CRIME_INPUT).exists():
+    raise FileNotFoundError(f"CRIME_INPUT bulunamadı: {CRIME_INPUT} (fr_crime_02.csv bekleniyor)")
 
-# Çıkış adı: giriş prefix'ine göre fr/sf karar ver
-_prefix = "fr" if Path(CRIME_INPUT).name.startswith("fr_") else ("sf" if Path(CRIME_INPUT).name.startswith("sf_") else "fr")
-CRIME_OUTPUT = os.getenv("CRIME_OUTPUT", "") or str(BASE_DIR / f"{_prefix}_crime_03.csv")
+# Çıktı (FR sabit) — varsayılan fr_crime_03.csv
+CRIME_OUTPUT = (os.getenv("CRIME_OUTPUT", "") or str(BASE_DIR / "fr_crime_03.csv")).strip()
 
 # Population input: sadece YEREL CSV; FR → SF → generic
 POPULATION_PATH = (os.getenv("POPULATION_PATH", "") or "").strip()
 if not POPULATION_PATH:
     for p in [
-        BASE_DIR / "sf_population.csv",
-        Path("sf_population.csv"),
+        BASE_DIR / "fr_population.csv", Path("fr_population.csv"),
+        BASE_DIR / "sf_population.csv", Path("sf_population.csv"),
+        BASE_DIR / "population.csv",    Path("population.csv"),
     ]:
         if p.exists():
             POPULATION_PATH = str(p); break
     if not POPULATION_PATH:
-        raise FileNotFoundError("Nüfus CSV bulunamadı (sf_population.csv). POPULATION_PATH ile belirtin.")
+        raise FileNotFoundError("Nüfus CSV bulunamadı (fr_population.csv/sf_population.csv/population.csv). POPULATION_PATH ile belirtin.")
 else:
     if POPULATION_PATH.startswith(("http://","https://")):
         raise ValueError("CSV-ONLY: POPULATION_PATH yerel bir CSV olmalı (URL kabul edilmez).")
     if not Path(POPULATION_PATH).exists():
         raise FileNotFoundError(f"POPULATION_PATH yok: {POPULATION_PATH}")
 
-# İsteğe bağlı hedef seviye (auto: veri uzunluğundan çıkar)
+# Hedef seviye (auto: veri uzunluğundan çıkar)
 CENSUS_GEO_LEVEL = os.getenv("CENSUS_GEO_LEVEL", "auto").strip().lower()
 MAP_LEN = {"county": 5, "tract": 11, "blockgroup": 12, "block": 15}
 
@@ -111,7 +105,6 @@ crime_geoid_col = _find_geoid_col(crime)
 if not crime_geoid_col:
     raise RuntimeError("Suç veri setinde GEOID kolonu bulunamadı.")
 
-# Nüfusu str okuyalım ki virgül/format bozulmasın
 pop = pd.read_csv(POPULATION_PATH, low_memory=False, dtype=str)
 pop_geoid_col = _find_geoid_col(pop)
 if not pop_geoid_col:
@@ -137,7 +130,6 @@ print(f"[info] crime GEO len≈{crime_len} | pop GEO len≈{pop_len} | join_len=
 pp = pop[[pop_geoid_col, pop_val_col]].copy()
 pp["_key"] = _key(pp[pop_geoid_col], join_len)
 
-# nüfusu numeriğe çevir (virgül/boşluk temizliği)
 pp["population"] = (
     pp[pop_val_col].astype(str)
     .str.replace(",", "", regex=False)
@@ -145,7 +137,7 @@ pp["population"] = (
 )
 pp["population"] = pd.to_numeric(pp["population"], errors="coerce").fillna(0)
 
-# Eğer pop daha ince ise (ör. blockgroup 12 → join 11), aggregate et
+# Pop daha ince ise (ör. blockgroup 12 → join 11), aggregate et
 if pop_len > join_len:
     pp = pp.groupby("_key", as_index=False)["population"].sum()
 else:
@@ -155,7 +147,6 @@ else:
 cc = crime.copy()
 cc["_key"] = _key(cc[crime_geoid_col], join_len)
 
-# Hızlı kalite göstergesi
 ok_pop   = _len_ok(pp["_key"], join_len)
 ok_crime = _len_ok(cc["_key"], join_len)
 print(f"🔎 GEO normalize: level={_level_name(join_len)} (L={join_len}) | pop_ok={ok_pop:.2%} | crime_ok={ok_crime:.2%}")
