@@ -1202,40 +1202,40 @@ with st.sidebar:
         acs_year_default = os.environ.get("ACS_YEAR", "LATEST")
         whitelist_default = os.environ.get("DEMOG_WHITELIST", "")
         level_default = os.environ.get("CENSUS_GEO_LEVEL", "auto")
-
+    
         acs_year_in = st.text_input(
             label="ACS_YEAR (LATEST veya YYYY)",
             value=str(acs_year_default or "LATEST"),
-            key="acs_year_in",
+            key="acs_year_in_sb",
             help="5-year ACS için en son yılı kullanmak genelde uygundur."
         )
-
+    
         whitelist_in = st.text_input(
             label="DEMOG_WHITELIST (virgüllü; boş = hepsi)",
             value=str(whitelist_default or ""),
-            key="demog_whitelist_in",
+            key="demog_whitelist_in_sb",
             help='Örn: "population,median_income,education". Metin eşleşmesiyle filtreler.'
         )
-
+    
         levels = ["auto", "tract", "blockgroup", "block"]
         try:
             idx = levels.index(level_default) if level_default in levels else 0
         except Exception:
             idx = 0
-        level_in = st.selectbox(
+        level_in_main = st.selectbox(
             "CENSUS_GEO_LEVEL",
             levels,
             index=idx,
-            key="census_geo_level_in",
+            key="census_geo_level_in_main",
             help="Nüfus GEOID eşleşme seviyesi. `auto` çoğu durumda yeterlidir."
         )
-        os.environ["CENSUS_GEO_LEVEL"] = level_in
+        os.environ["CENSUS_GEO_LEVEL"] = level_in_main
 
         pop_default = os.environ.get("POPULATION_PATH", str(POPULATION_PATH))
-        pop_url_in = st.text_input(
+        pop_url_in_main = st.text_input(
             label="POPULATION_PATH (YEREL CSV YOLU)",
             value=str(pop_default or ""),
-            key="population_path_in",
+            key="population_path_in_main",
             help="Örn: crime_prediction_data/sf_population.csv (URL kabul edilmez)."
         )
 
@@ -1248,10 +1248,10 @@ with st.sidebar:
 
         os.environ["DEMOG_WHITELIST"] = str(whitelist_in or "")
 
-        if re.match(r"^https?://", str(pop_url_in), flags=re.I):
+        if re.match(r"^https?://", str(pop_url_in_main), flags=re.I):
             st.error("CSV-only mod: URL kabul edilmez. Yerel bir CSV yolu girin.")
         else:
-            os.environ["POPULATION_PATH"] = pop_url_in or str(POPULATION_PATH)
+            os.environ["POPULATION_PATH"] = pop_url_in_main or str(POPULATION_PATH)
 
 # --- ANA SAYFA (sidebar DIŞI) ---
 with st.container():
