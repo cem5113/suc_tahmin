@@ -745,11 +745,13 @@ try:
 
     # emniyet: eğer bir şekilde daily_cnt gelmemişse oluştur
     if "daily_cnt" not in _day_unique.columns:
-        if "911_request_count_hour_range" in final_911.columns:
-            _tmp_day2 = (final_911.groupby([c for c in ["GEOID","date"] if c in final_911.columns], observed=True)
-                         ["911_request_count_hour_range"].sum().reset_index())
-            _tmp_day2 = _tmp_day2.rename(columns={"911_request_count_hour_range": "daily_cnt"})
-            _day_unique = _day_unique.merge(_tmp_day2, on=[c for c in ["GEOID","date"] if c in _day_unique.columns], how="left")
+        if "911_request_count_hour_range" in final_911.columns and {"GEOID","date"}.issubset(final_911.columns):
+            _tmp_day2 = (final_911.groupby(["GEOID","date"], observed=True)
+                         ["911_request_count_hour_range"].sum().reset_index()
+                         .rename(columns={"911_request_count_hour_range": "daily_cnt"}))
+            _day_unique = _day_unique.merge(
+                _tmp_day2, on=[c for c in ["GEOID","date"] if c in _day_unique.columns], how="left"
+            )
         else:
             _day_unique["daily_cnt"] = 0
     _day_unique["daily_cnt"] = pd.to_numeric(_day_unique["daily_cnt"], errors="coerce").fillna(0).astype("int32")
@@ -814,15 +816,23 @@ try:
             # =========================
             for W in ROLL_WINDOWS:
                 if not _day_unique.empty:
+                    # günlük rolling için güvenli kolon seçimi
+                    val_col = "daily_cnt" if "daily_cnt" in _day_unique.columns else (
+                        "911_request_count_daily(before_24_hours)" if "911_request_count_daily(before_24_hours)" in _day_unique.columns else None
+                    )
+                    if val_col is None:
+                        _day_unique["daily_cnt"] = 0
+                        val_col = "daily_cnt"
+
                     if "GEOID" in _day_unique.columns:
                         _day_unique[f"911_geo_last{W}d"] = (
-                            _day_unique.groupby("GEOID", observed=True)["daily_cnt"]
+                            _day_unique.groupby("GEOID", observed=True)[val_col]
                             .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
                         ).astype("float32")
                     else:
                         # GEOID yoksa şehir geneli tek seri rolling
                         _day_unique[f"911_geo_last{W}d"] = (
-                            _day_unique.sort_values("date")["daily_cnt"]
+                            _day_unique.sort_values("date")[val_col]
                             .rolling(W, min_periods=1).sum().shift(1)
                         ).astype("float32")
 
@@ -888,6 +898,7 @@ except Exception as e:
     log("❌ Dış normalize+incremental try bloğunda hata:")
     import traceback
     log("".join(traceback.format_exception(e)))
+
 # =========================
 # STANDARDIZE + DERIVED KEYS (hr_key, dow, season)
 # =========================
@@ -923,6 +934,7 @@ dump_nan_samples(_hr_unique, "911_hr_unique_after_roll")
 # =========================
 def build_neighbors(method: str = "touches", radius_m: float = 500.0) -> pd.DataFrame:
     ...
+    # Burayı gerçek komşuluk hesap kodunla doldurabilirsin.
 
 neighbors_df = None
 if ENABLE_NEIGHBORS:
@@ -966,7 +978,7 @@ _enriched = final_911.merge(_hr_unique, on=["GEOID","hr_key","date"], how="left"
 _enriched = _enriched.merge(_day_unique, on=["GEOID","date"], how="left")
 if _neighbor_roll is not None:
     _enriched = _enriched.merge(
-        _neighbor_roll[["GEOID","date"] + [f"911_neighbors_last{W}d" for W in ROLL_WINDOWS]],
+        _neighbor_roll[["GEOID","date"] + [f"911_neighbors_last{W}d" for W in ROLL_WINDOWS if f"911_neighbors_last{W}d" in _neighbor_roll.columns]],
         on=["GEOID","date"], how="left"
     )
 
@@ -997,14 +1009,25 @@ if has_date_col:
     log("🔗 Join modu: DATE-BASED (GEOID, date, hr_key)")
 else:
     cal_keys = ["GEOID","hr_key","day_of_week","season"]
-    agg_cols = [
+
+    base_agg_candidates = [
         "911_request_count_hour_range",
         "911_request_count_daily(before_24_hours)",
-        "911_geo_last3d","911_geo_last7d",
-        "911_geo_hr_last3d","911_geo_hr_last7d",
-    ] + ([f"911_neighbors_last{W}d" for W in ROLL_WINDOWS] if _neighbor_roll is not None else [])
-    cal_agg = (_enriched.groupby(cal_keys, as_index=False, observed=True)[agg_cols]
-                        .median(numeric_only=True))
+        "911_geo_last3d", "911_geo_last7d",
+        # "911_geo_hr_last3d", "911_geo_hr_last7d",  # üretilmiyor → listeye ekleme
+    ]
+    neighbor_agg_candidates = [f"911_neighbors_last{W}d" for W in ROLL_WINDOWS]
+
+    agg_cols = [c for c in (base_agg_candidates + neighbor_agg_candidates) if c in _enriched.columns]
+
+    if agg_cols:
+        cal_agg = (_enriched.groupby(cal_keys, as_index=False, observed=True)[agg_cols]
+                            .median(numeric_only=True))
+    else:
+        # hiç metrik yoksa, yine de groupby sonucu boş kalmasın
+        cal_agg = (_enriched.groupby(cal_keys, as_index=False, observed=True)
+                            .size().rename(columns={"size":"rows"}))
+
     if "day_of_week" not in crime.columns:
         log("ℹ️ crime grid’de day_of_week yok → 0 atanıyor (düşük etkili).")
         crime["day_of_week"] = 0
@@ -1017,15 +1040,16 @@ else:
     merged = crime.merge(cal_agg, on=cal_keys, how="left")
     log("🔗 Join modu: CALENDAR-BASED (GEOID, hr_key, day_of_week, season)")
 
-fill_cols = [
+fill_candidates = [
     "911_request_count_hour_range",
     "911_request_count_daily(before_24_hours)",
     "911_geo_last3d","911_geo_last7d",
-    "911_geo_hr_last3d","911_geo_hr_last7d",
 ] + ([f"911_neighbors_last{W}d" for W in ROLL_WINDOWS] if _neighbor_roll is not None else [])
+fill_cols = [c for c in fill_candidates if c in merged.columns]
+
 for c in fill_cols:
-    if c in merged.columns:
-        merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0).astype("int32")
+    merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0).astype("int32")
+
 missing_report(merged, "crime_x_911_after_fill")
 dump_nan_samples(merged, "crime_x_911_after_fill")
 
