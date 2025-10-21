@@ -4,15 +4,15 @@
 unified_feature_analysis.py
 
 Tek script ile:
-- sf_crime_09.csv (GEOID×zaman + Y_label) => MODELLEME + SHAP + ÖNEMLER
+- sf_crime_08.csv (GEOID×zaman + Y_label) => MODELLEME + SHAP + ÖNEMLER
 - fr_crime_09.csv (olay/suç_id bazlı, genelde Y=1) => EDA (model yok)
 
 Kullanım:
   # sf (modelleme)
   python unified_feature_analysis.py \
-      --csv crime_prediction_data/sf_crime_09.csv \
+      --csv crime_prediction_data/sf_crime_08.csv \
       --target Y_label \
-      --outdir outputs_feature_analysis/sf_09 \
+      --outdir outputs_feature_analysis/sf_08 \
       --group_by_geoid
 
   # fr (EDA)
