@@ -1364,19 +1364,19 @@ def process_city_to_09(prefix: str, data_dir: Path) -> Optional[pd.DataFrame]:
                 st.dataframe(_topk_for_class(pick_b), use_container_width=True)
         else:
             st.info("category_grouped / subcategory_grouped yoksa sınıf kartları oluşturulamaz.")
-else:
-    available_09 = {p: DATA_DIR / f"{p}_crime_09.csv" for p in ["sf", "fr"] if (DATA_DIR / f"{p}_crime_09.csv").exists()}
-    if not available_09:
-        st.markdown("### 5) Hızlı Model")
-        st.info("Model eğitmek için önce sf_crime_09.csv veya fr_crime_09.csv’nin üretilmiş olması gerekiyor.")
-        st.stop()
-    
-    st.markdown("### 5) Hızlı Model (ZI/Hurdle + Quantile + Kalibrasyon)")
-    pick_city = st.selectbox("Model verisi (09)", list(available_09.keys()), index=0, format_func=lambda x: x.upper())
-    try:
-        df09 = pd.read_csv(available_09[pick_city], low_memory=False)
-    except Exception as e:
-        st.warning(f"{pick_city}_crime_09.csv okunamadı: {e}")
-        st.stop()
+    else:
+        available_09 = {p: DATA_DIR / f"{p}_crime_09.csv" for p in ["sf", "fr"] if (DATA_DIR / f"{p}_crime_09.csv").exists()}
+        if not available_09:
+            st.markdown("### 5) Hızlı Model")
+            st.info("Model eğitmek için önce sf_crime_09.csv veya fr_crime_09.csv’nin üretilmiş olması gerekiyor.")
+            st.stop()
+        
+        st.markdown("### 5) Hızlı Model (ZI/Hurdle + Quantile + Kalibrasyon)")
+        pick_city = st.selectbox("Model verisi (09)", list(available_09.keys()), index=0, format_func=lambda x: x.upper())
+        try:
+            df09 = pd.read_csv(available_09[pick_city], low_memory=False)
+        except Exception as e:
+            st.warning(f"{pick_city}_crime_09.csv okunamadı: {e}")
+            st.stop()
     st.markdown("### 5) Hızlı Model")
     st.info("Model eğitmek için önce sf_crime_09.csv’nin üretilmiş olması gerekiyor.")
