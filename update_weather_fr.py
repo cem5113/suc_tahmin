@@ -140,11 +140,7 @@ if not WEATHER_IN:
     raise FileNotFoundError("❌ Weather dosyası bulunamadı: sf_weather_5years.csv / weather.csv")
 
 # Çıkış kuralı
-name = Path(CRIME_IN).name
-if name.endswith("crime_08.csv"):
-    CRIME_OUT = os.path.join(BASE_DIR, name.replace("_08.csv", "_09.csv"))
-else:
-    CRIME_OUT = os.path.join(BASE_DIR, Path(CRIME_IN).stem + "_wx.csv")
+CRIME_OUT = os.path.join(BASE_DIR, "fr_crime_09.csv")
 
 # ---------------- LOAD & MERGE ----------------
 print(f"📥 Suç: {CRIME_IN}")
