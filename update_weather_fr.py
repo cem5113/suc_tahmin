@@ -1,11 +1,10 @@
 # update_weather_fr.py
 # Amaç: Şehir-geneli günlük hava verisini suç verisine sadece "tarih" üzerinden eklemek.
-# Girdi: fr_crime_08.csv / sf_crime_08.csv
-# Çıkış: fr_crime_09.csv / sf_crime_09.csv (aksi halde *_wx.csv)
+# Girdi: fr_crime_08.csv / sf_crime_08.csv (veya alternatif adaylar)
+# Çıkış: fr_crime_09.csv / sf_crime_09.csv
 
 import os
 from pathlib import Path
-from datetime import datetime
 import numpy as np
 import pandas as pd
 
@@ -41,13 +40,8 @@ def _first_existing(cols, *cands):
     return None
 
 def normalize_date_column(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    df içine 'date' (datetime.date) kolonu üretir.
-    Desteklenen muhtemel alanlar: date, datetime, time, timestamp, incident_datetime, reported_date...
-    TZ bilgisi varsa sadece .date() alınır.
-    """
+    """df içine 'date' (datetime.date) kolonu üretir."""
     d = df.copy()
-    # aday sırası: en özelleşmiş → en genel
     cand = _first_existing(
         d.columns,
         ["date"],
@@ -55,16 +49,17 @@ def normalize_date_column(df: pd.DataFrame) -> pd.DataFrame:
         ["datetime", "time", "timestamp", "Timestamp"]
     )
     if cand is None:
-        # ayrı yıl/ay/gün kolonları varsa
-        y = _first_existing(d.columns, "year", "Year"); m = _first_existing(d.columns, "month", "Month"); da = _first_existing(d.columns, "day", "Day")
+        y = _first_existing(d.columns, "year", "Year")
+        m = _first_existing(d.columns, "month", "Month")
+        da = _first_existing(d.columns, "day", "Day")
         if y and m and da:
-            d["date"] = pd.to_datetime(d[[y, m, da]].rename(columns={y:"year", m:"month", da:"day"}), errors="coerce").dt.date
+            d["date"] = pd.to_datetime(
+                d[[y, m, da]].rename(columns={y:"year", m:"month", da:"day"}),
+                errors="coerce"
+            ).dt.date
             return d
-        # hiçbir şey yoksa boş kolon
         d["date"] = pd.NaT
         return d
-
-    # cast → date
     d["date"] = pd.to_datetime(d[cand], errors="coerce").dt.date
     return d
 
@@ -74,12 +69,11 @@ def normalize_weather_columns(dfw: pd.DataFrame) -> pd.DataFrame:
     Weather kolonlarını standardize eder:
     - date/time/datetime → date
     - temp_min/temp_max/prcp_mm → tmin/tmax/prcp
-    - tavg mevcut değilse NaN bırakılır
+    - türevler: temp_range, is_rainy, is_hot_day
     """
     w = dfw.copy()
-    # tarih
     w = normalize_date_column(w)
-    # isim eşleştirme
+
     lower = {c.lower(): c for c in w.columns}
     def has(k): return k in lower
     def col(k): return lower[k]
@@ -92,20 +86,22 @@ def normalize_weather_columns(dfw: pd.DataFrame) -> pd.DataFrame:
     if has("taverage") and not has("tavg"): rename[col("taverage")] = "tavg"
     w.rename(columns=rename, inplace=True)
 
-    # numerik cast
     for c in ["tavg","tmin","tmax","prcp"]:
         if c in w.columns:
             w[c] = pd.to_numeric(w[c], errors="coerce")
 
-    # türevler
-    w["temp_range"] = (w["tmax"] - w["tmin"]) if {"tmax","tmin"}.issubset(w.columns) else np.nan
     HOT_DAY_THRESHOLD_C = 25.0
+    if {"tmax","tmin"}.issubset(w.columns):
+        w["temp_range"] = (w["tmax"] - w["tmin"])
+    else:
+        w["temp_range"] = np.nan
     w["is_rainy"]   = (pd.to_numeric(w.get("prcp", np.nan), errors="coerce").fillna(0) > 0).astype("Int64")
     w["is_hot_day"] = (pd.to_numeric(w.get("tmax", np.nan), errors="coerce") > HOT_DAY_THRESHOLD_C).astype("Int64")
 
     keep = ["date","tavg","tmin","tmax","prcp","temp_range","is_rainy","is_hot_day"]
     for c in keep:
-        if c not in w.columns: w[c] = np.nan
+        if c not in w.columns:
+            w[c] = np.nan
     w = w[keep].dropna(subset=["date"]).drop_duplicates(subset=["date"], keep="last")
     return w
 
@@ -139,8 +135,10 @@ WEATHER_IN = pick_existing(WEATHER_CANDS)
 if not WEATHER_IN:
     raise FileNotFoundError("❌ Weather dosyası bulunamadı: sf_weather_5years.csv / weather.csv")
 
-# Çıkış kuralı
-CRIME_OUT = os.path.join(BASE_DIR, "fr_crime_09.csv")
+# Çıkış dosya adı: girdinin prefix'ine göre ayarla
+fname = os.path.basename(CRIME_IN)
+prefix = "fr" if fname.startswith("fr_") else ("sf" if fname.startswith("sf_") else "fr")
+CRIME_OUT = os.path.join(BASE_DIR, f"{prefix}_crime_09.csv")
 
 # ---------------- LOAD & MERGE ----------------
 print(f"📥 Suç: {CRIME_IN}")
@@ -156,8 +154,11 @@ weather_raw = pd.read_csv(WEATHER_IN, low_memory=False)
 weather = normalize_weather_columns(weather_raw)
 log_shape(weather, "WEATHER (normalize)")
 
+# Weather kolonlarını wx_ ile prefix’le (çakışmayı önler)
+wx = weather.rename(columns={c: (f"wx_{c}" if c != "date" else c) for c in weather.columns})
+
 before = crime.shape
-out = crime.merge(weather, on="date", how="left", validate="m:1")  # her gün tek satır weather varsayımı
+out = crime.merge(wx, on="date", how="left", validate="m:1")  # her gün tek satır weather varsayımı
 log_delta(before, out.shape, "CRIME ⨯ WEATHER (date-merge)")
 
 # ---------------- SAVE ----------------
@@ -167,7 +168,7 @@ print(f"✅ Yazıldı: {CRIME_OUT} | Satır: {len(out):,} | Sütun: {out.shape[1
 
 # kısa örnek
 try:
-    cols = ["date","tmin","tmax","prcp","temp_range","is_rainy","is_hot_day"]
+    cols = ["date","wx_tmin","wx_tmax","wx_prcp","wx_temp_range","wx_is_rainy","wx_is_hot_day"]
     cols = ["date"] + [c for c in cols if c in out.columns]
     print(out[cols].head(3).to_string(index=False))
 except Exception as e:
