@@ -211,39 +211,54 @@ jobs:
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN: ${{ env.GEOID_LEN }}
+          AGGR_Y_THRESHOLD: ${{ env.AGGR_Y_THRESHOLD || '1' }}
         run: |
           set -euo pipefail
           python - <<'PY'
           import os, pandas as pd, re
           cdir = os.environ["CRIME_DATA_DIR"]
           L = int(os.environ.get("GEOID_LEN","11"))
+          TH = int(os.environ.get("AGGR_Y_THRESHOLD","1"))
 
-          # Öncelik: sf_crime_y.csv, yoksa sf_crime.csv
-          for name in ("sf_crime_y.csv", "sf_crime.csv"):
-              src = os.path.join(cdir, name)
-              if os.path.isfile(src):
-                  break
+          def norm_geoid(s):
+              return s.astype(str).str.extract(r"(\d+)", expand=False).str[:L].str.zfill(L)
+
+          # 1) Tercih: GRID dosyası (Y_label burada var)
+          grid_candidates = [
+              "sf_crime_grid_full_labeled.csv",
+              os.path.join(cdir, "sf_crime_grid_full_labeled.csv"),
+          ]
+          grid_src = next((p for p in grid_candidates if os.path.isfile(p)), None)
+
+          if grid_src:
+              df = pd.read_csv(grid_src, low_memory=False)
+              if not {"GEOID","Y_label"}.issubset(df.columns):
+                  raise SystemExit(f"GRID var ama beklenen kolonlar yok: {list(df.columns)}")
+              out = df[["GEOID","Y_label"]].copy()
+              out["GEOID"] = norm_geoid(out["GEOID"])
+              # GEOID başına en az bir kez 1 görülmüşse 1
+              out = out.groupby("GEOID", as_index=False)["Y_label"].max()
           else:
-              raise SystemExit("Girdi yok: sf_crime_y.csv / sf_crime.csv bulunamadı.")
+              # 2) Fallback: event-level (Y_label yok) → GEOID görüldüyse 1
+              for name in ("sf_crime_y.csv", "sf_crime.csv"):
+                  src = os.path.join(cdir, name)
+                  if os.path.isfile(src):
+                      break
+              else:
+                  raise SystemExit("Girdi yok: sf_crime_grid_full_labeled.csv ya da sf_crime_y.csv / sf_crime.csv bulunamadı.")
 
-          df = pd.read_csv(src, low_memory=False)
-          low = {c.lower(): c for c in df.columns}
+              df = pd.read_csv(src, low_memory=False)
+              low = {c.lower(): c for c in df.columns}
+              geoid_col = low.get("geoid") or low.get("geography_id") or low.get("geoid11") or low.get("geoid_11")
+              if not geoid_col:
+                  raise SystemExit(f"GEOID kolonu bulunamadı. Kolonlar: {list(df.columns)}")
 
-          geoid_col = low.get("geoid") or low.get("geography_id") or low.get("geoid11") or low.get("geoid_11")
-          y_col     = low.get("y_label") or low.get("y") or low.get("label") or low.get("target")
-          if not geoid_col or not y_col:
-              raise SystemExit(f"Gerekli kolon(lar) yok. Kolonlar: {list(df.columns)}")
-
-          out = df[[geoid_col, y_col]].copy()
-          out.columns = ["GEOID", "Y_label"]
-
-          # GEOID normalize
-          out["GEOID"] = (
-              out["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).str[:L].str.zfill(L)
-          )
-
-          # Her GEOID için tek satır istersen (varsa 1 yoksa 0)
-          out = out.groupby("GEOID", as_index=False)["Y_label"].max()
+              g = df[[geoid_col]].copy()
+              g.columns = ["GEOID"]
+              g["GEOID"] = norm_geoid(g["GEOID"])
+              # GEOID en az bir kez geçtiyse 1, hiç geçmediyse 0
+              out = g.dropna().drop_duplicates()
+              out["Y_label"] = 1
 
           dest = os.path.join(cdir, "sf_crime_L.csv")
           out.to_csv(dest, index=False)
@@ -252,7 +267,6 @@ jobs:
 
           echo "---- sf_crime_L.csv (head) ----"
           head -n 5 "${CRIME_DATA_DIR}/sf_crime_L.csv" || true
-
 
       - name: Restore 911 summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
