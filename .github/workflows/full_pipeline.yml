@@ -21,7 +21,7 @@ on:
         description: "Pipeline varyantı (default | fr)"
         type: choice
         options: [default, fr]
-        default: default
+        default: fr
 
 permissions:
   actions: read
@@ -54,7 +54,7 @@ env:
   ACS_YEAR: ${{ vars.ACS_YEAR || 'LATEST' }}
   DEMOG_WHITELIST: ${{ vars.DEMOG_WHITELIST || '' }}
   CENSUS_GEO_LEVEL: ${{ vars.CENSUS_GEO_LEVEL || 'auto' }}
-  PIPELINE_VARIANT: ${{ github.event.inputs.variant || vars.PIPELINE_VARIANT || 'default' }}
+  PIPELINE_VARIANT: ${{ github.event.inputs.variant || vars.PIPELINE_VARIANT || 'fr' }}
 
   # >>> FR çıktılarını saklama modu (schedule tetiklerinde de çalışsın)
   PERSIST_MODE: ${{ github.event.inputs.persist || 'artifact' }}
@@ -103,6 +103,11 @@ jobs:
           else
             echo "proceed=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Debug variant
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          echo "PIPELINE_VARIANT=${PIPELINE_VARIANT}"
 
       - name: Skip summary (outside 07:00 and not forced)
         if: ${{ steps.gate.outputs.proceed != 'true' }}
@@ -268,7 +273,8 @@ jobs:
           python -u "$PY"
 
       - name: FR 01) 911 → fr_crime_01.csv
-        if: ${{ steps.gate.outputs.proceed == 'true' && env.PIPELINE_VARIANT == 'fr' }}
+        if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' ||
+              hashFiles('**/update_911.fr.py', '**/update_911_fr.py', 'scripts/update_911.fr.py', 'scripts/update_911_fr.py') != '') }}
         env:
           SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
           SF_SODA_PAGE_LIMIT:    ${{ env.SF_SODA_PAGE_LIMIT }}
