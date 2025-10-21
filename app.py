@@ -816,24 +816,24 @@ def list_files_sorted(
 
     # Varsayılan adaylar: DOWNLOADS[path] + pipeline çıktı dosyaları
     if include is None:
-       for prefix in ["sf", "fr"]:
-           include += [str(bdir / f"{prefix}_crime_{i:02d}.csv") for i in range(1, 10)]
-           include += [str(bdir / f"{prefix}_crime_y.csv")]
-       include += [str(bdir / "sf_crime_grid_full_labeled.csv")]
-    
+        include = []
+        for prefix in ["sf", "fr"]:
+            include += [str(bdir / f"{prefix}_crime_{i:02d}.csv") for i in range(1, 10)]
+            include += [str(bdir / f"{prefix}_crime_y.csv")]
+        include += [str(bdir / "sf_crime_grid_full_labeled.csv")]
+
         # Ayrıca glob ile genişlet
         for p in bdir.glob(pattern):
             include.append(str(p))
-    
+
     seen = set()
     for x in include:
         p = Path(x)
-        # aynı dosyanın farklı temsilini önlemek için resolve() ile anahtar üret
         key = str(p.resolve()) if p.exists() else str(p)
         if key in seen:
             continue
         seen.add(key)
-    
+
         exists = p.exists()
         try:
             st_ = p.stat() if exists else None
@@ -841,18 +841,18 @@ def list_files_sorted(
             size  = st_.st_size  if st_ else None
         except Exception:
             mtime, size = None, None
-    
+
         if exists or include_missing:
             rows.append({
                 "file": p.name,
                 "path": str(p),
                 "exists": bool(exists),
-                "size": _human_bytes(size),   # None ise "-" döner
+                "size": _human_bytes(size),
                 "modified": _fmt_dt(mtime),
                 "age": _age_str(mtime),
-                "_mtime": mtime,             
+                "_mtime": mtime,
             })
-    
+
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.sort_values("_mtime", ascending=ascending, na_position="last").drop(columns=["_mtime"])
@@ -1075,8 +1075,6 @@ with st.expander("🔄 CSV’leri Parquet’e çevir (zstd)"):
     )
 
     if st.button("🧰 Dönüştür (CSV → Parquet)", key="csv2parquet_run"):  # ✅
-        ...
-
         try:
             res = convert_csv_dir_to_parquet(
                 input_dir=Path(in_dir),
