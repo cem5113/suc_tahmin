@@ -15,7 +15,7 @@ try:
     SF_TZ = zoneinfo.ZoneInfo("America/Los_Angeles")
 except Exception:
     SF_TZ = None
-
+    
 # =========================
 # CONFIG & PATHS
 # =========================
@@ -145,30 +145,6 @@ def missing_report(df: pd.DataFrame, label: str, out_dir: str = BASE_DIR) -> pd.
         log(f"⚠️ Tamamen NaN sütunlar ({label}): {all_nan_cols}")
 
     return rep
-
-# 1) 911 normalize sonrası
-missing_report(final_911, "911_summary_normalize")
-dump_nan_samples(final_911, "911_summary_normalize")
-
-# 2) Rolling sonrası (tek kez)
-missing_report(_day_unique, "911_day_unique_after_roll")
-dump_nan_samples(_day_unique, "911_day_unique_after_roll")
-
-missing_report(_hr_unique, "911_hr_unique_after_roll")
-dump_nan_samples(_hr_unique, "911_hr_unique_after_roll")
-
-# (Komşular varsa)
-if _neighbor_roll is not None:
-    missing_report(_neighbor_roll, "911_neighbor_roll")
-    dump_nan_samples(_neighbor_roll, "911_neighbor_roll")
-
-# 3) Grid merge öncesi enriched
-missing_report(_enriched, "911_enriched_before_grid_merge")
-dump_nan_samples(_enriched, "911_enriched_before_grid_merge")
-
-# 4) Fill sonrası merged (kaydetmeden hemen önce)
-missing_report(merged, "crime_x_911_after_fill")
-dump_nan_samples(merged, "crime_x_911_after_fill")
 
 def dump_nan_samples(
     df: pd.DataFrame,
@@ -779,7 +755,7 @@ except Exception as e:
 if final_911 is None or final_911.empty:
     log("⚠️ 911 özeti üretilemedi (boş). Çıkılıyor.")
     sys.exit(1)
-    
+
 # =========================
 # STANDARDIZE + DERIVED KEYS (hr_key, dow, season)
 # =========================
@@ -816,9 +792,11 @@ for W in ROLL_WINDOWS:
         .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
     ).astype("float32")
 
-# ✅ Rolling sonrası raporları TEK KEZ al
 missing_report(_day_unique, "911_day_unique_after_roll")
+dump_nan_samples(_day_unique, "911_day_unique_after_roll")
+
 missing_report(_hr_unique, "911_hr_unique_after_roll")
+dump_nan_samples(_hr_unique, "911_hr_unique_after_roll")
 
 
 # =========================
@@ -851,9 +829,9 @@ if neighbors_df is not None and not neighbors_df.empty:
             .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
         ).astype("float32")
 
-# ✅ Komşu raporunu ANCAK burada al
 if _neighbor_roll is not None:
     missing_report(_neighbor_roll, "911_neighbor_roll")
+    dump_nan_samples(_neighbor_roll, "911_neighbor_roll")
 
 
 # =========================
@@ -867,8 +845,8 @@ if _neighbor_roll is not None:
         on=["GEOID","date"], how="left"
     )
 
-# (İstersen burada da rapor al)
 missing_report(_enriched, "911_enriched_before_grid_merge")
+dump_nan_samples(_enriched, "911_enriched_before_grid_merge")
 
 crime_grid_path = next((p for p in CRIME_GRID_CANDIDATES if p.exists()), None)
 if crime_grid_path is None:
@@ -923,7 +901,8 @@ fill_cols = [
 for c in fill_cols:
     if c in merged.columns:
         merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0).astype("int32")
-        missing_report(merged, "crime_x_911_after_fill")
+missing_report(merged, "crime_x_911_after_fill")
+dump_nan_samples(merged, "crime_x_911_after_fill")
 
 all_nan_cols = [c for c in merged.columns if merged[c].isna().all()]
 if all_nan_cols:
