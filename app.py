@@ -811,7 +811,7 @@ def list_files_sorted(
     - include verilirse bu tam yol listesini kullanır.
     - verilmezse base_dir (varsayılan DATA_DIR) içinde pattern ile glob yapar.
     """
-    bdir = base_dir or DATA_DIR
+    bdir: Path = base_dir or DATA_DIR
     rows: List[Dict[str, Any]] = []
 
     # Varsayılan adaylar: DOWNLOADS[path] + pipeline çıktı dosyaları
@@ -822,11 +822,12 @@ def list_files_sorted(
         include += [str(bdir / "sf_crime_y.csv")]
         include += [str(bdir / "sf_crime_grid_full_labeled.csv")]
 
-    # Ayrıca glob ile genişlet  ← bu yorumla aynı hizada olmalı
+    # Ayrıca glob ile genişlet
     for p in bdir.glob(pattern):
         include.append(str(p))
 
-    seen = set()
+    # Tekilleştir + dosya bilgilerini çıkar
+    seen: set = set()
     for x in include:
         p = Path(x)
         key = str(p.resolve()) if p.exists() else str(p)
@@ -838,24 +839,29 @@ def list_files_sorted(
         try:
             st_ = p.stat() if exists else None
             mtime = st_.st_mtime if st_ else None
-            size  = st_.st_size  if st_ else None
+            size = st_.st_size if st_ else None
         except Exception:
             mtime, size = None, None
 
         if exists or include_missing:
-            rows.append({
-                "file": p.name,
-                "path": str(p),
-                "exists": bool(exists),
-                "size": _human_bytes(size),
-                "modified": _fmt_dt(mtime),
-                "age": _age_str(mtime),
-                "_mtime": mtime,
-            })
+            rows.append(
+                {
+                    "file": p.name,
+                    "path": str(p),
+                    "exists": bool(exists),
+                    "size": _human_bytes(size),
+                    "modified": _fmt_dt(mtime),
+                    "age": _age_str(mtime),
+                    "_mtime": mtime,
+                }
+            )
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df = df.sort_values("_mtime", ascending=ascending, na_position="last").drop(columns=["_mtime"])
+        df = (
+            df.sort_values("_mtime", ascending=ascending, na_position="last")
+              .drop(columns=["_mtime"])
+        )
     return df
 
 # 0) (Opsiyonel) requirements yükleme
