@@ -61,8 +61,9 @@ SF911_RECENT_HOURS = int(os.getenv("SF911_RECENT_HOURS", "6"))
 
 # Release taban URL — `_y` ÖNCELİKLİ, sonra eski ada düş
 RAW_911_URL_ENV = os.getenv("RAW_911_URL", "").strip()
+
 RAW_911_URL_CANDIDATES = [
-    RAW_911_URL_ENV or "",
+    RAW_911_URL_ENV or "",  
     "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year_y.csv",
     "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year.csv",
 ]
@@ -235,16 +236,12 @@ def is_lfs_pointer_file(p: Path) -> bool:
         return False
 
 def _pick_working_release_url(candidates: list[str]) -> str:
-    """
-    Aday release URL'lerini sırayla dener; erişilebilir ve LFS pointer olmayan
-    ilkini döndürür. Hiçbiri olmazsa RuntimeError fırlatır.
-    """
     for u in candidates:
         if not u:
             continue
         try:
             r = requests.get(u, timeout=20)
-            # Git LFS pointer'ları genelde çok küçük olur ve başında 'git-lfs' geçer
+            # LFS pointer veya boş içeriği ele
             if r.ok and r.content and len(r.content) > 200 and b"git-lfs" not in r.content[:200].lower():
                 log(f"⬇️ Release kaynağı seçildi: {u}")
                 return u
@@ -648,60 +645,97 @@ def incremental_summary(start_day: datetime.date, end_day: datetime.date) -> pd.
     return make_standard_summary(raw)
 
 # =========================
-# MAIN: LOCAL (Y/regular) → FALLBACK RELEASE + INCREMENT → ENRICH → MERGE
+# MAIN: LOCAL (Y/regular) → RELEASE (Y → regular) → API FALLBACK → ENRICH → MERGE
 # =========================
+import traceback, sys  # ayrıntılı hata çıktısı için
 
 five_years_ago = datetime.now(timezone.utc).date() - timedelta(days=5*365)
-
 log(f"📁 911 yerel özet yolu: {local_summary_path}")
 
-# 1) Önce yerel tabanı dene (artifact'tan gelen Y öncelikli)
-base_csv_path = ensure_local_911_base()
-if base_csv_path is not None:
-    final_911 = summary_from_local(base_csv_path, min_date=five_years_ago)
-    save_911_both(final_911)
-    log(f"✅ Yerel 911 özet kaydedildi → {local_summary_path} & {y_summary_path} (satır: {len(final_911)})")
-else:
-    # 2) Release fallback (Y URL'leri öncelikli)
-    release_url = _pick_working_release_url(RAW_911_URL_CANDIDATES)
-    final_911 = summary_from_release(release_url, min_date=five_years_ago)
-    save_911_both(final_911)
-    log(f"✅ Release özet kaydedildi → {local_summary_path} & {y_summary_path} (satır: {len(final_911)})")
+final_911 = None
 
-# 3) Max tarihten bugüne SF saatine göre artımlı aralık seç
+# 1) Önce YEREL tabanı dene (artifact/çalışma alanı; Y öncelikli)
+try:
+    base_csv_path = ensure_local_911_base()
+    if base_csv_path is not None:
+        final_911 = summary_from_local(base_csv_path, min_date=five_years_ago)
+        save_911_both(final_911)
+        log(f"✅ Yerel 911 özet kaydedildi → {local_summary_path} & {y_summary_path} (satır: {len(final_911)})")
+    else:
+        log("ℹ️ Yerel 911 özeti bulunamadı; release denenecek.")
+except Exception as e:
+    log("⚠️ Yerel 911 özet okunurken hata:")
+    log("".join(traceback.format_exception(e)))
+
+# 2) Yerel başarısız/boş ise RELEASE (önce _y.csv, yoksa orijinal csv)
+if final_911 is None or final_911.empty:
+    try:
+        release_url = _pick_working_release_url(RAW_911_URL_CANDIDATES)
+        final_911 = summary_from_release(release_url, min_date=five_years_ago)
+        save_911_both(final_911)
+        log(f"✅ Release özet kaydedildi → {local_summary_path} & {y_summary_path} (satır: {len(final_911)})")
+    except Exception as e:
+        log("⚠️ Release fallback başarısız; API fallback denenecek:")
+        log("".join(traceback.format_exception(e)))
+
+# 3) RELEASE da başarısız/boş ise API’den 5 yıl aralığını indir (tam fallback)
+if final_911 is None or final_911.empty:
+    try:
+        today_sf = (datetime.now(SF_TZ) if SF_TZ is not None else datetime.now()).date()
+        final_911 = incremental_summary(five_years_ago, today_sf)
+        if final_911 is None or final_911.empty:
+            log("❌ 911 tabanı üretilemedi: Yerel yok, release erişilemedi/boş ve API da boş döndü.")
+            sys.exit(1)
+        save_911_both(final_911)
+        log(f"✅ API tabanlı 911 özet kaydedildi → {local_summary_path} & {y_summary_path} (satır: {len(final_911)})")
+    except Exception as e:
+        log("❌ API fallback sırasında hata:")
+        log("".join(traceback.format_exception(e)))
+        sys.exit(1)
+
+# 4) Artımlı aralığı belirle ve varsa yeni günleri ekle
 base_max_date = to_date(final_911["date"]).max() if not final_911.empty else None
-
 today_sf = (datetime.now(SF_TZ) if SF_TZ is not None else datetime.now()).date()
+
 if base_max_date is None:
     fetch_start, fetch_end = today_sf, today_sf
 else:
     fetch_start, fetch_end = base_max_date + timedelta(days=1), today_sf
     if fetch_start > fetch_end:
         fetch_start = fetch_end
+
 log(f"🗓️ İndirme aralığı: {fetch_start} → {fetch_end} ({(fetch_end - fetch_start).days + 1} gün)")
 
-# 4) Artımlı API verisini çek ve taban özetle birleştir
-inc = incremental_summary(fetch_start, fetch_end)
-if inc is not None and not inc.empty:
-    if "GEOID" in inc.columns:
-        inc["GEOID"] = normalize_geoid(inc["GEOID"], DEFAULT_GEOID_LEN)
-    inc["date"] = to_date(inc["date"])
-    before = len(final_911)
-    final_911 = pd.concat([final_911, inc], ignore_index=True)
-    subset_cols = [c for c in ["GEOID","date","hour_range"] if c in final_911.columns]
-    final_911 = (final_911.dropna(subset=["date"])
-                             .sort_values(subset_cols if subset_cols else ["date"])
-                             .drop_duplicates(subset=subset_cols if subset_cols else ["date"], keep="last"))
-    final_911 = final_911[final_911["date"] >= five_years_ago]
-    save_911_both(final_911)
-    log(f"💾 911 özet GÜNCELLENDİ (base+API) → {local_summary_path} & {y_summary_path} (+{len(final_911)-before:,} satır)")
-else:
-    log("ℹ️ API tarafında yeni gün yok veya boş döndü; taban veri geçerli.")
+try:
+    inc = incremental_summary(fetch_start, fetch_end)
+    if inc is not None and not inc.empty:
+        if "GEOID" in inc.columns:
+            inc["GEOID"] = normalize_geoid(inc["GEOID"], DEFAULT_GEOID_LEN)
+        inc["date"] = to_date(inc["date"])
+        before = len(final_911)
+        final_911 = pd.concat([final_911, inc], ignore_index=True)
 
+        subset_cols = [c for c in ["GEOID","date","hour_range"] if c in final_911.columns]
+        final_911 = (
+            final_911
+            .dropna(subset=["date"])
+            .sort_values(subset_cols if subset_cols else ["date"])
+            .drop_duplicates(subset=subset_cols if subset_cols else ["date"], keep="last")
+        )
+        final_911 = final_911[final_911["date"] >= five_years_ago]
+        save_911_both(final_911)
+        log(f"💾 911 özet GÜNCELLENDİ (base+API) → {local_summary_path} & {y_summary_path} (+{len(final_911)-before:,} satır)")
+    else:
+        log("ℹ️ API tarafında yeni gün yok veya boş döndü; mevcut taban veri kullanılacak.")
+except Exception as e:
+    log("⚠️ Artımlı güncelleme sırasında hata (mevcut taban veri kullanılacak):")
+    log("".join(traceback.format_exception(e)))
+
+# 5) Son kontrol
 if final_911 is None or final_911.empty:
     log("⚠️ 911 özeti üretilemedi (boş). Çıkılıyor.")
-    raise SystemExit(0)
-
+    sys.exit(1)
+    
 # =========================
 # STANDARDIZE + DERIVED KEYS (hr_key, dow, season)
 # =========================
