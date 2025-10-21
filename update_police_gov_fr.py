@@ -1,7 +1,6 @@
-# scripts/enrich_police_gov_06_to_07.py
+# update_police_gov.py
 # Amaç: OLAY BAZLI (latitude/longitude) en yakın POLICE & GOV mesafeleri.
 # Fallback: lat/lon eksikse GEOID centroid kullanılır.
-# Giriş 06 → Çıkış 07 (fr/sf otomatik); 08 → 09; aksi halde *_pg.csv.
 
 import os
 from pathlib import Path
@@ -98,8 +97,7 @@ if CRIME_IN is None:
 
 # Çıkış: 06→07, 08→09, aksi halde *_pg.csv
 name = Path(CRIME_IN).name
-if name.endswith("crime_06.csv"): CRIME_OUT = os.path.join(BASE_DIR, name.replace("_06.csv","_07.csv"))
-elif name.endswith("crime_08.csv"): CRIME_OUT = os.path.join(BASE_DIR, name.replace("_08.csv","_09.csv"))
+if name.endswith("crime_08.csv"): CRIME_OUT = os.path.join(BASE_DIR, name.replace("_08.csv","_09.csv"))
 else: CRIME_OUT = os.path.join(BASE_DIR, Path(CRIME_IN).stem + "_pg.csv")
 
 POLICE_CANDS = [os.path.join(BASE_DIR,"sf_police_stations.csv"), "sf_police_stations.csv"]
