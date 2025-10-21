@@ -31,6 +31,21 @@ SRC_TRAIN = os.path.join(DATA_DIR, "sf_crime_07.csv")               # train_* (d
 OUT_GEOID_L = os.path.join(DATA_DIR, "sf_crime_L.csv")              # yalnızca GEOID & Y_label
 OUT_FINAL   = os.path.join(DATA_DIR, "fr_crime_grid_full_labeled.csv")
 
+# İSTENMEYEN ALANLAR: oluşturma/kullanma
+DENY_EXACT = {
+    "911_request_count_hour_range_x",
+    "911_request_count_daily_before_24_hours_x",
+    "temp_range",
+    "population_x",
+}
+# Güvenlik ağı: kazara kalan *_x'leri de sil
+def is_denied(col: str) -> bool:
+    if col in DENY_EXACT:
+        return True
+    if col.endswith("_x"):
+        return True
+    return False
+
 # =========================
 # HELPERS
 # =========================
@@ -96,13 +111,26 @@ def geoid_len_mode(s: pd.Series, default_len: int = 11) -> int:
     s = s.dropna().astype(str).str.len()
     return int(s.mode().iat[0]) if not s.empty else default_len
 
+def _drop_overlaps_from_addon(main: pd.DataFrame, addon: pd.DataFrame) -> pd.DataFrame:
+    """Ana DF'de zaten bulunan kolonları (GEOID hariç) ek veri setinden ayıkla ki *_x oluşmasın."""
+    inter = addon.copy()
+    overlap = set(inter.columns).intersection(set(main.columns))
+    overlap.discard("GEOID")
+    if overlap:
+        inter = inter.drop(columns=list(overlap))
+    return inter
+
 def merge_on_geoid(main: pd.DataFrame, addon: pd.DataFrame, cols_keep: list[str], how: str = "left") -> pd.DataFrame:
     inter = addon.copy()
     for c in ("GEOID",):
         if c in inter.columns:
             inter[c] = normalize_geoid(inter[c], geoid_len_mode(inter[c]))
+    # Sadece istenen kolonları ve GEOID'i al
     inter = inter[["GEOID"] + [c for c in cols_keep if c in inter.columns]].drop_duplicates("GEOID")
-    return main.merge(inter, on="GEOID", how=how)
+    # Ana DF'de zaten olan kolonları at (GEOID hariç)
+    inter = _drop_overlaps_from_addon(main, inter)
+    out = main.merge(inter, on="GEOID", how=how)
+    return out
 
 def merge_on_geoid_date_hour(main: pd.DataFrame, addon: pd.DataFrame, cols_keep: list[str], how: str = "left") -> pd.DataFrame:
     inter = addon.copy()
@@ -112,21 +140,25 @@ def merge_on_geoid_date_hour(main: pd.DataFrame, addon: pd.DataFrame, cols_keep:
                 inter["time"] = "00:00:00"
             inter["date"] = pd.to_datetime(inter["date"], errors="coerce")
             inter["datetime"] = pd.to_datetime(inter["date"].dt.strftime("%Y-%m-%d") + " " + inter["time"].astype(str), errors="coerce")
-        else:
-            # sadece date varsa onunla saat türet
-            pass
-    inter["event_hour"] = inter["datetime"].dt.hour
+    inter["event_hour"] = pd.to_datetime(inter["datetime"]).dt.hour
     inter["date"] = pd.to_datetime(inter["datetime"]).dt.date
     for c in ("GEOID",):
         if c in inter.columns:
             inter[c] = normalize_geoid(inter[c], geoid_len_mode(inter[c]))
     keys = ["GEOID", "date", "event_hour"]
     inter = inter[keys + [c for c in cols_keep if c in inter.columns]]
-    # ana tarafta da date olmalı (main["datetime"] var)
+    # Ana tarafta da date olmalı (main["datetime"] var)
     m2 = main.copy()
     if "date" not in m2.columns:
         m2["date"] = pd.to_datetime(m2["datetime"]).dt.date
-    return m2.merge(inter, on=keys, how=how)
+    # Üst üste binmeleri engelle: ek DF'den ana ile çakışan kolonları düş
+    inter = _drop_overlaps_from_addon(m2, inter)
+    out = m2.merge(inter, on=keys, how=how)
+    return out
+
+def final_prune_columns(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [c for c in df.columns if not is_denied(c)]
+    return df[cols].copy()
 
 # =========================
 # 1) GRID_FULL → sf_crime_L.csv
@@ -177,15 +209,16 @@ if df_911 is not None:
     if not has_counts:
         # GEOID + date + event_hour sayım
         df_911 = ensure_datetime_cols(df_911)
-        tmp = (df_911.groupby([normalize_geoid(df_911["GEOID"], geoid_len_mode(df_911["GEOID"])),
+        tmp = (df_911.groupby([normalize_geoid(df_911["GEOID"], geoid_len_mode(df_911["GEOID"])) ,
                                pd.to_datetime(df_911["datetime"]).dt.date,
                                df_911["event_hour"]])
                .size().reset_index())
         tmp.columns = ["GEOID", "date", "event_hour", "call_911_count"]
         merged = merge_on_geoid_date_hour(merged, tmp, ["call_911_count"])
     else:
-        # Doğrudan uygun kolonları bırak
-        keep = [c for c in df_911.columns if c.startswith("911_") or "call" in c.lower() or "request" in c.lower()]
+        # Doğrudan uygun kolonları bırak (deny list dışı)
+        keep_all = [c for c in df_911.columns if c.startswith("911_") or "call" in c.lower() or "request" in c.lower()]
+        keep = [c for c in keep_all if not is_denied(c)]
         if keep:
             merged = merge_on_geoid(merged, df_911, keep)
 
@@ -195,7 +228,7 @@ if df_311 is not None:
     has_counts = any(k in df_311.columns for k in ["count", "311_request_count", "request_count"])
     if not has_counts:
         df_311 = ensure_datetime_cols(df_311)
-        tmp = (df_311.groupby([normalize_geoid(df_311["GEOID"], geoid_len_mode(df_311["GEOID"])),
+        tmp = (df_311.groupby([normalize_geoid(df_311["GEOID"], geoid_len_mode(df_311["GEOID"])) ,
                                pd.to_datetime(df_311["datetime"]).dt.date])
                .size().reset_index())
         tmp.columns = ["GEOID", "date", "req_311_count"]
@@ -203,49 +236,59 @@ if df_311 is not None:
         m2 = merged.copy()
         if "date" not in m2.columns:
             m2["date"] = pd.to_datetime(m2["datetime"]).dt.date
+        # Çakışan kolonları önceden düşür
+        tmp = _drop_overlaps_from_addon(m2, tmp)
         merged = m2.merge(tmp, on=["GEOID", "date"], how="left")
     else:
-        keep = [c for c in df_311.columns if c.startswith("311_") or "request" in c.lower()]
+        keep = [c for c in df_311.columns if (c.startswith("311_") or "request" in c.lower()) and not is_denied(c)]
         if keep:
             merged = merge_on_geoid(merged, df_311, keep)
 
 # --- Weather: günlük ---
 df_w = load_df(SRC_WEATH)
 if df_w is not None:
-    # beklenen olası kolonlar: precipitation_mm, temp_min, temp_max, temp_range
+    # beklenen olası kolonlar: precipitation_mm, temp_min, temp_max, temp_range (temp_range yasak)
     # merge on date
     if "date" in df_w.columns:
         df_w["date"] = pd.to_datetime(df_w["date"], errors="coerce").dt.date
     elif "datetime" in df_w.columns:
         df_w["date"] = pd.to_datetime(df_w["datetime"], errors="coerce").dt.date
-    keep = [c for c in df_w.columns if any(k in c.lower() for k in ["precip", "temp", "wind", "humidity", "weather"])]
+    keep_all = [c for c in df_w.columns if any(k in c.lower() for k in ["precip", "temp", "wind", "humidity", "weather"])]
+    # temp_range'i özellikle çıkar
+    keep = [c for c in keep_all if c != "temp_range" and not is_denied(c)]
     if keep:
         m2 = merged.copy()
         if "date" not in m2.columns:
             m2["date"] = pd.to_datetime(m2["datetime"]).dt.date
         m2["date"] = pd.to_datetime(m2["date"], errors="coerce")
         df_w["date"] = pd.to_datetime(df_w["date"], errors="coerce")
-        merged = m2.merge(df_w[["date"] + keep], on="date", how="left")
+        # Çakışmaları önle
+        dfw_trim = _drop_overlaps_from_addon(m2, df_w[["date"] + keep])
+        merged = m2.merge(dfw_trim, on="date", how="left")
 
 # --- Population: GEOID ---
 df_pop = load_df(SRC_POP, dtype={"GEOID": str})
 if df_pop is not None:
     df_pop["GEOID"] = normalize_geoid(df_pop["GEOID"], geoid_len_mode(df_pop["GEOID"]))
-    keep = [c for c in df_pop.columns if c != "GEOID"]
-    merged = merge_on_geoid(merged, df_pop, keep)
+    keep_all = [c for c in df_pop.columns if c != "GEOID"]
+    keep = [c for c in keep_all if not is_denied(c)]
+    if keep:
+        merged = merge_on_geoid(merged, df_pop, keep)
 
 # --- POI risk: GEOID ---
 df_poi = load_df(SRC_POI, dtype={"GEOID": str})
 if df_poi is not None:
     df_poi["GEOID"] = normalize_geoid(df_poi["GEOID"], geoid_len_mode(df_poi["GEOID"]))
-    keep = [c for c in df_poi.columns if c != "GEOID"]
-    merged = merge_on_geoid(merged, df_poi, keep)
+    keep = [c for c in df_poi.columns if c != "GEOID" and not is_denied(c)]
+    if keep:
+        merged = merge_on_geoid(merged, df_poi, keep)
 
 # --- Neighbor features: GEOID (örn. neighbor_crime_7d, crime_last_7d) ---
 df_nei = load_df(SRC_NEI, dtype={"GEOID": str})
 if df_nei is not None:
     df_nei["GEOID"] = normalize_geoid(df_nei["GEOID"], geoid_len_mode(df_nei["GEOID"]))
-    keep = [c for c in df_nei.columns if c != "GEOID" and any(k in c for k in ["neighbor", "neigh", "_7d", "_3d", "crime_last"])]
+    keep = [c for c in df_nei.columns
+            if c != "GEOID" and any(k in c for k in ["neighbor", "neigh", "_7d", "_3d", "crime_last"]) and not is_denied(c)]
     if keep:
         merged = merge_on_geoid(merged, df_nei, keep)
 
@@ -253,22 +296,25 @@ if df_nei is not None:
 df_gov = load_df(SRC_GOV, dtype={"GEOID": str})
 if df_gov is not None:
     df_gov["GEOID"] = normalize_geoid(df_gov["GEOID"], geoid_len_mode(df_gov["GEOID"]))
-    keep = [c for c in df_gov.columns if c != "GEOID"]
-    merged = merge_on_geoid(merged, df_gov, keep)
+    keep = [c for c in df_gov.columns if c != "GEOID" and not is_denied(c)]
+    if keep:
+        merged = merge_on_geoid(merged, df_gov, keep)
 
 # --- Bus: GEOID (distance_to_bus, bus_stop_count, *_range) ---
 df_bus = load_df(SRC_BUS, dtype={"GEOID": str})
 if df_bus is not None:
     df_bus["GEOID"] = normalize_geoid(df_bus["GEOID"], geoid_len_mode(df_bus["GEOID"]))
-    keep = [c for c in df_bus.columns if c != "GEOID"]
-    merged = merge_on_geoid(merged, df_bus, keep)
+    keep = [c for c in df_bus.columns if c != "GEOID" and not is_denied(c)]
+    if keep:
+        merged = merge_on_geoid(merged, df_bus, keep)
 
 # --- Train: GEOID (distance_to_train, train_stop_count, *_range) ---
 df_train = load_df(SRC_TRAIN, dtype={"GEOID": str})
 if df_train is not None:
     df_train["GEOID"] = normalize_geoid(df_train["GEOID"], geoid_len_mode(df_train["GEOID"]))
-    keep = [c for c in df_train.columns if c != "GEOID"]
-    merged = merge_on_geoid(merged, df_train, keep)
+    keep = [c for c in df_train.columns if c != "GEOID" and not is_denied(c)]
+    if keep:
+        merged = merge_on_geoid(merged, df_train, keep)
 
 # =========================
 # 4) Son temizlik ve yazım
@@ -276,6 +322,9 @@ if df_train is not None:
 # tip düzeltmeleri
 if "Y_label" in merged.columns:
     merged["Y_label"] = merged["Y_label"].fillna(0).astype("int8")
+
+# İstenmeyen kolonları kesin olarak temizle
+merged = final_prune_columns(merged)
 
 # Kolon sıralama (önemliler öne)
 cols_first = [
