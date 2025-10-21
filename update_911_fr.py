@@ -1,175 +1,234 @@
-# update_weather_fr.py
-# Amaç: Şehir-geneli günlük hava verisini suç verisine sadece "tarih" üzerinden eklemek.
-# Girdi: fr_crime_08.csv / sf_crime_08.csv (veya alternatif adaylar)
-# Çıkış: fr_crime_09.csv / sf_crime_09.csv
+# update_911_fr.py
+
+from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
-import numpy as np
+from typing import Tuple, Optional, List
+
 import pandas as pd
+import geopandas as gpd
 
-pd.options.mode.copy_on_write = True
 
-# ---------------- LOG HELPERS ----------------
-def log_shape(df, label):
-    r, c = df.shape
-    print(f"📊 {label}: {r} satır × {c} sütun")
+# --------------------------------------------------------- yardımcılar
+def log(msg: str) -> None:
+    """Basit stdout logger."""
+    print(msg, file=sys.stdout, flush=True)
 
-def log_delta(before, after, label):
-    br, bc = before; ar, ac = after
-    print(f"🔗 {label}: {br}×{bc} → {ar}×{ac} (Δr={ar-br}, Δc={ac-bc})")
 
-def safe_save_csv(df: pd.DataFrame, path: str):
-    try:
-        Path(os.path.dirname(path) or ".").mkdir(parents=True, exist_ok=True)
-        df.to_csv(path, index=False)
-    except Exception as e:
-        print(f"❌ Kaydetme hatası: {path}\n{e}")
-        df.to_csv(path + ".bak", index=False)
-        print(f"📁 Yedek oluşturuldu: {path}.bak")
+def _pick_lat_lon(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
+    lat = next((c for c in ["latitude", "lat", "y", "_lat_"] if c in df.columns), None)
+    lon = next((c for c in ["longitude", "long", "lon", "x", "_lon_"] if c in df.columns), None)
+    return lat, lon
 
-# ---------------- DATE NORMALIZATION ----------------
-def _first_existing(cols, *cands):
-    low = {c.lower(): c for c in cols}
-    for cand in cands:
-        if isinstance(cand, (list, tuple)):
-            for c in cand:
-                if c.lower() in low: return low[c.lower()]
-        else:
-            if cand.lower() in low: return low[cand.lower()]
-    return None
 
-def normalize_date_column(df: pd.DataFrame) -> pd.DataFrame:
-    """df içine 'date' (datetime.date) kolonu üretir."""
+def _ensure_point_gdf(df: pd.DataFrame, lat_col: str, lon_col: str) -> gpd.GeoDataFrame:
     d = df.copy()
-    cand = _first_existing(
-        d.columns,
-        ["date"],
-        ["incident_date", "incident_datetime", "reported_date", "reported_datetime"],
-        ["datetime", "time", "timestamp", "Timestamp"]
+    d[lat_col] = pd.to_numeric(d[lat_col], errors="coerce")
+    d[lon_col] = pd.to_numeric(d[lon_col], errors="coerce")
+    d = d.dropna(subset=[lat_col, lon_col])
+    gdf = gpd.GeoDataFrame(
+        d,
+        geometry=gpd.points_from_xy(d[lon_col], d[lat_col]),
+        crs="EPSG:4326",
     )
-    if cand is None:
-        y = _first_existing(d.columns, "year", "Year")
-        m = _first_existing(d.columns, "month", "Month")
-        da = _first_existing(d.columns, "day", "Day")
-        if y and m and da:
-            d["date"] = pd.to_datetime(
-                d[[y, m, da]].rename(columns={y:"year", m:"month", da:"day"}),
-                errors="coerce"
-            ).dt.date
-            return d
-        d["date"] = pd.NaT
-        return d
-    d["date"] = pd.to_datetime(d[cand], errors="coerce").dt.date
-    return d
+    return gdf
 
-# ---------------- WEATHER NORMALIZATION ----------------
-def normalize_weather_columns(dfw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Weather kolonlarını standardize eder:
-    - date/time/datetime → date
-    - temp_min/temp_max/prcp_mm → tmin/tmax/prcp
-    - türevler: temp_range, is_rainy, is_hot_day
-    """
-    w = dfw.copy()
-    w = normalize_date_column(w)
 
-    lower = {c.lower(): c for c in w.columns}
-    def has(k): return k in lower
-    def col(k): return lower[k]
+def _to_metric(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Metre tabanlı projeksiyona çevirir."""
+    try:
+        return gdf.to_crs(3857)  # Web Mercator (metre)
+    except Exception:
+        return gdf.to_crs(32610)  # UTM Zone 10N (SF)
 
-    rename = {}
-    if has("temp_min") and not has("tmin"): rename[col("temp_min")] = "tmin"
-    if has("temp_max") and not has("tmax"): rename[col("temp_max")] = "tmax"
-    if has("precipitation_mm") and not has("prcp"): rename[col("precipitation_mm")] = "prcp"
-    if has("prcp_mm") and not has("prcp"): rename[col("prcp_mm")] = "prcp"
-    if has("taverage") and not has("tavg"): rename[col("taverage")] = "tavg"
-    w.rename(columns=rename, inplace=True)
 
-    for c in ["tavg","tmin","tmax","prcp"]:
-        if c in w.columns:
-            w[c] = pd.to_numeric(w[c], errors="coerce")
+def _distance_nearest(src_m: gpd.GeoDataFrame, pts_m: gpd.GeoDataFrame) -> pd.Series:
+    """Kaynak noktalara en yakın 911 noktasının mesafesi (metre)."""
+    if pts_m.empty:
+        return pd.Series([pd.NA] * len(src_m), index=src_m.index, dtype="float")
 
-    HOT_DAY_THRESHOLD_C = 25.0
-    if {"tmax","tmin"}.issubset(w.columns):
-        w["temp_range"] = (w["tmax"] - w["tmin"])
-    else:
-        w["temp_range"] = np.nan
-    w["is_rainy"]   = (pd.to_numeric(w.get("prcp", np.nan), errors="coerce").fillna(0) > 0).astype("Int64")
-    w["is_hot_day"] = (pd.to_numeric(w.get("tmax", np.nan), errors="coerce") > HOT_DAY_THRESHOLD_C).astype("Int64")
+    try:
+        j = gpd.sjoin_nearest(
+            src_m[["geometry"]],
+            pts_m[["geometry"]],
+            how="left",
+            distance_col="_dist",
+        )
+        # sjoin_nearest indexleri korur; sıraya göre hizayalım
+        return j["_dist"].reindex(src_m.index)
+    except Exception:
+        # yavaş ama güvenli fallback
+        vals: List[float] = []
+        P = list(pts_m.geometry.values)
+        for g in src_m.geometry.values:
+            if not P:
+                vals.append(pd.NA)
+            else:
+                vals.append(min(g.distance(p) for p in P))
+        return pd.Series(vals, index=src_m.index, dtype="float")
 
-    keep = ["date","tavg","tmin","tmax","prcp","temp_range","is_rainy","is_hot_day"]
-    for c in keep:
-        if c not in w.columns:
-            w[c] = np.nan
-    w = w[keep].dropna(subset=["date"]).drop_duplicates(subset=["date"], keep="last")
-    return w
 
-# ---------------- PATHS ----------------
-BASE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
-Path(BASE_DIR).mkdir(exist_ok=True)
+def _bin_distance(m) -> str:
+    if pd.isna(m):
+        return "none"
+    try:
+        m = float(m)
+    except Exception:
+        return "none"
+    if m <= 300:
+        return "≤300m"
+    if m <= 600:
+        return "300–600m"
+    if m <= 900:
+        return "600–900m"
+    return ">900m"
 
-CRIME_IN_CANDS = [
-    os.path.join(BASE_DIR, "fr_crime_08.csv"),
-    os.path.join(BASE_DIR, "sf_crime_08.csv"),
-    os.path.join(BASE_DIR, "fr_crime.csv"),
-    os.path.join(BASE_DIR, "sf_crime.csv"),
+
+def _count_within(src_m: gpd.GeoDataFrame, pts_m: gpd.GeoDataFrame, r: int) -> pd.Series:
+    """Kaynak noktaların r (metre) tamponu içinde kaç 911 noktası var?"""
+    if pts_m.empty:
+        return pd.Series(0, index=src_m.index, dtype="int32")
+
+    buf = src_m.buffer(r)
+    gbuf = gpd.GeoDataFrame(src_m[[]], geometry=buf, crs=src_m.crs)
+
+    # points (left) ∈ buffer (right) eşleşmesi
+    j = gpd.sjoin(
+        pts_m[["geometry"]],
+        gbuf.rename_geometry("geometry"),
+        how="left",
+        predicate="within",
+    )
+    counts = j.groupby("index_right").size()
+
+    out = pd.Series(0, index=src_m.index, dtype="int32")
+    out.loc[counts.index] = counts.values
+    return out
+
+
+# --------------------------------------------------------- sabitler & yollar
+SAVE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
+Path(SAVE_DIR).mkdir(parents=True, exist_ok=True)
+
+CRIME_IN = Path(SAVE_DIR) / "sf_crime_L.csv"
+CRIME_OUT = Path(SAVE_DIR) / "fr_crime_01.csv"
+
+# 911 ham nokta dosya adayları (öncelik _y.csv)
+SF911_CANDIDATES = [
+    Path(SAVE_DIR) / "sf_911_last_5_year_y.csv",
+    Path(".") / "sf_911_last_5_year_y.csv",
+    Path(SAVE_DIR) / "sf_911_last_5_year.csv",
+    Path(".") / "sf_911_last_5_year.csv",
 ]
-WEATHER_CANDS = [
-    os.path.join(BASE_DIR, "sf_weather_5years.csv"),
-    "sf_weather_5years.csv",
-    os.path.join(BASE_DIR, "weather.csv"),
-    "weather.csv",
-]
 
-def pick_existing(paths):
-    for p in paths:
-        if os.path.exists(p): return p
-    return None
+# Buffer yarıçapları (metre)
+BUFFERS_M = [300, 600, 900]
 
-CRIME_IN = pick_existing(CRIME_IN_CANDS)
-if not CRIME_IN:
-    raise FileNotFoundError("❌ Suç girdisi bulunamadı: fr_crime_08.csv / sf_crime_08.csv / fr_crime.csv / sf_crime.csv")
 
-WEATHER_IN = pick_existing(WEATHER_CANDS)
-if not WEATHER_IN:
-    raise FileNotFoundError("❌ Weather dosyası bulunamadı: sf_weather_5years.csv / weather.csv")
+# --------------------------------------------------------- ana akış
+def main() -> None:
+    # 1) Suç noktaları
+    if not CRIME_IN.exists():
+        log(f"❌ Bulunamadı: {CRIME_IN}")
+        sys.exit(1)
 
-# Çıkış dosya adı: girdinin prefix'ine göre ayarla
-fname = os.path.basename(CRIME_IN)
-prefix = "fr" if fname.startswith("fr_") else ("sf" if fname.startswith("sf_") else "fr")
-CRIME_OUT = os.path.join(BASE_DIR, f"{prefix}_crime_09.csv")
+    crime = pd.read_csv(CRIME_IN, low_memory=False)
+    if crime.empty:
+        log("❌ sf_crime_L.csv boş.")
+        sys.exit(1)
 
-# ---------------- LOAD & MERGE ----------------
-print(f"📥 Suç: {CRIME_IN}")
-crime = pd.read_csv(CRIME_IN, low_memory=False)
-log_shape(crime, "CRIME (yükleme)")
+    lat_c, lon_c = _pick_lat_lon(crime)
+    if not lat_c or not lon_c:
+        log("❌ sf_crime_L.csv içinde latitude/longitude yok (örn. latitude/longitude veya _lat_/_lon_).")
+        sys.exit(1)
 
-crime = normalize_date_column(crime)
-if "date" not in crime.columns:
-    raise KeyError("❌ Crime verisinde tarih alanı türetilemedi (date/datetime/incident_datetime vb. beklenir).")
+    # satır ID korumak için
+    crime = crime.reset_index(drop=False).rename(columns={"index": "__row_id"})
+    g_crime = _ensure_point_gdf(crime, lat_c, lon_c)
+    if g_crime.empty:
+        log("❌ Geçerli suç koordinatı yok.")
+        sys.exit(1)
+    g_crime_m = _to_metric(g_crime)
 
-print(f"📥 Weather: {WEATHER_IN}")
-weather_raw = pd.read_csv(WEATHER_IN, low_memory=False)
-weather = normalize_weather_columns(weather_raw)
-log_shape(weather, "WEATHER (normalize)")
+    # 2) 911 ham nokta seçimi (öncelik _y.csv)
+    src911: Optional[pd.DataFrame] = None
+    picked_path: Optional[Path] = None
 
-# Weather kolonlarını wx_ ile prefix’le (çakışmayı önler)
-wx = weather.rename(columns={c: (f"wx_{c}" if c != "date" else c) for c in weather.columns})
+    for p in SF911_CANDIDATES:
+        if p.exists():
+            df = pd.read_csv(p, low_memory=False)
+            lat911, lon911 = _pick_lat_lon(df)
+            if lat911 and lon911:
+                src911 = df
+                picked_path = p
+                log(f"📥 911 kaynağı: {p} (satır={len(df):,})")
+                break
+            else:
+                log(f"⚠️ {p.name}: lat/lon yok, atlandı.")
 
-before = crime.shape
-out = crime.merge(wx, on="date", how="left", validate="m:1")  # her gün tek satır weather varsayımı
-log_delta(before, out.shape, "CRIME ⨯ WEATHER (date-merge)")
+    if src911 is None:
+        log("❌ 911 ham nokta CSV bulunamadı veya lat/lon içermiyor.")
+        sys.exit(1)
 
-# ---------------- SAVE ----------------
-safe_save_csv(out, CRIME_OUT)
-log_shape(out, "CRIME (weather enrich sonrası)")
-print(f"✅ Yazıldı: {CRIME_OUT} | Satır: {len(out):,} | Sütun: {out.shape[1]}")
+    # kaba SF BBOX filtresi (opsiyonel)
+    lat911, lon911 = _pick_lat_lon(src911)
+    src911 = src911.copy()
+    src911[lat911] = pd.to_numeric(src911[lat911], errors="coerce")
+    src911[lon911] = pd.to_numeric(src911[lon911], errors="coerce")
+    src911 = src911.dropna(subset=[lat911, lon911])
+    src911 = src911[
+        (src911[lat911].between(37.5, 38.2))
+        & (src911[lon911].between(-123.2, -122.0))
+    ]
 
-# kısa örnek
-try:
-    cols = ["date","wx_tmin","wx_tmax","wx_prcp","wx_temp_range","wx_is_rainy","wx_is_hot_day"]
-    cols = ["date"] + [c for c in cols if c in out.columns]
-    print(out[cols].head(3).to_string(index=False))
-except Exception as e:
-    print(f"(info) Önizleme yazdırılamadı: {e}")
+    g_911 = _ensure_point_gdf(src911, lat911, lon911)
+    g_911_m = _to_metric(g_911)
+    log(f"🗺️ Suç noktası: {len(g_crime_m):,} | 911 noktası: {len(g_911_m):,}")
+
+    # 3) en yakın 911 mesafesi + buffer sayıları
+    dist_min = _distance_nearest(g_crime_m, g_911_m)
+    g_crime_m["911_dist_min_m"] = pd.to_numeric(dist_min, errors="coerce")
+    g_crime_m["911_dist_min_range"] = g_crime_m["911_dist_min_m"].apply(_bin_distance)
+
+    for r in BUFFERS_M:
+        g_crime_m[f"911_cnt_{r}m"] = _count_within(g_crime_m, g_911_m, r)
+
+    # 4) geri DataFrame’e dön ve birleştir (__row_id ile)
+    feat_cols = (
+        ["__row_id", "911_dist_min_m", "911_dist_min_range"]
+        + [f"911_cnt_{r}m" for r in BUFFERS_M]
+    )
+    feats = pd.DataFrame(g_crime_m[feat_cols].copy())
+
+    merged = crime.merge(feats, on="__row_id", how="left")
+
+    # tip/doldurma
+    for c in [f"911_cnt_{r}m" for r in BUFFERS_M]:
+        merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0).astype("int32")
+    merged["911_dist_min_m"] = pd.to_numeric(merged["911_dist_min_m"], errors="coerce")
+    merged["911_dist_min_range"] = merged["911_dist_min_range"].fillna("none")
+
+    # 5) yaz
+    out = merged.drop(columns=["__row_id"], errors="ignore")
+    out.to_csv(CRIME_OUT, index=False)
+    log(f"✅ Yazıldı: {CRIME_OUT} | satır={len(out):,}")
+
+    try:
+        cols = [
+            "911_cnt_300m",
+            "911_cnt_600m",
+            "911_cnt_900m",
+            "911_dist_min_m",
+            "911_dist_min_range",
+        ]
+        view_cols = [c for c in cols if c in out.columns]
+        if view_cols:
+            print(out[view_cols].head(5).to_string(index=False))
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    main()
