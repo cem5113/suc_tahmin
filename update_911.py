@@ -145,6 +145,79 @@ def missing_report(df: pd.DataFrame, label: str, out_dir: str = BASE_DIR) -> pd.
 
     return rep
 
+# 1) 911 normalize sonrası
+missing_report(final_911, "911_summary_normalize")
+dump_nan_samples(final_911, "911_summary_normalize")
+
+# 2) Rolling sonrası (tek kez)
+missing_report(_day_unique, "911_day_unique_after_roll")
+dump_nan_samples(_day_unique, "911_day_unique_after_roll")
+
+missing_report(_hr_unique, "911_hr_unique_after_roll")
+dump_nan_samples(_hr_unique, "911_hr_unique_after_roll")
+
+# (Komşular varsa)
+if _neighbor_roll is not None:
+    missing_report(_neighbor_roll, "911_neighbor_roll")
+    dump_nan_samples(_neighbor_roll, "911_neighbor_roll")
+
+# 3) Grid merge öncesi enriched
+missing_report(_enriched, "911_enriched_before_grid_merge")
+dump_nan_samples(_enriched, "911_enriched_before_grid_merge")
+
+# 4) Fill sonrası merged (kaydetmeden hemen önce)
+missing_report(merged, "crime_x_911_after_fill")
+dump_nan_samples(merged, "crime_x_911_after_fill")
+
+def dump_nan_samples(
+    df: pd.DataFrame,
+    label: str,
+    key_cols: tuple = ("GEOID", "date", "hr_key", "day_of_week", "season"),
+    n: int = 5,
+    out_dir: str | None = None,
+) -> Optional[pd.DataFrame]:
+    """
+    NaN içeren HER sütun için en fazla n adet örnek satır döker.
+    Çıktı: nan_samples_<label>.csv  (BASE_DIR altında)
+    Kolonlar: __nan_in, __row_index + (key_cols ∩ df) + [ilgili kolon]
+    """
+    if df is None or df.empty:
+        log(f"🧪 NaN örnekleri ({label}): DF boş; örnek yok.")
+        return None
+
+    if out_dir is None:
+        out_dir = BASE_DIR
+
+    cols_with_nan = [c for c in df.columns if df[c].isna().any()]
+    if not cols_with_nan:
+        log(f"🧪 NaN örnekleri ({label}): NaN yok.")
+        return None
+
+    keep_keys = [k for k in key_cols if k in df.columns]
+    samples = []
+    total_rows = 0
+
+    for c in cols_with_nan:
+        cols = keep_keys + [c]
+        ex = df.loc[df[c].isna(), cols].head(n).copy()
+        if ex.empty:
+            continue
+        ex.insert(0, "__nan_in", c)
+        ex.insert(1, "__row_index", ex.index)  # orijinal satır index’i
+        samples.append(ex)
+        total_rows += len(ex)
+
+    if not samples:
+        log(f"🧪 NaN örnekleri ({label}): NaN var ama örnek çekilemedi.")
+        return None
+
+    out = pd.concat(samples, ignore_index=True)
+    out_path = Path(out_dir) / f"nan_samples_{re.sub(r'[^A-Za-z0-9_]+','_', label)}.csv"
+    safe_save_csv(out, str(out_path))
+    # Log’ta ilk birkaç kolon/satır
+    log(f"🧪 NaN örnekleri ({label}) → {len(cols_with_nan)} sütunda {total_rows} örnek satır yazıldı → {out_path.name}")
+    return out
+
 def normalize_geoid(s: pd.Series, target_len: int) -> pd.Series:
     """Sadece rakamları al, soldan L karaktere kes ve zfill(L) yap (panel ile uyumlu)."""
     s = s.astype(str).str.extract(r"(\d+)", expand=False)
