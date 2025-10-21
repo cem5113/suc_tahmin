@@ -70,15 +70,11 @@ Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
 
 # Suç girdisi adayları
 CRIME_CANDIDATES = [
-    os.path.join(BASE_DIR, "sf_crime_04.csv"),  # (tercih edilen: bus enrich sonrası)
-    os.path.join(BASE_DIR, "sf_crime_03.csv"),
-    os.path.join(BASE_DIR, "sf_crime_02.csv"),
-    os.path.join(BASE_DIR, "sf_crime_01.csv"),
-    os.path.join(BASE_DIR, "sf_crime.csv"),
+    os.path.join(BASE_DIR, "sf_crime_04.csv"),  #
 ]
 CRIME_INPUT = next((p for p in CRIME_CANDIDATES if os.path.exists(p)), None)
 if CRIME_INPUT is None:
-    raise FileNotFoundError("❌ Suç girdi dosyası bulunamadı (sf_crime_04/03/02/01.csv ya da sf_crime.csv).")
+    raise FileNotFoundError("❌ Suç girdi dosyası bulunamadı (sf_crime_04.csv).")
 print(f"📄 Train enrich girdi: {os.path.abspath(CRIME_INPUT)}")
 
 CRIME_OUTPUT = os.path.join(BASE_DIR, "sf_crime_05.csv")
