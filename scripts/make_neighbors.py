@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 make_neighbors.py
-sf_crime_08.csv + neighbors.csv → sf_crime_09.csv
+sf_crime_07.csv + neighbors.csv → sf_crime_08.csv
 
 Her satırın kendi zamanına (datetime) göre, aynı GEOID’in komşularında
 son 24 saat / 72 saat / 7 günde gerçekleşen suç sayıları hesaplanır ve eklenir.
@@ -15,8 +15,8 @@ import pandas as pd
 
 # --- I/O yolları ---
 CRIME_DIR = Path(os.environ.get("CRIME_DATA_DIR", "crime_prediction_data"))
-SRC = CRIME_DIR / "sf_crime_08.csv"
-DST = CRIME_DIR / "sf_crime_09.csv"
+SRC = CRIME_DIR / "sf_crime_07.csv"
+DST = CRIME_DIR / "sf_crime_08.csv"
 # Önemli: neighbors yolunu env ile esnek yapıyoruz; default: repo kökü (neighbors.csv)
 NEIGH_FILE = Path(os.environ.get("NEIGH_FILE", "neighbors.csv"))
 GEOID_LEN = int(os.environ.get("GEOID_LEN", "11"))
