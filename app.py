@@ -819,10 +819,10 @@ def list_files_sorted(
         include = []
         for prefix in ["sf", "fr"]:
             include += [str(bdir / f"{prefix}_crime_{i:02d}.csv") for i in range(1, 10)]
-            include += [str(bdir / f"{prefix}_crime_y.csv")]
+        include += [str(bdir / "sf_crime_y.csv")]
         include += [str(bdir / "sf_crime_grid_full_labeled.csv")]
 
-    # Ayrıca glob ile genişlet
+    # Ayrıca glob ile genişlet  ← bu yorumla aynı hizada olmalı
     for p in bdir.glob(pattern):
         include.append(str(p))
 
