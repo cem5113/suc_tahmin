@@ -1,7 +1,7 @@
 # update_police_gov.py
 # Amaç: Suç verisini POLICE & GOVERNMENT noktalarıyla YALNIZCA GEOID üzerinden zenginleştirmek.
 # Not: 'date' hiç kullanılmaz; GEOID → centroid (veya lat/lon ortalaması) → en yakın polis/gov mesafesi hesaplanır.
-# Çıktı, giriş dosyasına göre 06→07 veya 08→09 olarak belirlenir; aksi halde *_pg.csv uzantısı kullanılır.
+# Çıktı, giriş dosyasına göre 06→07 olarak belirlenir; aksi halde *_pg.csv uzantısı kullanılır.
 
 import os
 from pathlib import Path
