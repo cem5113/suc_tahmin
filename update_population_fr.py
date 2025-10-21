@@ -1,4 +1,8 @@
 # update_population_fr.py — nüfus (GEOID + population) zenginleştirme → fr_crime_03.csv
+# Amaç: Latitude/longitude YOK → GEOID bazlı birleştirme.
+# İsimler: Varsayılan giriş 'fr_crime_02.csv' 
+#           Çıkış otomatik: 'fr_crime_03.csv' 
+# Nüfus CSV: Yerel dosya; aranan adlar:'sf_population.csv' → 'population.csv'
 
 import os
 import re
@@ -64,27 +68,32 @@ def _level_name(L: int) -> str:
 BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Crime input otomatik bul
+# Crime input otomatik bul (öncelik FR → SF)
 CRIME_INPUT = os.getenv("CRIME_INPUT", "") or None
 if not CRIME_INPUT:
-    for p in [BASE_DIR / "fr_crime_02.csv", Path("fr_crime_02.csv"),
-              BASE_DIR / "fr_crime.csv",     Path("fr_crime.csv")]:
+    for p in [
+        BASE_DIR / "fr_crime_02.csv",
+        Path("fr_crime_02.csv"),
+    ]:
         if p.exists():
             CRIME_INPUT = str(p); break
 if not CRIME_INPUT or not Path(CRIME_INPUT).exists():
-    raise FileNotFoundError("CRIME_INPUT bulunamadı. 'fr_crime_02.csv' veya 'fr_crime.csv' gereklidir.")
+    raise FileNotFoundError("CRIME_INPUT bulunamadı. 'fr_crime_02.csv') bekleniyor.")
 
-CRIME_OUTPUT = str(BASE_DIR / "fr_crime_03.csv")
+# Çıkış adı: giriş prefix'ine göre fr/sf karar ver
+_prefix = "fr" if Path(CRIME_INPUT).name.startswith("fr_") else ("sf" if Path(CRIME_INPUT).name.startswith("sf_") else "fr")
+CRIME_OUTPUT = os.getenv("CRIME_OUTPUT", "") or str(BASE_DIR / f"{_prefix}_crime_03.csv")
 
-# Population input: sadece YEREL CSV
+# Population input: sadece YEREL CSV; FR → SF → generic
 POPULATION_PATH = (os.getenv("POPULATION_PATH", "") or "").strip()
 if not POPULATION_PATH:
-    cand = BASE_DIR / "sf_population.csv"
-    if cand.exists():
-        POPULATION_PATH = str(cand)
-    elif Path("sf_population.csv").exists():
-        POPULATION_PATH = "sf_population.csv"
-    else:
+    for p in [
+        BASE_DIR / "sf_population.csv",
+        Path("sf_population.csv"),
+    ]:
+        if p.exists():
+            POPULATION_PATH = str(p); break
+    if not POPULATION_PATH:
         raise FileNotFoundError("Nüfus CSV bulunamadı (sf_population.csv). POPULATION_PATH ile belirtin.")
 else:
     if POPULATION_PATH.startswith(("http://","https://")):
@@ -119,8 +128,7 @@ pop_len   = _mode_len(_digits_only(pop[pop_geoid_col]))
 if CENSUS_GEO_LEVEL in MAP_LEN:
     join_len = MAP_LEN[CENSUS_GEO_LEVEL]
 else:
-    # auto: veriye göre makul birleşik anahtar uzunluğu
-    # Daha ince veriyi daha kaba seviyeye toplayabiliriz; county ise 5’te birleşir.
+    # auto: veriye göre makul birleşik anahtar uzunluğu (county tabanı 5)
     join_len = min(max(5, crime_len), max(5, pop_len))
 
 print(f"[info] crime GEO len≈{crime_len} | pop GEO len≈{pop_len} | join_len={join_len} ({_level_name(join_len)})")
