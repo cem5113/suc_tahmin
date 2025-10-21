@@ -1,4 +1,4 @@
-# update_police_gov.py
+# update_police_gov_fr.py
 # Amaç: OLAY BAZLI (latitude/longitude) en yakın POLICE & GOV mesafeleri.
 # Fallback: lat/lon eksikse GEOID centroid kullanılır.
 
