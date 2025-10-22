@@ -1049,12 +1049,12 @@ jobs:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
-      
+
           bytes() {
             # Linux: stat -c%s, macOS: stat -f%z
             stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || echo "?"
           }
-      
+
           preview_csv() {
             local FILE="$1"
             local LABEL="$2"
@@ -1062,9 +1062,10 @@ jobs:
               local SIZE; SIZE=$(bytes "$FILE")
               local LINES; LINES=$(wc -l < "$FILE" 2>/dev/null || echo "?")
               echo "✅ ${LABEL} Var: $FILE | boyut=${SIZE} byte | satır≈${LINES}"
+
               # Python ile kolon sayısı + ilk birkaç kolon adını göster
-python - <<'PY' || true
-import os, json
+              TARGET_FILE="$FILE" python - <<'PY' || true
+import os
 import pandas as pd
 
 p = os.environ.get("TARGET_FILE", "")
@@ -1082,15 +1083,13 @@ PY
               echo "ℹ️ ${LABEL} Yok: $FILE"
             fi
           }
-      
+
           # SF
-          export TARGET_FILE="${CRIME_DATA_DIR}/sf_crime_08.csv"
           preview_csv "${CRIME_DATA_DIR}/sf_crime_08.csv" "SF(08)"
-      
+
           echo
-      
+
           # FR
-          export TARGET_FILE="${CRIME_DATA_DIR}/fr_crime_09.csv"
           preview_csv "${CRIME_DATA_DIR}/fr_crime_09.csv" "FR(09)"
 
       # =========================
