@@ -11,10 +11,11 @@ Akış (etiketsiz):
 - KMeans k=2..4 -> en iyi silhouette
 - RF feature_importances_ (dönüşmüş uzayda)
 - OHE alt-kolonlarını ana sütuna toplayıp ileri seçim (proxy=küme)
-- Seçilen ana sütunlarla çıktı CSV yazılır
+- Seçilen ana sütunlarla çıktı CSV yazılır (+ GEOID passthrough)
 
 Akış (hedef varsa):
 - Basit denetimli: aynı preprocess + RF/XGB/LGBM, önem + ileri seçim (F1)
+- Çıktı CSV: GEOID (passthrough) + seçilen özellikler + hedef
 """
 
 import argparse, json, re, warnings, joblib
@@ -124,14 +125,28 @@ def collapse_to_base_feature(feature_names_transformed: List[str]) -> Dict[str, 
         mapping.setdefault(base, []).append(i)
     return mapping
 
+# --- GEOID passthrough: ham DF'den bul ve 'GEOID' adında döndür ---
+def extract_geoid_series(df_raw: pd.DataFrame) -> pd.Series | None:
+    candidates = ["GEOID", "geoid", "geo_id", "tract_geoid", "geoid10", "tract", "blockgroup", "block_group", "block"]
+    found = None
+    for cand in candidates:
+        for c in df_raw.columns:
+            if str(c).lower() == cand.lower():
+                found = df_raw[c]
+                break
+        if found is not None:
+            break
+    if found is None:
+        return None
+    s = pd.Series(found).astype(str).str.replace(r"\.0$", "", regex=True)
+    s.name = "GEOID"
+    return s
+
 # --- YENİ: dönüşmüş isimleri güvenle al + importances hizalama yardımcıları ---
 def get_transformed_feature_names(pre: ColumnTransformer, X_sample: pd.DataFrame) -> List[str]:
-    """
-    ColumnTransformer'dan dönüşmüş kolon isimlerini güvenle döndürür.
-    Öncelik: pre.get_feature_names_out(); değilse fallback (num + OHE) veya f{i}.
-    """
+    """ColumnTransformer'dan dönüşmüş kolon isimlerini güvenle döndürür."""
     try:
-        names = pre.get_feature_names_out()  # "num__colA", "cat__day_of_week_Mon" vb.
+        names = pre.get_feature_names_out()  # "num__colA", "cat__x_y" ...
         return [n.split("__", 1)[1] if "__" in n else n for n in names]
     except Exception:
         try:
@@ -145,18 +160,13 @@ def get_transformed_feature_names(pre: ColumnTransformer, X_sample: pd.DataFrame
             return [f"f{i}" for i in range(n_trans)]
 
 def make_importance_series_from_model(model, pre, X_sample, feature_names: List[str]) -> pd.Series | None:
-    """
-    Modelden önem vektörünü alır ve feature_names ile güvenle hizalar.
-    XGB özelinde booster skorları fN -> vektöre çevrilir. Uyuşmazlıkta trim yapar.
-    """
-    # toplam transform kolon sayısı
+    """Model önem vektörünü isimlerle hizalayıp döndürür; uyuşmazlıkta güvenli trim yapar."""
     n_trans = pre.transform(X_sample).shape[1]
 
     if hasattr(model, "feature_importances_"):
         vals = getattr(model, "feature_importances_", None)
         if vals is None: return None
         vals = np.asarray(vals)
-        # isim uzunluğu ile vektörü hizala
         n = min(len(feature_names), len(vals), n_trans)
         if n == 0: return None
         return pd.Series(vals[:n], index=feature_names[:n]).clip(lower=0.0)
@@ -180,7 +190,7 @@ def unsupervised_feature_selection(df_raw: pd.DataFrame, outdir: Path, desired_o
     outdir.mkdir(parents=True, exist_ok=True)
     df = sanitize_columns(df_raw.copy())
 
-    # sızıntı/id/geo/koordinat kaldır
+    # sızıntı/id/geo/koordinat kaldır (eğitimden)
     drop_exact = [c for c in ["date","time","datetime"] if c in df.columns]
     drop_exact += [c for c in df.columns if re.fullmatch(r"(id|incident_id|case_id|row_id|index)", c, flags=re.I)]
     drop_exact += [c for c in df.columns if c.lower() in {"geoid","geo_id","tract","tract_geoid","geoid10","blockgroup","block"}]
@@ -214,7 +224,7 @@ def unsupervised_feature_selection(df_raw: pd.DataFrame, outdir: Path, desired_o
         if sil > best_sil:
             best_k, best_sil, best_labels = k, sil, labels
 
-    # RF ile önem (dönüşmüş ad uzayında)
+    # RF ile önem (dönüşmüş uzayda)
     rf = RandomForestClassifier(n_estimators=500, n_jobs=-1, random_state=42)
     rf.fit(Xt_dense, best_labels)
 
@@ -236,7 +246,7 @@ def unsupervised_feature_selection(df_raw: pd.DataFrame, outdir: Path, desired_o
     base_rank = pd.Series(base_scores).sort_values(ascending=False)
     base_rank.to_csv(outdir / "feature_importance_unsupervised_base.csv")
 
-    # İleri seçim (proxy hedef = best_labels), sınıflandırıcı = pick_model()
+    # İleri seçim (proxy hedef = best_labels)
     model_name, base_model = pick_model()
     chosen, best_set, best_score, curve = [], [], -1, []
     X_tr, X_va, y_tr, y_va = train_test_split(X, best_labels, test_size=0.25, random_state=42, stratify=best_labels)
@@ -263,8 +273,15 @@ def unsupervised_feature_selection(df_raw: pd.DataFrame, outdir: Path, desired_o
     with open(outdir / "forward_selection_unsupervised.json","w",encoding="utf-8") as f:
         json.dump({"forward_curve": curve, "best_k": len(best_set)}, f, ensure_ascii=False, indent=2)
 
+    # --- ÇIKIŞ: GEOID passthrough + seçilen özellikler ---
     selected_cols = [c for c in best_set if c in X.columns]
-    X[selected_cols].to_csv(desired_output_csv, index=False)
+    geo = extract_geoid_series(df_raw)
+    selected_df = X[selected_cols].copy().reset_index(drop=True)
+    if geo is not None:
+        out_df = pd.concat([geo.reset_index(drop=True), selected_df], axis=1)
+    else:
+        out_df = selected_df
+    out_df.to_csv(desired_output_csv, index=False)
     with open(outdir / "selected_columns.json","w",encoding="utf-8") as f:
         json.dump(selected_cols, f, ensure_ascii=False, indent=2)
 
@@ -285,7 +302,7 @@ def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desire
     y = pd.to_numeric(df[target], errors="coerce").fillna(0).astype(int).clip(0,1)
     X = df.drop(columns=[target]).copy()
 
-    # sızıntı/id/geo/koordinat
+    # sızıntı/id/geo/koordinat (eğitimden çıkar)
     drop_exact = [c for c in ["date","time","datetime"] if c in X.columns]
     drop_exact += [c for c in X.columns if re.fullmatch(r"(id|incident_id|case_id|row_id|index)", c, flags=re.I)]
     drop_exact += [c for c in X.columns if c.lower() in {"geoid","geo_id","tract","tract_geoid","geoid10","blockgroup","block"}]
@@ -328,13 +345,20 @@ def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desire
     with open(outdir / "metrics_supervised.json","w",encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
-    # --- YENİ: dönüşmüş isimleri güvenle al + importances hizala ---
+    # Dönüşmüş isimleri güvenle al + importances hizala
     pre_fit = clf.named_steps["pre"]
     feature_names_transformed = get_transformed_feature_names(pre_fit, X_tr)
     imp = make_importance_series_from_model(clf.named_steps["model"], pre_fit, X_tr, feature_names_transformed)
 
     if imp is None or imp.sum() == 0:
         joblib.dump(clf, outdir / "model_pipeline.joblib")
+        # Çıkışı yine de üret (en azından GEOID + hedef ile)
+        geo = extract_geoid_series(df_raw)
+        out_df = pd.concat(
+            [d.reset_index(drop=True) for d in ([geo] if geo is not None else []) + [X.reset_index(drop=True), y.rename(target).reset_index(drop=True)]],
+            axis=1
+        )
+        out_df.to_csv(desired_output_csv, index=False)
         return True
 
     imp_norm = (imp/imp.sum()).sort_values(ascending=False)
@@ -364,10 +388,17 @@ def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desire
         f1 = f1_score(y_te, yhat)
         if f1 > best_score: best_score, best_set = f1, chosen.copy()
 
+    # --- ÇIKIŞ: GEOID passthrough + seçilen özellikler + hedef ---
     selected_cols = [c for c in best_set if c in X.columns]
-    pd.concat([X[selected_cols], y.rename(target)], axis=1).to_csv(desired_output_csv, index=False)
-    with open(outdir / "selected_columns.json","w",encoding="utf-8") as f:
-        json.dump(selected_cols, f, ensure_ascii=False, indent=2)
+    geo = extract_geoid_series(df_raw)
+    feat = X[selected_cols].reset_index(drop=True)
+    yy = y.rename(target).reset_index(drop=True)
+    parts = []
+    if geo is not None:
+        parts.append(geo.reset_index(drop=True))
+    parts.extend([feat, yy])
+    out_df = pd.concat(parts, axis=1)
+    out_df.to_csv(desired_output_csv, index=False)
 
     joblib.dump(clf, outdir / "model_pipeline.joblib")
     print(f"✅ (Supervised) Özellik seçimi bitti. Seçilmiş veri → {desired_output_csv}")
