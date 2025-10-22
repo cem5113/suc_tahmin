@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# update_311_fr.py
+# update_311_fr.py (revised)
 #
 # Amaç:
 # - 311 verisini *varsa* _y.csv (ham, nokta bazlı) dosyasından, yoksa orijinal 311 CSV'den oku
@@ -38,6 +38,10 @@ CRIME_OUT = Path(SAVE_DIR) / "fr_crime_02.csv"
 # Varsayılan tampon yarıçapları (metre)
 BUFFERS_M = [300, 600, 900]
 
+# SF kabaca BBOX (min_lon, min_lat, max_lon, max_lat)
+SF_BBOX = (-123.2, 37.6, -122.3, 37.9)
+
+
 # ----------------- yardımcılar -----------------
 def log(msg: str): print(msg, flush=True)
 
@@ -49,22 +53,69 @@ def _find_existing(paths, base_dir=SAVE_DIR) -> Path | None:
         if p2.exists(): return p2
     return None
 
-def _pick_lat_lon(df: pd.DataFrame):
-    lat_col = next((c for c in ["latitude","lat","y","_lat_"] if c in df.columns), None)
-    lon_col = next((c for c in ["longitude","long","lon","x","_lon_"] if c in df.columns), None)
+def _normalize_headers(df: pd.DataFrame) -> dict:
+    """Map of normalized header -> original header (strip spaces, lower)."""
+    return {re.sub(r"\s+", "", str(c)).lower(): c for c in df.columns}
+
+def _detect_point_columns(df: pd.DataFrame):
+    normmap = _normalize_headers(df)
+    lat_alias = ("latitude","lat","y","_lat_")
+    lon_alias = ("longitude","long","lon","x","_lon_")
+    lat_col = next((normmap[a] for a in lat_alias if a in normmap), None)
+    lon_col = next((normmap[a] for a in lon_alias if a in normmap), None)
     return lat_col, lon_col
+
+def _coerce_decimal(series: pd.Series) -> pd.Series:
+    """Virgüllü ondalıkları da güvenle sayıya çevir (\"37,77\" -> 37.77)."""
+    s = series.astype(str).str.replace(",", ".", regex=False)
+    return pd.to_numeric(s, errors="coerce")
 
 def _ensure_point_gdf(df: pd.DataFrame, lat_col: str, lon_col: str) -> gpd.GeoDataFrame:
     df = df.copy()
-    df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
-    df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
-    df = df.dropna(subset=[lat_col, lon_col])
+    # Sayısal çeviri (virgül vs.)
+    df["__lat"] = _coerce_decimal(df[lat_col])
+    df["__lon"] = _coerce_decimal(df[lon_col])
+
+    # BBOX öncesi sayım
+    nn_lat0, nn_lon0 = df["__lat"].notna().sum(), df["__lon"].notna().sum()
+    log(f"[coords] numeric non-null lat/lon: {nn_lat0}/{nn_lon0}")
+
+    # SF BBOX filtresi
+    min_lon, min_lat, max_lon, max_lat = SF_BBOX
+    mask_bbox = df["__lat"].between(min_lat, max_lat) & df["__lon"].between(min_lon, max_lon)
+    kept = int(mask_bbox.sum())
+    log(f"[coords] BBOX içinde kalan: {kept}/{len(df)}")
+
+    use = df.loc[mask_bbox & df["__lat"].notna() & df["__lon"].notna()].copy()
+
+    # BBOX sonrası hiç kalmadıysa lat/lon swap dene
+    if use.empty:
+        log("[coords] BBOX sonrası satır kalmadı; lat/lon swap deneniyor…")
+        df_sw = df.copy()
+        df_sw["__lat"], df_sw["__lon"] = df_sw["__lon"], df_sw["__lat"]
+        mask_sw = df_sw["__lat"].between(min_lat, max_lat) & df_sw["__lon"].between(min_lon, max_lon)
+        kept_sw = int(mask_sw.sum())
+        log(f"[coords] swap sonrası BBOX içinde kalan: {kept_sw}/{len(df_sw)}")
+        if kept_sw > 0:
+            log("[coords] enlem-boylam sütunları yer değiştirmişti, düzeltildi.")
+            use = df_sw.loc[mask_sw & df_sw["__lat"].notna() & df_sw["__lon"].notna()].copy()
+        else:
+            # BBOX devre dışı brak: şehir dışı veri veya BBOX yanlışlığı
+            log("[coords] swap da başarısız; BBOX devre dışı bırakılıyor.")
+            use = df.loc[df["__lat"].notna() & df["__lon"].notna()].copy()
+            if use.empty:
+                return gpd.GeoDataFrame(use, geometry=[])
+
     gdf = gpd.GeoDataFrame(
-        df,
-        geometry=gpd.points_from_xy(df[lon_col], df[lat_col]),
+        use,
+        geometry=gpd.points_from_xy(use["__lon"], use["__lat"]),
         crs="EPSG:4326"
     )
     return gdf
+
+def _pick_lat_lon(df: pd.DataFrame):
+    # Eski fonksiyon, geriye dönük uyumluluk için normalize'lı versiyona yönlendiriyoruz
+    return _detect_point_columns(df)
 
 def _project_metric(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     # SF için metrik uygun projeksiyon: EPSG:3857 pratik ve hızlı
@@ -127,6 +178,7 @@ def _count_within(crime_gdf_m: gpd.GeoDataFrame, pts_gdf_m: gpd.GeoDataFrame, ra
     out.loc[counts.index] = counts.values
     return out
 
+
 # ----------------- ana akış -----------------
 def main():
     # 1) fr_crime_01.csv oku
@@ -166,14 +218,15 @@ def main():
 
     lat311, lon311 = _pick_lat_lon(df311)
     if not lat311 or not lon311:
-        # bazı özet dosyaları lat/lon içermez → bu durumda işlenemez
-        log("❌ Seçilen 311 dosyası nokta (latitude/longitude) içermiyor. Ham (_y.csv) dosyaya ihtiyaç var.")
-        log("   Lütfen _y.csv (ham nokta bazlı) 311 dosyasını sağlayın.")
+        # daha esnek: ham dosya zorunluluğu yerine gerçek başlıkları göster
+        log(f"❌ Seçilen 311 dosyasında latitude/longitude başlığı tespit edilemedi. Mevcut kolonlar: {list(df311.columns)}")
         sys.exit(1)
 
+    # Noktaları güvenli biçimde hazırla (comma decimal, BBOX, swap)
     pts311 = _ensure_point_gdf(df311, lat311, lon311)
-    # SF dışını kaba ele:  lat 37~38, lon -123~-122 gibi; isterseniz ek filtrenizi ekleyin
-    pts311 = pts311[(pts311[lat311].between(37.5, 38.2)) & (pts311[lon311].between(-123.2, -122.0))]
+    if pts311.empty:
+        log("❌ 311 nokta kümesi boş (başlık/dönüşüm/BBOX sorunları olabilir).")
+        sys.exit(1)
     pts311_m = _project_metric(pts311)
 
     log(f"🗺️ Suç noktası: {len(crime_gdf_m):,} | 311 noktası: {len(pts311_m):,}")
