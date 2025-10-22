@@ -44,7 +44,7 @@ NEIGHBOR_RADIUS_M = float(os.getenv("NEIGHBOR_RADIUS_M", "500"))
 # ➜ İstediğin akış: 1) Artifact'tan sf_crime_y.csv, 2) releases/latest sf_crime.csv
 CRIME_BASE_URL = os.getenv(
     "CRIME_CSV_URL",
-    "https://github.com/cem5113/crime_prediction_data_pre/releases/latest/download/sf_crime.csv"  # Fallback (auto-latest)
+    "https://github.com/cem5113/crime_prediction_data/releases/latest/download/sf_crime.csv"  # Fallback (auto-latest)
 )
 CRIME_API_URL = os.getenv("CRIME_API_URL", "https://data.sfgov.org/resource/wg3w-h783.json")
 SFCRIME_APP_TOKEN = os.getenv("SFCRIME_API_TOKEN", "")
@@ -60,7 +60,7 @@ csv_path   = os.path.join(save_dir, "sf_crime.csv")
 sum_path   = os.path.join(save_dir, "sf_crime_grid_summary_labeled.csv")
 full_path  = os.path.join(save_dir, "sf_crime_grid_full_labeled.csv")
 blocks_path = os.path.join(save_dir, "sf_census_blocks_with_population.geojson")
-CATMAP_PATH = Path(os.getenv("CATEGORY_MAP_PATH", "crime_prediction_data_pre/category_map.json"))
+CATMAP_PATH = Path(os.getenv("CATEGORY_MAP_PATH", "crime_prediction_data/category_map.json"))
 DAILY_OUT_BASE = os.getenv("DAILY_OUT_BASE", "sf_crime_grid_daily_labels.parquet")
 DAILY_PARTITION = True
 USE_PARQUET = True
@@ -71,7 +71,7 @@ Y_CSV_NAME = os.getenv("Y_CSV_NAME", "sf_crime_y.csv")
 y_csv_path = os.path.join(save_dir, Y_CSV_NAME)
 
 # ---- GitHub Actions artifact (sf_crime_y.csv) ayarları ----
-GITHUB_REPO = os.getenv("GITHUB_REPO", "cem5113/crime_prediction_data_pre")   # owner/repo
+GITHUB_REPO = os.getenv("GITHUB_REPO", "cem5113/crime_prediction_data")   # owner/repo
 GH_TOKEN = os.getenv("GH_TOKEN", "")
 ARTIFACT_NAME = os.getenv("ARTIFACT_NAME", "sf-crime-pipeline-output")
 
@@ -188,9 +188,9 @@ def fetch_file_from_latest_artifact(pick_names: List[str], artifact_name: str = 
                     import zipfile, io as _io
                     zf = zipfile.ZipFile(_io.BytesIO(dl.content))
                     names = zf.namelist()
-                    # tam ad + crime_prediction_data_pre/ altı için dene
+                    # tam ad + crime_prediction_data/ altı için dene
                     for pick in pick_names:
-                        for c in (pick, f"crime_prediction_data_pre/{pick}"):
+                        for c in (pick, f"crime_prediction_data/{pick}"):
                             if c in names:
                                 return zf.read(c)
                     # suffix eşleşmesi
@@ -213,7 +213,7 @@ def ensure_local_base_csv() -> Path | None:
     """
     # 1) Önce Y tabanını dene
     y_candidates = [
-        Path("crime_prediction_data_pre/sf_crime_y.csv"),
+        Path("crime_prediction_data/sf_crime_y.csv"),
         Path("sf_crime_y.csv"),
         Path("outputs/sf_crime_y.csv"),
     ]
@@ -228,8 +228,8 @@ def ensure_local_base_csv() -> Path | None:
     # 2) Klasik sf_crime.{csv,csv.gz}
     candidates = [
         Path("sf_crime.csv"),
-        Path("crime_prediction_data_pre/sf_crime.csv"),
-        Path("crime_prediction_data_pre/sf_crime.csv.gz"),
+        Path("crime_prediction_data/sf_crime.csv"),
+        Path("crime_prediction_data/sf_crime.csv.gz"),
     ]
     for p in candidates:
         if p.exists():
@@ -243,8 +243,8 @@ def ensure_local_base_csv() -> Path | None:
         print("⚠️ Ne local base var ne de CRIME_CSV_URL ayarlı.")
         return None
     try:
-        Path("crime_prediction_data_pre").mkdir(exist_ok=True)
-        out = Path("crime_prediction_data_pre/sf_crime.csv.gz") if CRIME_BASE_URL.endswith(".gz") else Path("crime_prediction_data_pre/sf_crime.csv")
+        Path("crime_prediction_data").mkdir(exist_ok=True)
+        out = Path("crime_prediction_data/sf_crime.csv.gz") if CRIME_BASE_URL.endswith(".gz") else Path("crime_prediction_data/sf_crime.csv")
         print(f"⬇️ Release fallback indiriliyor → {out.name}")
         r = requests.get(CRIME_BASE_URL, timeout=60)
         r.raise_for_status()
@@ -563,13 +563,13 @@ try:
 except Exception:
     pass
 
-# crime_prediction_data_pre/ kopyaları:
+# crime_prediction_data/ kopyaları:
 try:
-    Path("crime_prediction_data_pre").mkdir(exist_ok=True)
+    Path("crime_prediction_data").mkdir(exist_ok=True)
     if CACHE_WRITE_Y_ONLY:
-        shutil.copy2(_out_target, "crime_prediction_data_pre/sf_crime_y.csv")
+        shutil.copy2(_out_target, "crime_prediction_data/sf_crime_y.csv")
     else:
-        shutil.copy2(_out_target, "crime_prediction_data_pre/sf_crime.csv")
+        shutil.copy2(_out_target, "crime_prediction_data/sf_crime.csv")
 except Exception as e:
     print("Kopya uyarısı:", e)
 
@@ -760,9 +760,9 @@ safe_save(grouped, sum_path)
 safe_save(df_final, full_path)
 print(f"\U0001F4BE Kaydedildi: {full_path}")
 try:
-    Path("crime_prediction_data_pre").mkdir(exist_ok=True)
-    shutil.copy2(full_path, "crime_prediction_data_pre/sf_crime_grid_full_labeled.csv")
-    print("\U0001F4E6 crime_prediction_data_pre/ klasörüne GRID kopyalandı.")
+    Path("crime_prediction_data").mkdir(exist_ok=True)
+    shutil.copy2(full_path, "crime_prediction_data/sf_crime_grid_full_labeled.csv")
+    print("\U0001F4E6 crime_prediction_data/ klasörüne GRID kopyalandı.")
 except Exception as e:
     print(f"\u26A0\ufe0f GRID kopyalama uyarısı: {e}")
 
@@ -889,24 +889,24 @@ if WRITE_DAILY_ARCHIVE:
                 written_rows += len(part)
         print(f"✅ Günlük arşiv üretimi tamam. Toplam yazılan satır: {written_rows:,}")
         try:
-            Path("crime_prediction_data_pre").mkdir(exist_ok=True)
+            Path("crime_prediction_data").mkdir(exist_ok=True)
             base = Path(DAILY_OUT_BASE)
             src_dir = base.parent / base.stem
             if src_dir.exists():
-                dst_dir = Path("crime_prediction_data_pre/daily_parquet" if (USE_PARQUET and DAILY_PARTITION) else "crime_prediction_data_pre/daily_csv")
+                dst_dir = Path("crime_prediction_data/daily_parquet" if (USE_PARQUET and DAILY_PARTITION) else "crime_prediction_data/daily_csv")
                 shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
-                print("\U0001F4E6 crime_prediction_data_pre/ klasörüne günlük arşiv kopyalandı.")
+                print("\U0001F4E6 crime_prediction_data/ klasörüne günlük arşiv kopyalandı.")
         except Exception as e:
             print(f"\u26A0\ufe0f Günlük arşiv kopyalama uyarısı: {e}")
 
 # Blok dosyasını kopyala
 try:
-    Path("crime_prediction_data_pre").mkdir(exist_ok=True)
+    Path("crime_prediction_data").mkdir(exist_ok=True)
     src_blocks = Path(blocks_path)
-    if src_blocks.exists(): shutil.copy2(src_blocks, Path("crime_prediction_data_pre") / src_blocks.name)
-    print("\U0001F4E6 crime_prediction_data_pre/ klasörüne gerekli kopyalar bırakıldı.")
+    if src_blocks.exists(): shutil.copy2(src_blocks, Path("crime_prediction_data") / src_blocks.name)
+    print("\U0001F4E6 crime_prediction_data/ klasörüne gerekli kopyalar bırakıldı.")
 except Exception as e:
-    print(f"\u26A0\ufe0f crime_prediction_data_pre kopyalama uyarısı: {e}")
+    print(f"\u26A0\ufe0f crime_prediction_data kopyalama uyarısı: {e}")
 
 # Son kontrol
 try:
