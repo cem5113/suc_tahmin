@@ -257,7 +257,7 @@ jobs:
         env:
           FR_SRC_PATH: ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
           FR_OUT_PATH: fr_crime.csv
-          FR_MIRROR_DIR: crime_prediction_data_pre
+          FR_MIRROR_DIR: crime_prediction_data
         run: |
           set -euo pipefail
           echo "➡️ fr_crime.csv üretiliyor..."
@@ -280,7 +280,7 @@ jobs:
           
           src = Path(os.getenv("FR_SRC_PATH", "sf_crime_grid_full_labeled.csv"))
           out = Path(os.getenv("FR_OUT_PATH", "fr_crime.csv"))
-          mir = Path(os.getenv("FR_MIRROR_DIR", "crime_prediction_data_pre"))
+          mir = Path(os.getenv("FR_MIRROR_DIR", "crime_prediction_data"))
           
           try:
               if not src.exists():
