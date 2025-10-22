@@ -13,9 +13,8 @@ jobs:
       GEOID_LEN: "11"
 
       # Artifact-first okuma/yazma için ENV
-      # Not: dawidd6 action dosyaları ZIP olarak değil doğrudan klasöre indirir/açar.
-      ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip   # yoksa sorun değil; kod klasörden okur
-      ARTIFACT_DIR: artifact                                 # indirilen içerik burada
+      ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
+      ARTIFACT_DIR: artifact
       FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
       FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
 
@@ -39,14 +38,13 @@ jobs:
       - name: Download upstream artifact (from another workflow)
         uses: dawidd6/action-download-artifact@v6
         with:
-          workflow: full_pipeline.yml        # artifact'ı üreten workflow dosyası
-          workflow_conclusion: success       # son başarılı run
+          workflow: full_pipeline.yml
+          workflow_conclusion: success
           branch: main
-          name: sf-crime-pipeline-output     # indirmek istediğin artifact adı
-          path: artifact                     # içerikleri buraya aç
+          name: sf-crime-pipeline-output
+          path: artifact
 
-      - name: Set STACKING_DATASET
-        run: echo "STACKING_DATASET=${CRIME_DATA_DIR}/fr_crime_09.csv" >> $GITHUB_ENV
+      # Not: stacking dataset ini en sonda (özellik analizinden sonra) set edeceğiz.
 
       - name: FR 00) Base grid / event label merge
         env:
@@ -158,7 +156,34 @@ jobs:
           python -u make_neighbors_fr.py || true
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
 
-      - name: FR 10) Stacking
+      # ✅ YENİ: Özellik analizi → fr_crime_10.csv üret
+      - name: FR 10) Feature Analysis (FR → fr_crime_10.csv)
+        run: |
+          set -e
+          # Çalıştır: unified_feature_analysis_fr_only.py (repo kökünde veya scripts/ içindeyse yolu düzelt)
+          python -u unified_feature_analysis_fr_only.py \
+            --csv "${CRIME_DATA_DIR}/fr_crime_09.csv" \
+            --out_csv "${CRIME_DATA_DIR}/fr_crime_10.csv" \
+            --outdir "outputs_feature_analysis_fr" || true
+
+          # Hızlı göz at
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_10.csv" || true
+          ls -lah "${CRIME_DATA_DIR}" || true
+          ls -lah "outputs_feature_analysis_fr" || true
+
+      # STACKING_DATASET'i 10'a yönlendir; dosya yoksa 09'a düş
+      - name: Set STACKING_DATASET (prefer fr_crime_10.csv)
+        run: |
+          set -e
+          if [ -s "${CRIME_DATA_DIR}/fr_crime_10.csv" ]; then
+            echo "STACKING_DATASET=${CRIME_DATA_DIR}/fr_crime_10.csv" >> $GITHUB_ENV
+            echo "Using STACKING_DATASET=fr_crime_10.csv"
+          else
+            echo "STACKING_DATASET=${CRIME_DATA_DIR}/fr_crime_09.csv" >> $GITHUB_ENV
+            echo "Fallback STACKING_DATASET=fr_crime_09.csv (fr_crime_10.csv not found)"
+          fi
+
+      - name: FR 11) Stacking
         env:
           STACKING_DATASET: ${{ env.STACKING_DATASET }}
           ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
@@ -177,6 +202,8 @@ jobs:
           path: |
             ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
             ${{ env.CRIME_DATA_DIR }}/fr_crime_0*.csv
+            ${{ env.CRIME_DATA_DIR }}/fr_crime_10.csv
+            outputs_feature_analysis_fr/**
             ${{ env.CRIME_DATA_DIR }}/neighbors.csv
             ${{ env.CRIME_DATA_DIR }}/risk_hourly*.csv
             ${{ env.CRIME_DATA_DIR }}/patrol_recs*.csv
