@@ -429,7 +429,7 @@ jobs:
       # 03) 311 — SF önce, sonra FR (tek başlık)
       # =========================
       
-      - name: "03) 311 • Restore SF summary" cache
+      - name: "03) 311 • Restore SF summary cache"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         uses: actions/cache@v4
         with:
