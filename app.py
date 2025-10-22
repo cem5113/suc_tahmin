@@ -200,19 +200,9 @@ def run_script(path: Path) -> bool:
 # -----------------------------------------------------------------------------
 # ENV ve URL’ler
 # -----------------------------------------------------------------------------
-CRIME_CSV_LATEST = pick_url(
-    "CRIME_CSV_URL",
-    "https://github.com/cem5113/crime_prediction_data/releases/latest/download/sf_crime_y.csv",
-)
-
 RAW_911_URL = pick_url(
     "RAW_911_URL",
-    "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year_y.csv",
-)
-
-SF311_URL = pick_url(
-    "SF311_URL",
-    "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.2/sf_311_last_5_years_y.csv",
+    "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year.csv",
 )
 
 # CSV-ONLY: Nüfus verisi yerel dosyadan okunacak
@@ -1112,7 +1102,7 @@ DOWNLOADS = {
     },
     "911 Çağrıları (özet)": {
         "url": RAW_911_URL,
-        "path": str(DATA_DIR / "sf_911_last_5_year_y.csv"),
+        "path": str(DATA_DIR / "sf_911_last_5_year.csv"),
     },
     "311 Çağrıları (özet)": {
         "url": "https://raw.githubusercontent.com/cem5113/crime_prediction_data/main/sf_311_last_5_years.csv",
