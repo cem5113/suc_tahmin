@@ -20,6 +20,10 @@ DEFAULT_GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
 BASE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
 Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
 
+# Tarih aralığı (raporlama için)
+TODAY_UTC = datetime.now(timezone.utc).date()
+FIVE_YEARS_AGO = TODAY_UTC - timedelta(days=5 * 365)
+
 # Çıktı (hedef: fr_crime_01.csv)
 OUT_FR_CRIME_01 = str(Path(BASE_DIR) / "fr_crime_01.csv")
 
@@ -49,9 +53,11 @@ RAW_911_URL_CANDIDATES = [
 # =========================
 # UTILS
 # =========================
-def log(msg: str): print(msg, flush=True)
+def log(msg: str): 
+    print(msg, flush=True)
 
-def ensure_parent(path: str): Path(path).parent.mkdir(parents=True, exist_ok=True)
+def ensure_parent(path: str): 
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 def safe_save_csv(df: pd.DataFrame, path: str):
     ensure_parent(path)
@@ -62,7 +68,8 @@ def safe_save_csv(df: pd.DataFrame, path: str):
         df.to_csv(path + ".bak", index=False)
         log(f"📁 Yedek oluşturuldu: {path}.bak")
 
-def to_date(s): return pd.to_datetime(s, errors="coerce").dt.date
+def to_date(s): 
+    return pd.to_datetime(s, errors="coerce").dt.date
 
 def normalize_geoid(s: pd.Series, target_len: int) -> pd.Series:
     s = s.astype(str).str.extract(r"(\d+)", expand=False)
@@ -76,8 +83,10 @@ def log_shape(df, label):
         pass
 
 def _mtime(p: Path) -> float:
-    try: return p.stat().st_mtime
-    except Exception: return -1.0
+    try: 
+        return p.stat().st_mtime
+    except Exception: 
+        return -1.0
 
 # =========================
 # 911 SUMMARY HELPERS
@@ -342,7 +351,7 @@ def fetch_v3_range_all_chunks(start_day, end_day) -> Optional[pd.DataFrame]:
 
 def minimal_911_summary_ensure() -> pd.DataFrame:
     """Yerelde/yayın’da yoksa 5 yıllık 911 özetini üret/indir."""
-    five_years_ago = datetime.now(timezone.utc).date() - timedelta(days=5*365)
+    five_years_ago = FIVE_YEARS_AGO
     final_911 = None
     try:
         p = ensure_local_911_base()
@@ -368,7 +377,7 @@ def minimal_911_summary_ensure() -> pd.DataFrame:
 
     if final_911 is None or final_911.empty:
         try:
-            today = datetime.utcnow().date()
+            today = TODAY_UTC
             raw = fetch_v3_range_all_chunks(five_years_ago, today) if IS_V3 else fetch_range_all_chunks(five_years_ago, today)
             if raw is None or raw.empty:
                 raise RuntimeError("API boş döndü.")
@@ -506,9 +515,11 @@ def merge_crime_with_911(crime_df: pd.DataFrame, calls_feat: pd.DataFrame) -> pd
 # =========================
 def main():
     log(f"📁 BASE_DIR: {BASE_DIR}")
+    log(f"🗓️ Tarih aralığı: {FIVE_YEARS_AGO} → {TODAY_UTC}")
 
-    # 1) 911 özetini hazırla/garanti et
+    # 1) 911 özetini hazırla/garanti et (öncelik: *_y.csv > regular)
     calls = minimal_911_summary_ensure()
+    # Son 5 yıl filtresi ve bugüne kadar doldurma zaten yapıldı
     log_shape(calls, "911 summary (loaded)")
 
     # 2) Crime kaynağını seç + oku
@@ -516,7 +527,7 @@ def main():
     crime_df = read_crime_df(crime_path)
     log_shape(crime_df, "crime (loaded)")
 
-    # 3) 911 lag özelliklerini hazırla
+    # 3) 911 lag özelliklerini hazırla (leakage-safe)
     calls_feat = prepare_calls(calls)
     log_shape(calls_feat, "911 features (prepared)")
 
@@ -528,6 +539,7 @@ def main():
     safe_save_csv(merged, OUT_FR_CRIME_01)
     log(f"✅ Yazıldı: {OUT_FR_CRIME_01}")
 
+    # 6) Kısa önizleme (opsiyonel)
     try:
         preview_cols = ["GEOID","date","hour_range","hr_cnt_t1","hr_cnt_last3h","daily_cnt_prev"]
         show = [c for c in preview_cols if c in merged.columns]
