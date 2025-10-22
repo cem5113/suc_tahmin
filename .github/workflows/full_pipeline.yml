@@ -1063,16 +1063,19 @@ jobs:
               local LINES; LINES=$(wc -l < "$FILE" 2>/dev/null || echo "?")
               echo "✅ ${LABEL} Var: $FILE | boyut=${SIZE} byte | satır≈${LINES}"
               # Python ile kolon sayısı + ilk birkaç kolon adını göster
-              python - <<PY || true
-      import pandas as pd, os, json
-      p = os.environ.get("TARGET_FILE", "")
-      try:
-          df = pd.read_csv(p, nrows=1000, low_memory=False)  # hızlıca shape için 1000 satır yeterli
-          cols = list(df.columns)
-          print(f"Kolon sayısı: {len(cols)} | İlk kolonlar: {cols[:min(8,len(cols))]}")
-      except Exception as e:
-          print(f"[info] kolon bilgisi okunamadı: {e}")
-      PY
+python - <<'PY' || true
+import os, json
+import pandas as pd
+
+p = os.environ.get("TARGET_FILE", "")
+try:
+    df = pd.read_csv(p, nrows=1000, low_memory=False)  # hızlıca shape için 1000 satır yeterli
+    cols = list(df.columns)
+    print(f"Kolon sayısı: {len(cols)} | İlk kolonlar: {cols[:min(8,len(cols))]}")
+except Exception as e:
+    print(f"[info] kolon bilgisi okunamadı: {e}")
+PY
+
               echo "---- $(basename "$FILE") (head 5) ----"
               head -n 5 "$FILE" || true
             else
