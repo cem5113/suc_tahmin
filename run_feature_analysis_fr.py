@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-unified_feature_analysis_fr_only.py
+run_feature_analysis_fr.py
 
 Girdi : fr_crime_09.csv (etiketsiz) ya da hedefi olan bir CSV
 Çıktı : fr_crime_10.csv (veya --out_csv ile belirtilen)
