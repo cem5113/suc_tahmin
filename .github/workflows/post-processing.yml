@@ -99,7 +99,16 @@ jobs:
           echo "STACKING_DATASET=${STACKING_DATASET}"
           python -u stacking_risk_pipeline_fr.py || true
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload post artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sf-crime-post
+          path: |
+            ${{ env.CRIME_DATA_DIR }}/rapor.pdf
+            ${{ env.CRIME_DATA_DIR }}/metrics_extra.csv
+          if-no-files-found: warn
+          retention-days: 14
+          
         with:
           name: fr-crime-pipeline-output
           path: |
