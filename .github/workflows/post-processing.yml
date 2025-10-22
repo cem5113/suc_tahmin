@@ -99,18 +99,7 @@ jobs:
           echo "STACKING_DATASET=${STACKING_DATASET}"
           python -u stacking_risk_pipeline_fr.py || true
 
-      # ── Artifact #1: rapor & ekstra metrikler
-      - name: Upload post artifacts (reports)
-        uses: actions/upload-artifact@v4
-        with:
-          name: sf-crime-post
-          path: |
-            ${{ env.CRIME_DATA_DIR }}/rapor.pdf
-            ${{ env.CRIME_DATA_DIR }}/metrics_extra.csv
-          if-no-files-found: warn
-          retention-days: 14
-
-      # ── Artifact #2: tüm FR pipeline çıktıları
+      # ✅ TEK upload step — tek 'with:' bloğu, 'if-no-files-found' ve 'retention-days' bunun İÇİNDE
       - name: Upload FR pipeline outputs
         uses: actions/upload-artifact@v4
         with:
