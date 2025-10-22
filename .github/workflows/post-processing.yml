@@ -163,8 +163,8 @@ jobs:
           # Çıktı klasörünü oluştur
           mkdir -p "outputs_feature_analysis_fr"
 
-          # Çalıştır: scripts/run_feature_analysis_fr.py (gerekirse yolu değiştir)
-          python -u scripts/run_feature_analysis_fr.py \
+          # Çalıştır: run_feature_analysis_fr.py (main dizininde)
+          python -u run_feature_analysis_fr.py \
             --csv "${CRIME_DATA_DIR}/fr_crime_09.csv" \
             --out_csv "${CRIME_DATA_DIR}/fr_crime_10.csv" \
             --outdir "outputs_feature_analysis_fr"
