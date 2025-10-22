@@ -1,5 +1,4 @@
 # update_911.py
-
 from __future__ import annotations
 
 import io
@@ -8,9 +7,9 @@ import re
 import sys
 import time
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import pandas as pd
 import requests
@@ -24,12 +23,13 @@ DEFAULT_GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
 BASE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
 Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
 
+# Çıktılar
 LOCAL_NAME = "sf_911_last_5_year.csv"
 Y_NAME = "sf_911_last_5_year_y.csv"
 local_summary_path = Path(BASE_DIR) / LOCAL_NAME
 y_summary_path = Path(BASE_DIR) / Y_NAME
 
-# Socrata API
+# Socrata API (SF 911)
 SF911_API_URL = os.getenv("SF911_API_URL", "https://data.sfgov.org/resource/2zdj-bwza.json")
 SF_APP_TOKEN = os.getenv("SF911_API_TOKEN", "")
 AGENCY_FILTER = os.getenv("SF911_AGENCY_FILTER", "agency like '%Police%'")
@@ -40,10 +40,8 @@ SLEEP_BETWEEN_REQS = float(os.getenv("SF911_SLEEP", "0.2"))
 IS_V3 = "/api/v3/views/" in SF911_API_URL
 V3_PAGE_LIMIT = int(os.getenv("SF_V3_PAGE_LIMIT", "1000"))
 
-# Releases (prefer _y, then regular)
-RAW_911_URL_ENV = os.getenv("RAW_911_URL", "").strip()
-RAW_911_URL_CANDIDATES = [
-    RAW_911_URL_ENV or "",
+# RELEASE URL'LERİ (ÖNCELİK _y)
+RELEASE_URLS: List[str] = [
     "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year_y.csv",
     "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year.csv",
 ]
@@ -115,16 +113,18 @@ def _fmt_hour_range_from_hour(h: int) -> str:
     return f"{a:02d}-{b:02d}"
 
 def make_standard_summary(raw: pd.DataFrame) -> pd.DataFrame:
-    """From raw 911 rows -> hourly + daily counts. No lat/lon, no spatial joins."""
+    """Ham 911 satırlarından -> saatlik ve günlük özet."""
     if raw is None or raw.empty:
-        return pd.DataFrame(columns=["GEOID","date","hour_range","event_hour",
-                                     "911_request_count_hour_range","911_request_count_daily(before_24_hours)"])
+        return pd.DataFrame(columns=[
+            "event_hour","911_request_count_hour_range","received_time",
+            "911_request_count_daily(before_24_hours)","date","hour_range","GEOID"
+        ])
 
     df = raw.copy()
 
-    # pick timestamp column
+    # Zaman kolonu seçimi
     ts_col = None
-    for cand in ["received_time","received_datetime","date","datetime","timestamp","call_received_datetime"]:
+    for cand in ["received_time","received_datetime","date","datetime","timestamp","call_received_datetime","received_dttm","call_datetime","call_date"]:
         if cand in df.columns:
             ts_col = cand; break
     if ts_col is None:
@@ -137,53 +137,50 @@ def make_standard_summary(raw: pd.DataFrame) -> pd.DataFrame:
     df["event_hour"] = df[ts_col].dt.hour.astype("int16")
     df["hour_range"] = df["event_hour"].apply(_fmt_hour_range_from_hour)
 
-    # hourly counts
+    # Saatlik sayım
     grp_hr = (["GEOID"] if "GEOID" in df.columns else []) + ["date","hour_range"]
     hr = df.groupby(grp_hr, dropna=False, observed=True).size().reset_index(name="911_request_count_hour_range")
 
-    # daily counts (previous 24h ≈ same-day daily total for modeling; if stricter is needed, shift can be added)
+    # Günlük sayım
     grp_day = (["GEOID"] if "GEOID" in df.columns else []) + ["date"]
     day = df.groupby(grp_day, dropna=False, observed=True).size().reset_index(name="911_request_count_daily(before_24_hours)")
 
     out = hr.merge(day, on=grp_day, how="left")
 
-    # If we have event_hour in original rows, we can approximate by the start of hour_range; else derive from label
+    # event_hour'ı hour_range başlangıcından türet
     def _hour_from_range(s: str) -> int:
         m = re.match(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$", str(s))
         return int(m.group(1)) % 24 if m else 0
     out["event_hour"] = out["hour_range"].apply(_hour_from_range).astype("int16")
 
-    # keep requested order
-    keep = ["event_hour","911_request_count_hour_range","received_time",
-            "911_request_count_daily(before_24_hours)","date","hour_range","GEOID"]
-    # received_time doesn't exist after aggregation; include placeholder if necessary to satisfy schema
-    if "received_time" not in out.columns:
-        out["received_time"] = pd.NaT
+    # received_time placeholder
+    out["received_time"] = pd.NaT
+
     # normalize
     if "GEOID" in out.columns:
         out["GEOID"] = normalize_geoid(out["GEOID"], DEFAULT_GEOID_LEN)
     out["date"] = to_date(out["date"])
 
-    # final column order filtered by presence
-    keep_present = [c for c in keep if c in out.columns]
-    # put date/hour_range/GEOID last as in your spec
+    keep = ["event_hour","911_request_count_hour_range","received_time",
+            "911_request_count_daily(before_24_hours)","date","hour_range","GEOID"]
+    out = out[[c for c in keep if c in out.columns]]
+    # Sıra: head + tail
     tail = [c for c in ["date","hour_range","GEOID"] if c in out.columns]
-    head = [c for c in keep_present if c not in tail]
-    out = out[head + tail]
-    return out
-
+    head = [c for c in keep if c not in tail and c in out.columns]
+    return out[head + tail]
 
 def coerce_to_summary_like(df: pd.DataFrame) -> pd.DataFrame:
-    """If incoming CSV is already an hourly summary, normalize names and formats."""
+    """Saatlik özet formatına normalize et."""
     df = df.copy()
-    # unify count column name
+
+    # count isimleri
     for cnt in ["911_request_count_hour_range","call_count","count","requests","n"]:
         if cnt in df.columns:
             if cnt != "911_request_count_hour_range":
                 df = df.rename(columns={cnt: "911_request_count_hour_range"})
             break
 
-    # hour_range normalize
+    # hour_range normalize (00-03 gibi)
     if "hour_range" in df.columns:
         def _fmt_hr(hr):
             m = re.match(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$", str(hr))
@@ -192,15 +189,13 @@ def coerce_to_summary_like(df: pd.DataFrame) -> pd.DataFrame:
             return f"{a:02d}-{b:02d}"
         df["hour_range"] = df["hour_range"].apply(_fmt_hr)
 
-    # date normalize
     if "date" in df.columns:
         df["date"] = to_date(df["date"])
 
-    # geoid normalize
     if "GEOID" in df.columns:
         df["GEOID"] = normalize_geoid(df["GEOID"], DEFAULT_GEOID_LEN)
 
-    # ensure daily column
+    # günlük toplamı yoksa ekle
     if "911_request_count_daily(before_24_hours)" not in df.columns and \
        {"date","hour_range","911_request_count_hour_range"}.issubset(df.columns):
         keys = (["GEOID"] if "GEOID" in df.columns else []) + ["date"]
@@ -208,18 +203,16 @@ def coerce_to_summary_like(df: pd.DataFrame) -> pd.DataFrame:
                 .sum().reset_index(name="911_request_count_daily(before_24_hours)")
         df = df.merge(day, on=keys, how="left")
 
-    # ensure event_hour
     if "event_hour" not in df.columns and "hour_range" in df.columns:
         def _hour_from_range(s: str) -> int:
             m = re.match(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$", str(s))
             return int(m.group(1)) % 24 if m else 0
         df["event_hour"] = df["hour_range"].apply(_hour_from_range).astype("int16")
 
-    # received_time is not defined in summaries; add placeholder
     if "received_time" not in df.columns:
         df["received_time"] = pd.NaT
 
-    keep = [c for c in df.columns if c in ALLOWED_911_FEATURES or c in {"event_hour"}]
+    keep = [c for c in df.columns if c in ALLOWED_911_FEATURES or c == "event_hour"]
     return df[keep]
 
 
@@ -227,72 +220,35 @@ def coerce_to_summary_like(df: pd.DataFrame) -> pd.DataFrame:
 # LOADERS
 # =========================
 
-def ensure_local_911_base() -> Optional[Path]:
-    y_candidates = [
-        Path(BASE_DIR) / "sf_911_last_5_year_y.csv",
-        Path("./sf_911_last_5_year_y.csv"),
-        Path("outputs/sf_911_last_5_year_y.csv"),
-    ]
-    for p in y_candidates:
-        if p.exists() and p.suffix == ".csv":
-            log(f"📦 Yerel 911 (Y) bulundu: {p}")
-            return p
-
-    regular_candidates = [
-        Path(BASE_DIR) / "sf_911_last_5_year.csv",
-        Path("./sf_911_last_5_year.csv"),
-    ]
-    for p in regular_candidates:
-        if p.exists() and p.suffix == ".csv":
-            log(f"📦 Yerel 911 (regular) bulundu: {p}")
-            return p
-    return None
-
-def summary_from_local(path: Path | str, min_date=None) -> pd.DataFrame:
-    log(f"📥 Yerel 911 okunuyor: {path}")
-    df = pd.read_csv(path, low_memory=False, dtype={"GEOID":"string"})
-    is_already_summary = (
-        {"date","hour_range"}.issubset(df.columns)
-        and any(c in df.columns for c in ["911_request_count_hour_range","call_count","count","requests","n"])
-    )
-    df = coerce_to_summary_like(df) if is_already_summary else make_standard_summary(df)
-    if min_date is not None and "date" in df.columns:
-        df = df[df["date"] >= min_date]
-    return df
-
-def _pick_working_release_url(candidates: list[str]) -> str:
-    for u in candidates:
-        if not u: continue
+def download_release_first_working(urls: List[str]) -> pd.DataFrame:
+    """Önce _y, sonra normal release; ilk çalışanı döndürür (özet formatına normalize eder)."""
+    for url in urls:
         try:
-            r = requests.get(u, timeout=20)
-            if r.ok and r.content and len(r.content) > 200 and b"git-lfs" not in r.content[:200].lower():
-                log(f"⬇️ Release seçildi: {u}")
-                return u
-            else:
-                log(f"⚠️ Uygun değil (boş/LFS olabilir): {u}")
+            log(f"⬇️ Release indiriliyor: {url}")
+            r = requests.get(url, timeout=120)
+            r.raise_for_status()
+            # İçeriği doğrudan oku (geçici dosya yazmadan)
+            df = pd.read_csv(io.BytesIO(r.content), low_memory=False, dtype={"GEOID": "string"})
+            is_summary = {"date","hour_range"}.issubset(df.columns) and any(
+                c in df.columns for c in ["911_request_count_hour_range","call_count","count","requests","n"]
+            )
+            df = coerce_to_summary_like(df) if is_summary else make_standard_summary(df)
+            log_shape(df, "Release (normalize)")
+            log_date_range(df, "date", "Release")
+            return df
         except Exception as e:
-            log(f"⚠️ Erişilemedi: {u} ({e})")
-    raise RuntimeError("❌ Release URL’lerine ulaşılamadı.")
+            log(f"⚠️ Release alınamadı: {url} -> {e}")
+    raise RuntimeError("❌ Release URL’lerinin hiçbiri indirilemedi.")
 
-def summary_from_release(url: str, min_date=None) -> pd.DataFrame:
-    log(f"⬇️ Release indiriliyor: {url}")
-    r = requests.get(url, timeout=120); r.raise_for_status()
-    tmp = Path(BASE_DIR) / "_tmp_911.csv"
-    ensure_parent(str(tmp))
-    tmp.write_bytes(r.content)
-    df = pd.read_csv(tmp, low_memory=False, dtype={"GEOID":"string"})
-    is_already_summary = (
-        {"date","hour_range"}.issubset(df.columns)
-        and any(c in df.columns for c in ["911_request_count_hour_range","call_count","count","requests","n"])
-    )
-    df = coerce_to_summary_like(df) if is_already_summary else make_standard_summary(df)
-    if min_date is not None and "date" in df.columns:
-        df = df[df["date"] >= min_date]
-    return df
+def latest_date(df: pd.DataFrame) -> Optional[date]:
+    if df is None or df.empty or "date" not in df.columns:
+        return None
+    s = pd.to_datetime(df["date"], errors="coerce").dt.date.dropna()
+    return None if s.empty else s.max()
 
 
 # =========================
-# API (INCREMENTAL RANGE)
+# API (INCREMENTAL)
 # =========================
 
 def try_small_request(params, headers):
@@ -425,7 +381,7 @@ def fetch_v3_range_all_chunks(start_day, end_day) -> Optional[pd.DataFrame]:
 
     return pd.DataFrame(all_rows)
 
-def incremental_summary(start_day, end_day) -> pd.DataFrame:
+def incremental_summary(start_day: date, end_day: date) -> pd.DataFrame:
     if start_day is None or end_day is None or end_day < start_day:
         return pd.DataFrame()
     log(f"🌐 API artımlı: {start_day} → {end_day} ({(end_day - start_day).days + 1} gün)")
@@ -433,6 +389,43 @@ def incremental_summary(start_day, end_day) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame()
     return make_standard_summary(raw)
+
+
+# =========================
+# MERGE & WINDOW
+# =========================
+
+KEYS = ["GEOID","date","hour_range"]
+
+def merge_release_and_incremental(base_df: pd.DataFrame, inc_df: pd.DataFrame) -> pd.DataFrame:
+    """Aynı anahtarlar çakışırsa API (incremental) **üstün** gelsin."""
+    if base_df is None or base_df.empty:
+        return inc_df.copy()
+    if inc_df is None or inc_df.empty:
+        return base_df.copy()
+
+    base_df = base_df.copy()
+    base_df["_src_order"] = 0  # release
+    inc_df = inc_df.copy()
+    inc_df["_src_order"] = 1   # api
+
+    both = pd.concat([base_df, inc_df], ignore_index=True)
+    # Anahtar varsa son gelen (api) kalsın
+    both = both.sort_values(["GEOID","date","hour_range","_src_order"]).drop_duplicates(subset=KEYS, keep="last")
+    both = both.drop(columns=["_src_order"], errors="ignore")
+
+    # Sayım kolonları int'e döndür (uygunsa)
+    for col in ["event_hour","911_request_count_hour_range","911_request_count_daily(before_24_hours)"]:
+        if col in both.columns:
+            both[col] = pd.to_numeric(both[col], errors="coerce").astype("Int64")
+    return both
+
+def apply_five_year_window(df: pd.DataFrame, today: date) -> pd.DataFrame:
+    min_date = today - timedelta(days=5*365)
+    if "date" not in df.columns:
+        return df
+    df = df[pd.to_datetime(df["date"], errors="coerce").dt.date >= min_date].copy()
+    return df
 
 
 # =========================
@@ -445,64 +438,56 @@ def save_911_both(df: pd.DataFrame):
     log(f"💾 Kaydedildi → {local_summary_path.name} & {y_summary_path.name} (satır={len(df)})")
 
 def main():
-    five_years_ago = datetime.now(timezone.utc).date() - timedelta(days=5*365)
-    log(f"📁 Hedef: {local_summary_path}")
-    final_911 = None
+    log(f"📁 Çıkış hedefi: {local_summary_path}")
+    today = datetime.now(timezone.utc).date()
 
-    # 1) Local
+    # 1) Release'tan oku (_y öncelikli)
     try:
-        base_csv_path = ensure_local_911_base()
-        if base_csv_path is not None:
-            final_911 = summary_from_local(base_csv_path, min_date=five_years_ago)
-            save_911_both(final_911)
-            log(f"✅ Yerel özet okundu (satır: {len(final_911)})")
-        else:
-            log("ℹ️ Yerel bulunamadı; release denenecek.")
+        rel_df = download_release_first_working(RELEASE_URLS)
     except Exception as e:
-        log("⚠️ Yerel okunurken hata:")
+        log("❌ Release indirilemedi, çıkılıyor (politika gereği release zorunlu):")
         log("".join(traceback.format_exception(e)))
+        sys.exit(1)
 
-    # 2) Release
-    if final_911 is None or final_911.empty:
+    # 2) Release en son tarih
+    rel_max = latest_date(rel_df)
+    if rel_max is None:
+        log("⚠️ Release'ta geçerli tarih bulunamadı, artımlı API tüm 5 yılı çekiyor.")
+        start_inc = today - timedelta(days=5*365)
+    else:
+        # Release zaten bugüne yakınsa +1 günden başla
+        start_inc = min(today, rel_max + timedelta(days=1))
+
+    # 3) API artımlı (gerekliyse)
+    inc_df = pd.DataFrame()
+    if start_inc <= today:
         try:
-            release_url = _pick_working_release_url(RAW_911_URL_CANDIDATES)
-            final_911 = summary_from_release(release_url, min_date=five_years_ago)
-            save_911_both(final_911)
-            log(f"✅ Release özet indirildi (satır: {len(final_911)})")
+            inc_df = incremental_summary(start_inc, today)
         except Exception as e:
-            log("⚠️ Release başarısız; API fallback denenecek:")
+            log("⚠️ API artımlı çekim hatası, sadece release kullanılacak:")
             log("".join(traceback.format_exception(e)))
+            inc_df = pd.DataFrame()
+    else:
+        log("ℹ️ Release zaten güncel görünüyor; artımlı çekim gereksiz.")
 
-    # 3) API fallback
-    if final_911 is None or final_911.empty:
-        try:
-            today = datetime.utcnow().date()
-            final_911 = incremental_summary(five_years_ago, today)
-            if final_911 is None or final_911.empty:
-                log("❌ 911 özet üretilemedi: lokal yok, release yok, API boş.")
-                sys.exit(1)
-            save_911_both(final_911)
-            log(f"✅ API özet üretildi (satır: {len(final_911)})")
-        except Exception as e:
-            log("❌ API fallback hatası:")
-            log("".join(traceback.format_exception(e)))
-            sys.exit(1)
+    # 4) Birleştir + 5 yıllık pencere uygula
+    final_911 = merge_release_and_incremental(rel_df, inc_df)
+    final_911 = apply_five_year_window(final_911, today)
 
-    # 4) Final normalize & keep only the requested columns
+    # 5) Sütunları istenen sıraya sabitle
     keep_cols = ["event_hour","911_request_count_hour_range","received_time",
                  "911_request_count_daily(before_24_hours)","date","hour_range","GEOID"]
     final_911 = final_911[[c for c in keep_cols if c in final_911.columns]].copy()
-
-    # Enforce ordering
     tail = [c for c in ["date","hour_range","GEOID"] if c in final_911.columns]
     head = [c for c in keep_cols if c not in tail and c in final_911.columns]
     final_911 = final_911[head + tail]
 
+    # 6) Kaydet + özet
     save_911_both(final_911)
     log_shape(final_911, "911 summary (final)")
     log_date_range(final_911, "date", "911")
 
-    # Preview
+    # 7) Ön izleme
     try:
         print(final_911.head(10).to_string(index=False))
     except Exception:
