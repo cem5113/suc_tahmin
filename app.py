@@ -1115,8 +1115,8 @@ DOWNLOADS = {
         "path": str(DATA_DIR / "sf_911_last_5_year_y.csv"),
     },
     "311 Çağrıları (özet)": {
-        "url": SF311_URL,
-        "path": str(DATA_DIR / "sf_311_last_5_years_y.csv"),
+        "url": "https://raw.githubusercontent.com/cem5113/crime_prediction_data/main/sf_311_last_5_years.csv",
+        "path": str(DATA_DIR / "sf_311_last_5_years.csv"),
     },
     "Otobüs Durakları": {
         "url": "https://raw.githubusercontent.com/cem5113/crime_prediction_data/main/sf_bus_stops_with_geoid.csv",
