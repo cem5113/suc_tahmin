@@ -98,7 +98,7 @@ run_fr:
         python -u make_neighbors_fr.py || true
         head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
 
-    # 10) Stacking (INPUT= fr_crime_09.csv)
+    # 10) Stacking (INPUT = fr_crime_09.csv)
     - name: FR 10) Stacking risk pipeline
       env:
         STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/fr_crime_09.csv
