@@ -1,0 +1,129 @@
+# --- PIPELINE 2: FR ---
+run_fr:
+  needs: run                      # SF job'u başarıyla bittikten sonra çalış
+  runs-on: ubuntu-latest
+  env:
+    CRIME_DATA_DIR: crime_prediction_data_fr
+    WX_LOCATION: "paris"
+    WX_UNIT: "metric"
+    GEOID_LEN: "11"
+    STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/fr_crime_09.csv
+
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Ensure data dir (FR)
+      run: mkdir -p "${CRIME_DATA_DIR}"
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: "pip"
+
+    - name: Install deps (quick)
+      run: |
+        python -m pip install -U pip wheel setuptools
+        [ -f requirements.txt ] && pip install -r requirements.txt || true
+
+    # 0) FR base → sf_crime_grid_full_labeled.csv
+    - name: FR 00) Base grid
+      run: |
+        set -e
+        python -u update_crime_fr.py
+        echo "sf_crime_grid_full_labeled.csv (head):"
+        head -n 5 "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv" || true
+
+    # 1) 911 → fr_crime_01.csv
+    - name: FR 01) 911
+      run: |
+        set -e
+        python -u update_911_fr.py || true
+        head -n 5 "${CRIME_DATA_DIR}/fr_crime_01.csv" || true
+
+    # 2) 311 → fr_crime_02.csv
+    - name: FR 02) 311
+      run: |
+        set -e
+        python -u update_311_fr.py || true
+        head -n 5 "${CRIME_DATA_DIR}/fr_crime_02.csv" || true
+
+    # 3) Nüfus → fr_crime_03.csv
+    - name: FR 03) Population
+      run: |
+        set -e
+        python -u update_population_fr.py || true
+        head -n 5 "${CRIME_DATA_DIR}/fr_crime_03.csv" || true
+
+    # 4) Otobüs → fr_crime_04.csv
+    - name: FR 04) Bus
+      run: |
+        set -e
+        python -u update_bus_fr.py || true
+        head -n 5 "${CRIME_DATA_DIR}/fr_crime_04.csv" || true
+
+    # 5) Tren → fr_crime_05.csv
+    - name: FR 05) Train
+      run: |
+        set -e
+        python -u update_train_fr.py || true
+        head -n 5 "${CRIME_DATA_DIR}/fr_crime_05.csv" || true
+
+    # 6) POI → fr_crime_06.csv
+    - name: FR 06) POI
+      run: |
+        set -e
+        python -u update_poi_fr.py || true
+        head -n 5 "${CRIME_DATA_DIR}/fr_crime_06.csv" || true
+
+    # 7) Polis & Gov → fr_crime_07.csv
+    - name: FR 07) Police & Gov
+      run: |
+        set -e
+        python -u update_police_gov_fr.py || true
+        head -n 5 "${CRIME_DATA_DIR}/fr_crime_07.csv" || true
+
+    # 8) Hava durumu (fr_crime_02 + weather → fr_crime_08.csv)
+    - name: FR 08) Weather
+      run: |
+        set -e
+        python -u update_weather_fr.py || true
+        head -n 5 "${CRIME_DATA_DIR}/fr_crime_08.csv" || true
+
+    # 9) Komşuluk (fr_crime_08 → fr_crime_09.csv)
+    - name: FR 09) Neighbors
+      run: |
+        set -e
+        python -u make_neighbors_fr.py || true
+        head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
+
+    # 10) Stacking (INPUT= fr_crime_09.csv)
+    - name: FR 10) Stacking risk pipeline
+      env:
+        STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/fr_crime_09.csv
+      run: |
+        set -e
+        python -u stacking_risk_pipeline_fr.py || true
+
+    # Çıktıları ayrı artifact olarak yükle
+    - name: Upload FR artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: fr-crime-pipeline-output
+        path: |
+          ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
+          ${{ env.CRIME_DATA_DIR }}/fr_crime_01.csv
+          ${{ env.CRIME_DATA_DIR }}/fr_crime_02.csv
+          ${{ env.CRIME_DATA_DIR }}/fr_crime_03.csv
+          ${{ env.CRIME_DATA_DIR }}/fr_crime_04.csv
+          ${{ env.CRIME_DATA_DIR }}/fr_crime_05.csv
+          ${{ env.CRIME_DATA_DIR }}/fr_crime_06.csv
+          ${{ env.CRIME_DATA_DIR }}/fr_crime_07.csv
+          ${{ env.CRIME_DATA_DIR }}/fr_crime_08.csv
+          ${{ env.CRIME_DATA_DIR }}/fr_crime_09.csv
+          ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+          ${{ env.CRIME_DATA_DIR }}/risk_hourly*.csv
+          ${{ env.CRIME_DATA_DIR }}/patrol_recs*.csv
+          ${{ env.CRIME_DATA_DIR }}/metrics_*.csv
+        if-no-files-found: warn
