@@ -7,7 +7,7 @@ jobs:
   run_fr:
     runs-on: ubuntu-latest
     env:
-      CRIME_DATA_DIR: crime_prediction_data_fr
+      CRIME_DATA_DIR: crime_prediction_data
       WX_LOCATION: "paris"
       WX_UNIT: "metric"
       GEOID_LEN: "11"
