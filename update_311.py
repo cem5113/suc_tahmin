@@ -57,20 +57,14 @@ def save_atomic(df, path):
 SAVE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# ⚙️ MAIN_DIR'i ÖNCE tanımla
-MAIN_DIR = os.getenv("MAIN_DIR", "main")
-os.makedirs(MAIN_DIR, exist_ok=True)
-
-# En güncel dosyayı seçme davranışını kontrol eden bayraklar
-FORCE_USE_FRESHEST = os.getenv("FORCE_USE_FRESHEST", "1") == "1"   # her zaman en günceli seç
-ALLOW_AGG_AS_SEED  = os.getenv("ALLOW_AGG_AS_SEED", "1") == "1"    # özet CSV'den seed türetmeyi aç
-
 # 🔴 Adlandırma standardı
+# - Ham 5y kayıt:             sf_311_last_5_years_y.csv
+# - 3 saatlik özet (3h bin):  sf_311_last_5_years.csv  (alias: sf_311_last_5_years_3h.csv)
 RAW_311_NAME_Y = os.getenv("RAW_311_NAME_Y", "sf_311_last_5_years_y.csv")
 AGG_BASENAME   = os.getenv("AGG_311_NAME",   "sf_311_last_5_years.csv")
 AGG_ALIAS      = os.getenv("AGG_311_ALIAS",  "sf_311_last_5_years_3h.csv")
 
-# Eski ad uyumluluğu
+# Eski ad uyumluluğu (opsiyonel kopya)
 LEGACY_311_Y = os.getenv("LEGACY_311_Y", "sf_311_last_5_year_y.csv")
 LEGACY_311   = os.getenv("LEGACY_311",   "sf_311_last_5_year.csv")
 
@@ -84,7 +78,6 @@ GEOJSON_CANDIDATES = [
     os.path.join(SAVE_DIR, GEOJSON_NAME),
     os.path.join("crime_prediction_data", GEOJSON_NAME),
     os.path.join(".", GEOJSON_NAME),
-    os.path.join(MAIN_DIR, GEOJSON_NAME),
 ]
 
 # İndirme/bölütleme ayarları
@@ -94,33 +87,16 @@ SLEEP_SEC       = float(os.getenv("SF_SODA_THROTTLE_SEC", "0.25"))
 SODA_TIMEOUT    = int(os.getenv("SF_SODA_TIMEOUT", "90"))
 SODA_RETRIES    = int(os.getenv("SF_SODA_RETRIES", "5"))
 
-# Chunk modu: tarih aralığına böl
-CHUNK_DAYS              = int(os.getenv("SF311_CHUNK_DAYS", "31"))
+# Chunk modu: tarih aralığına böl (timeout’lara karşı daha dayanıklı)
+CHUNK_DAYS              = int(os.getenv("SF311_CHUNK_DAYS", "31"))    # ~aylık
 MAX_PAGES_PER_CHUNK     = int(os.getenv("SF311_MAX_PAGES_PER_CHUNK", "40"))
-MAX_CONSEC_EMPTY_CHUNKS = int(os.getenv("SF311_MAX_EMPTY_CHUNKS", "8"))
+MAX_CONSEC_EMPTY_CHUNKS = int(os.getenv("SF311_MAX_EMPTY_CHUNKS", "8"))  # çok boş geliyorsa erken çık
 
-# Pencere
+# Pencere: varsayılan 5 yıl veya BACKFILL_DAYS override
 FIVE_YEARS     = 5 * 365
 TODAY          = datetime.utcnow().date()
 DEFAULT_START  = TODAY - timedelta(days=FIVE_YEARS)
 BACKFILL_DAYS  = int(os.getenv("BACKFILL_DAYS", "0"))
-
-# ================== YARDIMCI: dosya seçiciler ==================
-def _mtime(path: str) -> float:
-    try:
-        return os.path.getmtime(path)
-    except Exception:
-        return -1.0
-
-def _existing(paths: list[str]) -> list[str]:
-    return [p for p in paths if os.path.exists(p)]
-
-def pick_freshest(paths: list[str]) -> str | None:
-    cand = _existing(paths)
-    if not cand:
-        return None
-    cand.sort(key=_mtime, reverse=True)
-    return cand[0]
 
 # ================== SOCRATA ==================
 def socrata_get(session: requests.Session, url, params):
@@ -202,133 +178,104 @@ def geotag_to_geoid11(df_new):
 # ================== YARDIMCI: şema tespiti & tohum yükleme ==================
 def _looks_like_raw_311(cols: list[str]) -> bool:
     lc = {c.lower() for c in cols}
+    # raw için karakteristik alanlar
     return any(x in lc for x in ["id", "service_request_id"]) and \
            any(x in lc for x in ["time", "requested_datetime"]) and \
            any(x in lc for x in ["latitude", "lat"]) and \
            "311_request_count" not in lc
 
-def _load_raw_seed_from_base(base_csv_path: str, allow_agg_as_seed: bool = False) -> pd.DataFrame:
-    """Base CSV ham ise direkt, değilse (allow_agg_as_seed=True) minimal seed üret."""
+def _load_raw_seed_from_base(base_csv_path: str) -> pd.DataFrame:
+    """Repo'daki sf_311_last_5_years.csv ham ise seed olarak yükle."""
     try:
         df = pd.read_csv(base_csv_path, low_memory=False)
     except Exception as e:
         print(f"⚠️ Base CSV okunamadı ({base_csv_path}): {e}")
         return pd.DataFrame()
-
-    _ALLOW = (os.getenv("ALLOW_AGG_AS_SEED", "0") == "1") or allow_agg_as_seed
-
     if not _looks_like_raw_311(list(df.columns)):
-        if not _ALLOW:
-            print(f"ℹ️ {base_csv_path} özet (3h); ham seed olarak kullanılmayacak.")
-            return pd.DataFrame()
-        # — minimalist seed üret —
-        print(f"🧯 {base_csv_path} özet (3h); ALLOW_AGG_AS_SEED=1 ile minimal seed üretiliyor.")
-        seed = pd.DataFrame(columns=[
-            "id","datetime","date","time","lat","long","category","subcategory",
-            "agency_responsible","latitude","longitude"
-        ])
-        if {"date","hour_range"}.issubset(df.columns):
-            _d = pd.to_datetime(df["date"], errors="coerce")
-            _h = pd.to_numeric(df["hour_range"].str.extract(r"(\d{1,2})")[0], errors="coerce").fillna(0).astype(int)
-            seed["datetime"] = pd.to_datetime(_d.dt.date.astype(str) + " " + _h.astype(str)+":00:00",
-                                              utc=True, errors="coerce")
-            seed["date"]     = seed["datetime"].dt.date
-            seed["time"]     = seed["datetime"].dt.time
-        if "GEOID" in df.columns:
-            seed["GEOID"] = (
-                df["GEOID"].astype(str).str.extract(r"(\d+)", expand=False)
-                  .str[:DEFAULT_GEOID_LEN].str.zfill(DEFAULT_GEOID_LEN)
-            )
-        return seed
+        print(f"ℹ️ {base_csv_path} özet (3h) gibi görünüyor; ham seed olarak kullanılamaz.")
+        return pd.DataFrame()
 
-    # ham ise alan adlarını normalize et
+    # alan adlarını normalize et
     rename_map = {}
-    if "service_request_id" in df.columns: rename_map["service_request_id"] = "id"
-    if "service_name" in df.columns:       rename_map["service_name"] = "category"
-    if "service_subtype" in df.columns:    rename_map["service_subtype"] = "subcategory"
-    if rename_map: df = df.rename(columns=rename_map)
+    if "service_request_id" in df.columns:
+        rename_map["service_request_id"] = "id"
+    if "service_name" in df.columns:
+        rename_map["service_name"] = "category"
+    if "service_subtype" in df.columns:
+        rename_map["service_subtype"] = "subcategory"
+    if rename_map:
+        df = df.rename(columns=rename_map)
 
+    # datetime / date / time kur
     if "datetime" not in df.columns:
         if "requested_datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["requested_datetime"], errors="coerce", utc=True)
         elif {"date","time"}.issubset(df.columns):
-            df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str),
-                                            errors="coerce", utc=True)
+            df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str), errors="coerce", utc=True)
         else:
             df["datetime"] = pd.NaT
-    if "date" not in df.columns: df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
-    if "time" not in df.columns: df["time"] = pd.to_datetime(df["datetime"], errors="coerce").dt.time
+    if "date" not in df.columns:
+        df["date"] = pd.to_datetime(df["datetime"], errors="coerce").dt.date
+    if "time" not in df.columns:
+        df["time"] = pd.to_datetime(df["datetime"], errors="coerce").dt.time
 
+    # kolon setini tamamla
     keep = ["id","datetime","date","time","lat","long","category","subcategory",
             "agency_responsible","latitude","longitude"]
     for c in keep:
-        if c not in df.columns: df[c] = pd.NA
+        if c not in df.columns:
+            df[c] = pd.NA
 
     log_shape(df, "Base CSV (ham seed)")
-    return df[keep + (["GEOID"] if "GEOID" in df.columns else [])].copy()
+    return df[keep + ["GEOID"] if "GEOID" in df.columns else keep].copy()
 
-# ================== DOSYA YOLLARI & EN GÜNCEL SEÇİM ==================
-RAW_NAMES = [RAW_311_NAME_Y, LEGACY_311_Y, LEGACY_311]  # ham/legacy adlar
-AGG_NAMES = [AGG_BASENAME, AGG_ALIAS, "sf_311_last_5_years.csv", "sf_311_last_5_years_3h.csv"]
+# ================== DOSYA YOLLARI ==================
+RAW_CANDIDATES = [
+    os.path.join(SAVE_DIR, RAW_311_NAME_Y),
+    os.path.join(".",      RAW_311_NAME_Y),
+    os.path.join(SAVE_DIR, LEGACY_311_Y),
+    os.path.join(".",      LEGACY_311_Y),
+]
 
-SEARCH_BASES = [SAVE_DIR, ".", MAIN_DIR]
-
-def all_paths(names: list[str]) -> list[str]:
-    out = []
-    for n in names:
-        for b in SEARCH_BASES:
-            out.append(os.path.join(b, n))
-    return out
-
-def resolve_existing_raw_path() -> str:
-    """Ham dosya yazılacak tercih edilen hedef (SAVE_DIR)."""
+def resolve_existing_raw_path():
+    for cand in RAW_CANDIDATES:
+        if os.path.exists(cand):
+            print(f"🔎 Mevcut 311 _y CSV bulundu (artifact veya çalışma dizini): {os.path.abspath(cand)}")
+            return cand
     preferred = os.path.join(SAVE_DIR, RAW_311_NAME_Y)
-    if FORCE_USE_FRESHEST:
-        freshest_raw = pick_freshest(all_paths(RAW_NAMES))
-        if freshest_raw:
-            print(f"🔎 En güncel 311 _y CSV bulundu: {os.path.abspath(freshest_raw)}")
-            # Yazma hedefimiz yine SAVE_DIR altındaki preferred; okuma ayrı yapılacak.
-            return preferred
-    # ham yoksa normal preferred döner (oluşturulur)
-    print(f"ℹ️ Ham CSV hedefi: {os.path.abspath(preferred)}")
+    print(f"ℹ️ Mevcut 311 ham CSV yok; oluşturulacak: {os.path.abspath(preferred)}")
     return preferred
 
 def load_existing_raw_or_seed(raw_path: str) -> pd.DataFrame:
-    """
-    1) Eğer FORCE_USE_FRESHEST=True ve en güncel ham (_y/legacy) dosya varsa onu YÜKLE.
-    2) Yoksa en güncel özet (agg) dosyadan seed üret (ALLOW_AGG_AS_SEED varsayılan açık).
-    3) Hiçbiri yoksa boş dön ve API'den üretime bırak.
-    """
-    # 1) En güncel ham dosyayı ara
-    freshest_raw = pick_freshest(all_paths(RAW_NAMES)) if FORCE_USE_FRESHEST else None
-    if freshest_raw:
-        try:
-            df = pd.read_csv(freshest_raw, dtype={"GEOID": str}, low_memory=False)
-            print(f"📥 Ham veri en güncel kaynaktan yüklendi: {os.path.abspath(freshest_raw)}")
-            return df
-        except Exception as e:
-            print(f"⚠️ En güncel ham dosya okunamadı ({freshest_raw}): {e}")
+    """Önce _y dosyasını yükle; yoksa repo’daki base CSV ham ise seed olarak kullan."""
+    # 1) _y varsa onu yükle
+    if os.path.exists(raw_path):
+        df = pd.read_csv(raw_path, dtype={"GEOID": str}, low_memory=False)
+        print(f"📥 _y ham dosya yüklendi: {os.path.abspath(raw_path)}")
+        return df
 
-    # 2) En güncel özet dosyayı ara → seed
-    freshest_agg = pick_freshest(all_paths(AGG_NAMES))
-    if freshest_agg:
-        print(f"🔎 Base (özet) bulundu: {os.path.abspath(freshest_agg)}")
-        seed = _load_raw_seed_from_base(freshest_agg, allow_agg_as_seed=ALLOW_AGG_AS_SEED)
+    # 2) Repo base (ham ise) → seed
+    base_csv = os.path.join(SAVE_DIR, AGG_BASENAME)
+    if not os.path.exists(base_csv):
+        base_csv = os.path.join(".", AGG_BASENAME)
+    if os.path.exists(base_csv):
+        print(f"🔎 Base CSV bulundu: {os.path.abspath(base_csv)}")
+        seed = _load_raw_seed_from_base(base_csv)
         if not seed.empty:
+            # GEOID yoksa üret (varsa koru)
             if "GEOID" not in seed.columns or seed["GEOID"].isna().all():
                 seed_geo = geotag_to_geoid11(seed)
             else:
                 seed_geo = seed.copy()
+            # tipler
             seed_geo["datetime"] = pd.to_datetime(seed_geo["datetime"], errors="coerce", utc=True)
             seed_geo["date"]     = pd.to_datetime(seed_geo["date"], errors="coerce").dt.date
             save_atomic(seed_geo, raw_path)
-            print(f"✅ Özet kaynaktan seed üretildi ve yazıldı: {raw_path}")
+            print(f"✅ Base CSV ham seed olarak işlendi ve {_short(raw_path)} yazıldı.")
             return seed_geo
-        else:
-            print("ℹ️ Özet dosya ham seed için uygun değil veya boş.")
 
     # 3) Hiçbiri yoksa boş
-    print("ℹ️ Kullanılabilir ham/özet kaynak yok; API’den yeni ham üretilecek.")
+    print("ℹ️ Seed bulunamadı; API’den yeni ham üretilecek.")
     return pd.DataFrame()
 
 def _short(p: str) -> str:
@@ -373,6 +320,10 @@ def decide_start_date(df_existing):
 
 # ================== İNDİRME (TARİH CHUNK) ==================
 def download_by_date_chunks(start_date):
+    """
+    5 yıl gibi geniş aralıkları offset yerine tarih parçalara bölerek indir.
+    Her chunk’ta yine sayfalama var; chunk başarısızsa retry sonrası pas geçilir.
+    """
     print(f"🧩 İndirme modu: DATE-CHUNKS ({CHUNK_DAYS}gün) + paging")
     session = requests.Session()
     police_filter = "(agency_responsible like '%Police%' OR agency_responsible like '%SFPD%')"
@@ -449,9 +400,8 @@ def download_by_date_chunks(start_date):
 def main():
     print("🔎 CWD:", os.getcwd())
     print("🔎 Tercih edilen SAVE_DIR:", os.path.abspath(SAVE_DIR))
-    print("🔎 MAIN_DIR:", os.path.abspath(MAIN_DIR))
 
-    # 1) Ham hedef yolu belirle (yazım için) + en güncel veriyi yükle/seed et
+    # 1) Mevcut ham dosya (artifact’tan gelmiş olabilir) veya base’den seed
     raw_path = resolve_existing_raw_path()
     agg_path = os.path.join(os.path.dirname(raw_path) or ".", AGG_BASENAME)
     agg_alias_path = os.path.join(os.path.dirname(raw_path) or ".", AGG_ALIAS)
@@ -508,17 +458,14 @@ def main():
         df_raw["datetime"] = pd.to_datetime(df_raw["datetime"], errors="coerce", utc=True)
         df_raw.sort_values("datetime", inplace=True)
 
-        save_atomic(df_raw, raw_path)  # hedef konuma yaz
+        save_atomic(df_raw, raw_path)  # << artifact adı
         print(f"✅ Ham (5y/chunk) kaydedildi: {os.path.abspath(raw_path)}")
 
-        # Uyumluluk kopyaları
+        # Uyumluluk kopyaları (workflow eski adları arıyor olabilir)
         try:
             save_atomic(df_raw, os.path.join(SAVE_DIR, RAW_311_NAME_Y))
             save_atomic(df_raw, os.path.join(SAVE_DIR, LEGACY_311_Y))
             save_atomic(df_raw, os.path.join(SAVE_DIR, LEGACY_311))
-            save_atomic(df_raw, os.path.join(MAIN_DIR, RAW_311_NAME_Y))
-            save_atomic(df_raw, os.path.join(MAIN_DIR, LEGACY_311_Y))
-            save_atomic(df_raw, os.path.join(MAIN_DIR, LEGACY_311))
         except Exception as e:
             print(f"⚠️ Legacy kopya yazım uyarısı: {e}")
 
@@ -530,33 +477,21 @@ def main():
             pass
     else:
         print("⚠️ Ham veri boş.")
-        # Şemalı boşlar (artifact/uyumluluk)
+        # Şemalı boşlar (artifact uyumu)
         empty_raw_cols = ["id","datetime","date","time","lat","long",
                           "category","subcategory","agency_responsible","latitude","longitude","GEOID"]
-        empty_agg_cols = ["GEOID","date","hour_range","311_request_count"]
-
         for p in [RAW_311_NAME_Y, LEGACY_311_Y, LEGACY_311]:
-            df_empty_raw = pd.DataFrame(columns=empty_raw_cols)
-            save_atomic(df_empty_raw, os.path.join(SAVE_DIR, p))
-            try:
-                save_atomic(df_empty_raw, os.path.join(MAIN_DIR, p))
-            except Exception as e:
-                print(f"⚠️ main/ ham boş yazılamadı: {e}")
-
+            save_atomic(pd.DataFrame(columns=empty_raw_cols), os.path.join(SAVE_DIR, p))
+        empty_agg_cols = ["GEOID","date","hour_range","311_request_count"]
         for p in [AGG_BASENAME, AGG_ALIAS]:
             if p:
-                df_empty_agg = pd.DataFrame(columns=empty_agg_cols)
-                save_atomic(df_empty_agg, os.path.join(SAVE_DIR, p))
-                try:
-                    save_atomic(df_empty_agg, os.path.join(MAIN_DIR, p))
-                except Exception as e:
-                    print(f"⚠️ main/ özet boş yazılamadı: {e}")
-
-        print("ℹ️ Şemalı boş 311 ham/özet dosyaları SAVE_DIR ve MAIN_DIR'e yazıldı.")
+                save_atomic(pd.DataFrame(columns=empty_agg_cols), os.path.join(SAVE_DIR, p))
+        print("ℹ️ Şemalı boş 311 ham/özet dosyaları yazıldı.")
 
     # 5) 3 SAATLİK ÖZET (sf_311_last_5_years.csv + alias)
     if not df_raw.empty:
         df_ok = df_raw.dropna(subset=["date"]).copy()
+        # GEOID yoksa özet üretilemez; uyarı ver, boş şemalı özet yaz
         if "GEOID" not in df_ok.columns or df_ok["GEOID"].isna().all():
             print("⚠️ GEOID üretilemedi; özet boş yazılacak.")
             grouped = pd.DataFrame(columns=["GEOID","date","hour_range","311_request_count"])
@@ -576,12 +511,6 @@ def main():
         save_atomic(grouped, agg_path)
         if AGG_ALIAS and AGG_ALIAS != AGG_BASENAME:
             save_atomic(grouped, agg_alias_path)
-        try:
-            save_atomic(grouped, os.path.join(MAIN_DIR, AGG_BASENAME))
-            if AGG_ALIAS and AGG_ALIAS != AGG_BASENAME:
-                save_atomic(grouped, os.path.join(MAIN_DIR, AGG_ALIAS))
-        except Exception as e:
-            print(f"⚠️ main/ özet kopyası uyarısı: {e}")
         print(f"📁 Özet yazıldı: {os.path.abspath(agg_path)}")
         try:
             print(grouped.head(5).to_string(index=False))
@@ -590,7 +519,7 @@ def main():
     else:
         print("ℹ️ Özet adımı skip (ham veri yok).")
 
-    # 6) 311 ÖZET + SUÇ (sf_crime_01.csv) → sf_crime_02.csv
+    # 6) 311 ÖZET + SUÇ (sf_crime_01.csv) → sf_crime_02.csv (fallback’lı)
     try:
         crime_01_path = os.path.join(SAVE_DIR, "sf_crime_01.csv")
         if not os.path.exists(crime_01_path):
@@ -600,8 +529,14 @@ def main():
         print("🔗 sf_crime_01 ile birleştiriliyor...")
         crime = pd.read_csv(crime_01_path, dtype={"GEOID": str}, low_memory=False)
 
-        # Özet dosyası adaylarından en güncelini seç
-        summary_path = pick_freshest(all_paths([AGG_BASENAME, AGG_ALIAS, "sf_311_last_5_years_3h.csv", "sf_311_last_5_years.csv"]))
+        # Özet dosyası adayları
+        summary_path = None
+        for name in (AGG_BASENAME, AGG_ALIAS, "sf_311_last_5_years_3h.csv", "sf_311_last_5_years.csv"):
+            cand = os.path.join(SAVE_DIR, name)
+            if os.path.exists(cand):
+                summary_path = cand
+                break
+
         if summary_path is None:
             print("⚠️ 311 özet bulunamadı → PASSTHROUGH: 311_request_count=0")
             crime["311_request_count"] = 0
