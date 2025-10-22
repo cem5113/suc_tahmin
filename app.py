@@ -225,7 +225,7 @@ SF911_AGENCY_FILTER = pick_url("SF911_AGENCY_FILTER", "agency like '%Police%'")
 SF911_API_TOKEN     = pick_url("SF911_API_TOKEN", "")
 
 # Çocuk süreçlerin de aynı değerleri görmesi için ENV
-os.environ["CRIME_CSV_URL"] = CRIME_CSV_LATEST
+os.environ["CRIME_CSV_URL"] = CRIME_CSV_URL
 os.environ["RAW_911_URL"]   = RAW_911_URL
 os.environ["SF311_URL"]     = SF311_URL
 os.environ["GEOID_LEN"]     = os.environ.get("GEOID_LEN", "11")
