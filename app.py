@@ -1101,8 +1101,8 @@ def convert_csv_dir_to_parquet(
 # -----------------------------------------------------------------------------
 DOWNLOADS = {
     "Suç Taban CSV (Release latest)": {
-        "url": CRIME_CSV_LATEST,
-        "path": str(DATA_DIR / "sf_crime_y.csv"),
+        "url": "https://raw.githubusercontent.com/cem5113/crime_prediction_data/main/sf_crime.csv",
+        "path": str(DATA_DIR / "sf_crime.csv"),
     },
     "Tahmin Grid Verisi (GEOID × Zaman + Y_label)": {
         "url": "https://raw.githubusercontent.com/cem5113/crime_prediction_data/main/sf_crime_grid_full_labeled.csv",
