@@ -56,9 +56,8 @@ env:
   CENSUS_GEO_LEVEL: ${{ vars.CENSUS_GEO_LEVEL || 'auto' }}
   PIPELINE_VARIANT: ${{ github.event.inputs.variant || vars.PIPELINE_VARIANT || 'fr' }}
 
-  # >>> FR çıktılarını saklama modu (schedule tetiklerinde de çalışsın)
+  # FR çıktılarını saklama modu (schedule tetiklerinde de çalışsın)
   PERSIST_MODE: ${{ github.event.inputs.persist || 'artifact' }}
-  # <<<
 
 jobs:
   run:
