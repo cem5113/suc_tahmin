@@ -259,24 +259,75 @@ jobs:
           FR_OUT_PATH: fr_crime.csv
           FR_MIRROR_DIR: crime_prediction_data_pre
         run: |
-          set -e
+          set -euo pipefail
           echo "➡️ fr_crime.csv üretiliyor..."
+          echo "SRC=${FR_SRC_PATH} | OUT=${FR_OUT_PATH} | MIR=${FR_MIRROR_DIR}"
+      
+          # 1) Varsa önce update_crime_fr.py'yi çalıştır; non-zero dönerse uyarı ver ve fallback'a geç
           if [ -f "update_crime_fr.py" ]; then
-            python -u update_crime_fr.py
-          else
-            python - <<'PY'
-            import pandas as pd, os, shutil
-            from pathlib import Path
-            src = Path(os.getenv("FR_SRC_PATH","sf_full_labeled.csv"))
-            if not src.exists(): raise SystemExit(f"❌ Kaynak bulunamadı: {src}")
-            out = Path(os.getenv("FR_OUT_PATH","fr_crime.csv"))
-            mir = Path(os.getenv("FR_MIRROR_DIR","crime_prediction_data_pre"))
-            df = pd.read_csv(src, low_memory=False); df["GEOID"]=df["GEOID"].astype(str).str.zfill(11)
-            df.to_csv(out, index=False); mir.mkdir(exist_ok=True); shutil.copy2(out, mir/out.name)
-            print(f"✅ Kaydedildi: {out} ({len(df):,} satır)")
-            PY
+            if ! python -u update_crime_fr.py; then
+              echo "⚠️ update_crime_fr.py non-zero döndü; fallback akışına geçiliyor."
+            fi
           fi
-          head -n 5 fr_crime.csv || true
+      
+          # 2) Çıktı üretilmemişse veya dosya boşsa: güvenli fallback
+          if [ ! -s "${FR_OUT_PATH}" ]; then
+            python - <<'PY'
+      import os, shutil
+      from pathlib import Path
+      import pandas as pd
+      
+      src = Path(os.getenv("FR_SRC_PATH", "sf_crime_grid_full_labeled.csv"))
+      out = Path(os.getenv("FR_OUT_PATH", "fr_crime.csv"))
+      mir = Path(os.getenv("FR_MIRROR_DIR", "crime_prediction_data_pre"))
+      
+      try:
+          if not src.exists():
+              print(f"❌ Kaynak bulunamadı: {src} — FR üretimi atlanıyor (pipeline devam).")
+          else:
+              df = pd.read_csv(src, low_memory=False)
+              if df.empty:
+                  print("❌ Kaynak boş görünüyor — FR üretimi atlanıyor (pipeline devam).")
+              else:
+                  if "GEOID" in df.columns:
+                      df["GEOID"] = df["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).str.zfill(11)
+                  out.parent.mkdir(parents=True, exist_ok=True)
+                  df.to_csv(out, index=False)
+                  mir.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(out, mir/out.name)
+                  print(f"✅ Kaydedildi: {out} ({len(df):,} satır)")
+                  print(f"📦 Mirror kopya: {mir/out.name}")
+      except Exception as e:
+          # Fallback'te dahi hata olursa pipeline'ı düşürmeyelim
+          print(f"⚠️ Fallback sırasında hata: {e} — pipeline devam ediyor.")
+      PY
+          fi
+      
+          # 3) Hızlı ön izleme ve Y_label yüzdeleri (varsa)
+          if [ -f "${FR_OUT_PATH}" ]; then
+            echo "---- ${FR_OUT_PATH} (head) ----"
+            head -n 5 "${FR_OUT_PATH}" || true
+            python - <<'PY'
+      import pandas as pd
+      from pathlib import Path
+      p = Path("fr_crime.csv")
+      try:
+          if p.exists():
+              # Y_label yüzdesi (varsa)
+              try:
+                  vc = pd.read_csv(p, usecols=["Y_label"], low_memory=False)["Y_label"] \
+                          .value_counts(normalize=True).mul(100).round(2)
+                  print("\n📊 Y_label oranları (%):")
+                  print(vc.to_string())
+              except Exception as e:
+                  print(f"ℹ️ Y_label dağılımı hesaplanamadı: {e}")
+      except Exception as e:
+          print(f"ℹ️ Özet basılamadı: {e}")
+      PY
+          else
+            echo "ℹ️ ${FR_OUT_PATH} oluşturulamadı; pipeline devam ediyor."
+          fi
+
       
       # =========================
       # 02) 911 • SF & FR (head 5 + fallback)
