@@ -18,12 +18,65 @@ def log(msg: str) -> None:
     """Basit stdout logger."""
     print(msg, file=sys.stdout, flush=True)
 
+def _maybe_extract_from_intersection_point(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    intersection_point kolonundan latitude/longitude türetir (yoksa).
+    GeoJSON string/dict veya "lon, lat" string formatlarını destekler.
+    """
+    if "intersection_point" not in df.columns:
+        return df
+
+    # Eğer zaten latitude/longitude var ve doluysa dokunma
+    has_lat = "latitude" in df.columns and df["latitude"].notna().any()
+    has_lon = "longitude" in df.columns and df["longitude"].notna().any()
+    if has_lat and has_lon:
+        return df
+
+    def _lon(v):
+        # dict {coordinates:[lon,lat]} veya "lon, lat" string
+        try:
+            if isinstance(v, dict) and "coordinates" in v:
+                return float(v["coordinates"][0])
+            if isinstance(v, str):
+                m = pd.Series(v).str.extract(r"([-+]?\d+\.?\d*)\s*,\s*([-+]?\d+\.?\d*)", expand=True)
+                if not m.empty and not m.isna().any(axis=None):
+                    return float(m.iat[0, 0])
+        except Exception:
+            pass
+        return None
+
+    def _lat(v):
+        try:
+            if isinstance(v, dict) and "coordinates" in v:
+                return float(v["coordinates"][1])
+            if isinstance(v, str):
+                m = pd.Series(v).str.extract(r"([-+]?\d+\.?\d*)\s*,\s*([-+]?\d+\.?\d*)", expand=True)
+                if not m.empty and not m.isna().any(axis=None):
+                    return float(m.iat[0, 1])
+        except Exception:
+            pass
+        return None
+
+    df = df.copy()
+    if "longitude" not in df.columns:
+        df["longitude"] = df["intersection_point"].apply(_lon)
+    if "latitude" not in df.columns:
+        df["latitude"]  = df["intersection_point"].apply(_lat)
+    return df
+
 
 def _pick_lat_lon(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
-    lat = next((c for c in ["latitude", "lat", "y", "centroid_lat", "_lat_"] if c in df.columns), None)
-    lon = next((c for c in ["longitude", "long", "lon", "x", "centroid_lon", "_lon_"] if c in df.columns), None)
-    return lat, lon
+    # Kolon adlarını küçük harfe indirip orijinale map’liyoruz (case-insensitive arama)
+    cols_lower = {c.lower(): c for c in df.columns}
 
+    # Yaygın alias’lar (lng/long/lon; y/x; centroid_*; vb.)
+    lat_aliases = ["latitude", "lat", "y", "centroid_lat", "_lat_"]
+    lon_aliases = ["longitude", "lon", "long", "lng", "x", "centroid_lon", "_lon_"]
+
+    lat = next((cols_lower[a] for a in lat_aliases if a in cols_lower), None)
+    lon = next((cols_lower[a] for a in lon_aliases if a in cols_lower), None)
+
+    return lat, lon
 
 def _ensure_point_gdf(df: pd.DataFrame, lat_col: str, lon_col: str) -> gpd.GeoDataFrame:
     d = df.copy()
@@ -151,6 +204,8 @@ def _load_crime_points() -> tuple[pd.DataFrame, gpd.GeoDataFrame, str, str]:
 
         lat_c, lon_c = _pick_lat_lon(df)
         if not lat_c or not lon_c:
+            df = _maybe_extract_from_intersection_point(df)
+            lat_c, lon_c = _pick_lat_lon(df)
             log(f"⚠️ {p.name}: lat/lon yok, atlandı.")
             continue
 
@@ -194,6 +249,7 @@ def main() -> None:
     for p in SF911_CANDIDATES:
         if p.exists():
             df = pd.read_csv(p, low_memory=False)
+            df = _maybe_extract_from_intersection_point(df)
             lat911, lon911 = _pick_lat_lon(df)
             if lat911 and lon911:
                 src911 = df
