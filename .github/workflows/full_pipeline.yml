@@ -920,8 +920,12 @@ jobs:
       
           if wx_dt_col:
 
-      # 10) SF: neighbors ile 07 → 08 (scripts/make_neighbors.py)
-      - name: 10) SF komşuluk → sf_crime_08.csv
+      # =========================
+      # 10) Neighbors — SF & FR: en zengin CSV'lerle devam
+      # =========================
+      
+      # SF: sf_crime_07.csv  →  sf_crime_08.csv
+      - name: 10) Neighbors • SF: 07 → 08 (head)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -930,151 +934,248 @@ jobs:
           SRC="${CRIME_DATA_DIR}/sf_crime_07.csv"
           DST="${CRIME_DATA_DIR}/sf_crime_08.csv"
           test -f "$SRC" || { echo "❌ Girdi eksik: $SRC"; exit 2; }
-
+      
+          echo "---- SF input (head) ----"; head -n 5 "$SRC" || true
           echo "▶︎ SF komşuluk zenginleştirme başlıyor: $SRC → $DST"
+      
           if [ -f "scripts/make_neighbors.py" ]; then
-            # Argümanlı çağrı (varsa), yoksa argümansız fallback
             python -u scripts/make_neighbors.py --in "$SRC" --out "$DST" || python -u scripts/make_neighbors.py
           elif [ -f "make_neigbors.py" ]; then
             python -u make_neigbors.py --in "$SRC" --out "$DST" || python -u make_neigbors.py
           else
             echo "❌ scripts/make_neighbors.py bulunamadı"; exit 2
           fi
-
+      
           test -f "$DST" || { echo "❌ Beklenen çıktı yok: $DST"; exit 2; }
-          echo "---- sf_crime_08.csv (head) ----"
-          head -n 5 "$DST" || true
+          echo "---- sf_crime_08.csv (head) ----"; head -n 5 "$DST" || true
+      
+      
+      # FR: fr_crime_08.csv  →  fr_crime_09.csv
+      #     fr_crime_08 yoksa fr_crime_07.csv'den devam (fallback)
+      - name: 10) Neighbors • FR: 08/07 → 09 (head)
+        if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('scripts/make_neighbors_fr.py','make_neigbors_fr.py','scripts/make_neighbors.py','make_neigbors.py') != '') }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+          # En zengin FR girdisini seç: önce fr_crime_08 (weather'lı), yoksa fr_crime_07
+          SRC_08="${CRIME_DATA_DIR}/fr_crime_08.csv"
+          SRC_07="${CRIME_DATA_DIR}/fr_crime_07.csv"
+          if   [ -f "$SRC_08" ]; then SRC="$SRC_08";
+          elif [ -f "$SRC_07" ]; then SRC="$SRC_07";
+          else echo "↪️ FR girdi bulunamadı (ne $SRC_08 ne de $SRC_07 mevcut). Adım atlandı."; exit 0; fi
+      
+          DST="${CRIME_DATA_DIR}/fr_crime_09.csv"
+          echo "---- FR input (head) ----"; head -n 5 "$SRC" || true
+          echo "▶︎ FR komşuluk zenginleştirme: $SRC → $DST"
+      
+          # FR'ye özgü script varsa onu kullan; yoksa generic komşuluk scriptine düş
+          if   [ -f "scripts/make_neighbors_fr.py" ]; then PY="scripts/make_neighbors_fr.py";
+          elif [ -f "make_neigbors_fr.py" ]; then PY="make_neigbors_fr.py";
+          elif [ -f "scripts/make_neighbors.py" ]; then PY="scripts/make_neighbors.py";
+          elif [ -f "make_neigbors.py" ]; then PY="make_neigbors.py";
+          else echo "❌ FR neighbors scripti bulunamadı"; exit 2; fi
+      
+          python -u "$PY" --in "$SRC" --out "$DST" || python -u "$PY"
+      
+          test -f "$DST" || { echo "❌ Beklenen çıktı yok: $DST"; exit 2; }
+          echo "---- fr_crime_09.csv (head) ----"; head -n 5 "$DST" || true
 
-      # 10.2) SF Feature Analysis (EDA only) — unified_feature_analysis.py
-      - name: 10.2) SF Feature Analysis (EDA only)
+
+      # =========================
+      # 11) Feature Analysis (EDA) — SF önce, sonra FR (tek başlık)
+      # =========================
+      
+      - name: 11) EDA • SF: unified_feature_analysis → outputs_feature_analysis/sf_08 (heads)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
           SF_IN="${CRIME_DATA_DIR}/sf_crime_08.csv"
           OUTDIR="outputs_feature_analysis/sf_08"
+      
           if [ -f "${SF_IN}" ]; then
+            echo "---- SF EDA input (head) ----"; head -n 5 "${SF_IN}" || true
             echo "▶︎ SF EDA başlıyor: ${SF_IN} → ${OUTDIR}"
-            python -u unified_feature_analysis.py \
-              --csv "${SF_IN}" \
-              --outdir "${OUTDIR}"
+            if   [ -f "unified_feature_analysis.py" ]; then PY="unified_feature_analysis.py";
+            elif [ -f "scripts/unified_feature_analysis.py" ]; then PY="scripts/unified_feature_analysis.py";
+            else echo "❌ unified_feature_analysis.py bulunamadı"; exit 2; fi
+      
+            python -u "$PY" --csv "${SF_IN}" --outdir "${OUTDIR}"
             echo "✅ SF EDA tamamlandı."
+      
+            # Çıktıları göster
+            if [ -d "${OUTDIR}" ]; then
+              echo "---- SF EDA output list ----"
+              find "${OUTDIR}" -maxdepth 2 -type f | sort | sed -e 's|^|  • |'
+              # varsa ilk CSV'nin head'i
+              CSV="$(find "${OUTDIR}" -type f -name '*.csv' | head -n 1 || true)"
+              if [ -n "$CSV" ]; then
+                echo "---- $(basename "$CSV") (head) ----"; head -n 5 "$CSV" || true
+              fi
+            fi
           else
             echo "↪️ ${SF_IN} bulunamadı, SF EDA atlandı."
           fi
-
-      # 10.3) FR: neighbors ile 08 → 09 (scripts/make_neighbors_fr.py)
-      - name: 10.1) FR komşuluk → fr_crime_09.csv
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
+      
+      - name: 11) EDA • FR: unified_feature_analysis → outputs_feature_analysis/fr_09 (heads)
+        if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('unified_feature_analysis.py','scripts/unified_feature_analysis.py') != '') }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-        run: |
-          set -euo pipefail
-          SRC="${CRIME_DATA_DIR}/fr_crime_08.csv"
-          DST="${CRIME_DATA_DIR}/fr_crime_09.csv"
-
-          if [ -f "$SRC" ]; then
-            echo "▶︎ FR komşuluk zenginleştirme başlıyor: $SRC → $DST"
-            if [ -f "scripts/make_neighbors_fr.py" ]; then
-              python -u scripts/make_neighbors_fr.py --in "$SRC" --out "$DST" || python -u scripts/make_neighbors_fr.py
-            elif [ -f "make_neigbors_fr.py" ]; then
-              python -u make_neigbors_fr.py --in "$SRC" --out "$DST" || python -u make_neigbors_fr.py
-            else
-              echo "❌ scripts/make_neighbors_fr.py bulunamadı"; exit 2
-            fi
-            test -f "$DST" || { echo "❌ Beklenen çıktı yok: $DST"; exit 2; }
-            echo "---- fr_crime_09.csv (head) ----"
-            head -n 5 "$DST" || true
-          else
-            echo "↪️ FR girdi yok ($SRC). Bu adım atlandı."
-          fi
-
-      # 10.4) FR Feature Analysis (EDA only) — unified_feature_analysis.py
-      - name: 10.2) FR Feature Analysis (EDA only)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -euo pipefail
           FR_IN="${CRIME_DATA_DIR}/fr_crime_09.csv"
           OUTDIR="outputs_feature_analysis/fr_09"
+      
           if [ -f "${FR_IN}" ]; then
+            echo "---- FR EDA input (head) ----"; head -n 5 "${FR_IN}" || true
             echo "▶︎ FR EDA başlıyor: ${FR_IN} → ${OUTDIR}"
-            python -u unified_feature_analysis.py \
-              --csv "${FR_IN}" \
-              --outdir "${OUTDIR}"
+            if   [ -f "unified_feature_analysis.py" ]; then PY="unified_feature_analysis.py";
+            elif [ -f "scripts/unified_feature_analysis.py" ]; then PY="scripts/unified_feature_analysis.py";
+            else echo "❌ unified_feature_analysis.py bulunamadı"; exit 2; fi
+      
+            python -u "$PY" --csv "${FR_IN}" --outdir "${OUTDIR}"
             echo "✅ FR EDA tamamlandı."
+      
+            # Çıktıları göster
+            if [ -d "${OUTDIR}" ]; then
+              echo "---- FR EDA output list ----"
+              find "${OUTDIR}" -maxdepth 2 -type f | sort | sed -e 's|^|  • |'
+              CSV="$(find "${OUTDIR}" -type f -name '*.csv' | head -n 1 || true)"
+              if [ -n "$CSV" ]; then
+                echo "---- $(basename "$CSV") (head) ----"; head -n 5 "$CSV" || true
+              fi
+            fi
           else
             echo "↪️ ${FR_IN} bulunamadı, FR EDA atlandı."
           fi
 
-      # 11) Kalite kontrol — SF(08) / FR(09)
-      - name: "11) Kalite kontrol (SF: 08, FR: 09)"
+      # =========================
+      # 12) QC + Quick Preview — SF(08) önce, FR(09) sonra (tek başlık)
+      # =========================
+      - name: 12) QC & Preview • SF(08) + FR(09)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
       
-          # SF kontrol: sf_crime_08.csv
-          SF="${CRIME_DATA_DIR}/sf_crime_08.csv"
-          if [ -f "$SF" ]; then
-            echo "✅ SF Var: $SF  | boyut=$(stat -c%s "$SF" 2>/dev/null || stat -f%z "$SF") byte"
-            echo "---- sf_crime_08.csv (head) ----"
-            head -n 3 "$SF" || true
-          else
-            echo "ℹ️ SF Yok: $SF"
-          fi
+          bytes() {
+            # Linux: stat -c%s, macOS: stat -f%z
+            stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || echo "?"
+          }
       
-          # FR kontrol: fr_crime_09.csv
-          FR="${CRIME_DATA_DIR}/fr_crime_09.csv"
-          if [ -f "$FR" ]; then
-            echo "✅ FR Var: $FR  | boyut=$(stat -c%s "$FR" 2>/dev/null || stat -f%z "$FR") byte"
-            echo "---- fr_crime_09.csv (head) ----"
-            head -n 3 "$FR" || true
-          else
-            echo "ℹ️ FR Yok: $FR"
-          fi
+          preview_csv() {
+            local FILE="$1"
+            local LABEL="$2"
+            if [ -f "$FILE" ]; then
+              local SIZE; SIZE=$(bytes "$FILE")
+              local LINES; LINES=$(wc -l < "$FILE" 2>/dev/null || echo "?")
+              echo "✅ ${LABEL} Var: $FILE | boyut=${SIZE} byte | satır≈${LINES}"
+              # Python ile kolon sayısı + ilk birkaç kolon adını göster
+              python - <<PY || true
+      import pandas as pd, os, json
+      p = os.environ.get("TARGET_FILE", "")
+      try:
+          df = pd.read_csv(p, nrows=1000, low_memory=False)  # hızlıca shape için 1000 satır yeterli
+          cols = list(df.columns)
+          print(f"Kolon sayısı: {len(cols)} | İlk kolonlar: {cols[:min(8,len(cols))]}")
+      except Exception as e:
+          print(f"[info] kolon bilgisi okunamadı: {e}")
+      PY
+              echo "---- $(basename "$FILE") (head 5) ----"
+              head -n 5 "$FILE" || true
+            else
+              echo "ℹ️ ${LABEL} Yok: $FILE"
+            fi
+          }
+      
+          # SF
+          export TARGET_FILE="${CRIME_DATA_DIR}/sf_crime_08.csv"
+          preview_csv "${CRIME_DATA_DIR}/sf_crime_08.csv" "SF(08)"
+      
+          echo
+      
+          # FR
+          export TARGET_FILE="${CRIME_DATA_DIR}/fr_crime_09.csv"
+          preview_csv "${CRIME_DATA_DIR}/fr_crime_09.csv" "FR(09)"
 
-      # 12) (Önizleme) kritik CSV’ler
-      - name: 12) Hızlı önizleme (09)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          echo "---- sf_crime_08.csv (head) ----"; head -n 5 "${CRIME_DATA_DIR}/sf_crime_08.csv" || true
-          echo "---- fr_crime_09.csv (head) ----"; head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
-
-      # 13) Paket hazırlığı — SF(08) & FR(09) ve ana CSV'ler
-      - name: 12.9) Paketle (paquet.zip)
+      # =========================
+      # 13) Package — SF(08) & FR(09) + ana CSV'ler (head'lerle)
+      # =========================
+      - name: 13) Package • Build paquet (zip) + preview
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
-          PKG_DIR="_pkg"; mkdir -p "$PKG_DIR"
       
-          # Seçili CSV'leri topla: sf_crime.csv, sf_crime_L*.csv, sf_crime_08.csv, fr_crime_09.csv
-          cp -f "${CRIME_DATA_DIR}/sf_crime.csv"            "$PKG_DIR/"  2>/dev/null || true
-          cp -f ${CRIME_DATA_DIR}/sf_crime_L*.csv           "$PKG_DIR/"  2>/dev/null || true
-          cp -f "${CRIME_DATA_DIR}/sf_crime_08.csv"         "$PKG_DIR/"  2>/dev/null || true
-          cp -f "${CRIME_DATA_DIR}/fr_crime_09.csv"         "$PKG_DIR/"  2>/dev/null || true
+          PKG_DIR="_pkg"
+          mkdir -p "$PKG_DIR"
       
-          # Bilgi amaçlı: hangi dosyalar eklendi
-          echo "----- Paket içeriği (CSV'ler) -----"
-          ls -lah "$PKG_DIR" || true
+          # Kopyala & önizleme yardımcıları
+          bytes() { stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || echo "?"; }
+          add_file() {
+            local SRC="$1"
+            local DSTDIR="$2"
+            if [ -f "$SRC" ]; then
+              cp -f "$SRC" "$DSTDIR/"
+              local SIZE; SIZE=$(bytes "$SRC")
+              echo "✅ Eklendi: $SRC  | boyut=${SIZE} byte"
+              echo "---- $(basename "$SRC") (head 5) ----"
+              head -n 5 "$SRC" || true
+            else
+              echo "ℹ️ Dosya yok, atlandı: $SRC"
+            fi
+          }
       
-          # FR EDA çıktı klasörünü de paket yanına kopyala (artifact'ta dursun)
+          echo "▶︎ Paketleme başlıyor…"
+      
+          # Ana CSV'ler (SF & FR en zenginler)
+          add_file "${CRIME_DATA_DIR}/sf_crime.csv"        "$PKG_DIR"
+          add_file "${CRIME_DATA_DIR}/sf_crime_08.csv"     "$PKG_DIR"   # SF neighbors sonrası
+          add_file "${CRIME_DATA_DIR}/fr_crime_09.csv"     "$PKG_DIR"   # FR neighbors + (varsa) weather sonrası
+          # Ek yararlı çıktılar
+          add_file "${CRIME_DATA_DIR}/fr_crime_08.csv"     "$PKG_DIR"   # FR weather merge sonrası (opsiyonel)
+          add_file "${CRIME_DATA_DIR}/sf_weather_5years.csv" "$PKG_DIR" # Weather arşivi (bilgi amaçlı)
+      
+          # GEOID-Y_label özetleri (wildcard)
+          # shellcheck disable=SC2086
+          cp -f ${CRIME_DATA_DIR}/sf_crime_L*.csv "$PKG_DIR/" 2>/dev/null || true
+          if ls ${CRIME_DATA_DIR}/sf_crime_L*.csv >/dev/null 2>&1; then
+            echo "✅ Eklendi: sf_crime_L*.csv seti"
+            for f in ${CRIME_DATA_DIR}/sf_crime_L*.csv; do
+              [ -f "$f" ] || continue
+              echo "---- $(basename "$f") (head 5) ----"
+              head -n 5 "$f" || true
+            done
+          fi
+      
+          # FR EDA çıktıları (varsa)
           if [ -d "outputs_feature_analysis/fr_09" ]; then
             mkdir -p "$PKG_DIR/fr_eda"
             cp -rf outputs_feature_analysis/fr_09/* "$PKG_DIR/fr_eda/" || true
+            echo "✅ Eklendi: outputs_feature_analysis/fr_09 → _pkg/fr_eda/"
+          else
+            echo "ℹ️ FR EDA klasörü yok: outputs_feature_analysis/fr_09"
           fi
       
-          # zip oluştur (paquet)
+          echo "----- Paket içeriği (liste) -----"
+          ls -lah "$PKG_DIR" || true
+          [ -d "$PKG_DIR/fr_eda" ] && { echo "----- fr_eda/ -----"; ls -lah "$PKG_DIR/fr_eda" || true; }
+      
+          # ZIP oluştur
           ZIP_NAME="paquet_run_${GITHUB_RUN_NUMBER}.zip"
           (cd "$PKG_DIR" && zip -r "../${ZIP_NAME}" . >/dev/null || true)
-          echo "ZIP oluşturuldu: ${ZIP_NAME}"
+          echo "🎁 ZIP oluşturuldu: ${ZIP_NAME}"-
+
+      # =========================
+      # 14) Persist — artifact / commit / release
+      # =========================
       
-          # Geçici dosyalar silinmez; aynı job içinde tekrar kullanılabilir
-      
-      # 14) ÇIKTILARIN SAKLANMASI (persist seçimine göre)
-      # 14a) Artifact: paket zip + FR EDA + ilgili CSV’ler
-      - name: 13a) Upload artifacts (paquet + FR EDA + CSVs)
+      # 14a) Artifact: paket zip + ana CSV'ler + FR EDA (opsiyonel ekler: fr_crime_08, weather)
+      - name: 14a) Upload artifacts (paquet + EDA + CSVs)
         if: ${{ steps.gate.outputs.proceed == 'true' && env.PERSIST_MODE == 'artifact' }}
         uses: actions/upload-artifact@v4
         with:
@@ -1085,30 +1186,41 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
             ${{ env.CRIME_DATA_DIR }}/fr_crime_09.csv
+            ${{ env.CRIME_DATA_DIR }}/fr_crime_08.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_weather_5years.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_L*.csv
             outputs_feature_analysis/fr_09/**
+            outputs_feature_analysis/sf_08/**
       
-      # 14b) Commit: (opsiyonel) FR EDA + CSV’ler (zip’i commit etmiyoruz)
-      - name: 13b) Commit FR outputs to repo
+      # 14b) Commit: FR çıktıları + ana CSV'ler (zip commit edilmez)
+      - name: 14b) Commit outputs to repo
         if: ${{ steps.gate.outputs.proceed == 'true' && env.PERSIST_MODE == 'commit' }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A outputs_feature_analysis/fr_09 \
-                    "${CRIME_DATA_DIR}/fr_crime_09.csv" \
-                    "${CRIME_DATA_DIR}/sf_crime.csv" \
-                    "${CRIME_DATA_DIR}/sf_crime_08.csv" \
-                    ${CRIME_DATA_DIR}/sf_crime_L*.csv 2>/dev/null || true
+      
+          # FR EDA + ana CSV'ler (opsiyoneller dahil)
+          git add -A \
+            outputs_feature_analysis/fr_09 \
+            "${CRIME_DATA_DIR}/fr_crime_09.csv" \
+            "${CRIME_DATA_DIR}/sf_crime.csv" \
+            "${CRIME_DATA_DIR}/sf_crime_08.csv" \
+            "${CRIME_DATA_DIR}/fr_crime_08.csv" \
+            "${CRIME_DATA_DIR}/sf_weather_5years.csv" \
+            ${CRIME_DATA_DIR}/sf_crime_L*.csv 2>/dev/null || true
+      
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Pipeline outputs (FR EDA + key CSVs) [run $GITHUB_RUN_NUMBER]"
+            git commit -m "Pipeline outputs (EDA + key CSVs) [run $GITHUB_RUN_NUMBER]"
             git push
           fi
       
-      # 14c) Release: istersen zip’i de yayına ekle
-      - name: 13c) Release FR/SF outputs (zip dahil)
+      # 14c) Release: zip + EDA + ana CSV'ler
+      - name: 14c) Release FR/SF outputs (zip dahil)
         if: ${{ steps.gate.outputs.proceed == 'true' && env.PERSIST_MODE == 'release' }}
         uses: softprops/action-gh-release@v2
         with:
@@ -1118,8 +1230,11 @@ jobs:
           files: |
             paquet_run_${{ github.run_number }}.zip
             outputs_feature_analysis/fr_09/**/*
+            outputs_feature_analysis/sf_08/**/*
             ${{ env.CRIME_DATA_DIR }}/fr_crime_09.csv
+            ${{ env.CRIME_DATA_DIR }}/fr_crime_08.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_L*.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_weather_5years.csv
 
