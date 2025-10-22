@@ -200,7 +200,60 @@ jobs:
           echo "🚀 Running stacking model with dataset: ${STACKING_DATASET}"
           python -u stacking_risk_pipeline_fr.py
 
-      # 📦 Tüm çıktı dosyalarını artefact olarak yükle
+      # ✅ CSV'leri Parquet'e çevir ve hem CSV hem Parquet'i tek bir ZIP'e topla
+      - name: FR 12) Convert outputs to Parquet & ZIP
+        run: |
+          set -e
+          # Parquet dönüştürme: crime_prediction_data ve outputs_feature_analysis_fr içindeki tüm CSV'ler
+          python - <<'PY'
+          import os, glob, sys, zipfile
+          from pathlib import Path
+          import pandas as pd
+
+          base = os.environ.get("CRIME_DATA_DIR","crime_prediction_data")
+          extra = "outputs_feature_analysis_fr"
+          out_zip = Path(base) / "fr_outputs_parquet.zip"
+
+          def files_in(dirpath, pattern):
+              if not os.path.isdir(dirpath): return []
+              return sorted(glob.glob(os.path.join(dirpath, pattern)))
+
+          # 1) CSV -> Parquet dönüştür
+          converted_parquets = []
+          for folder in [base, extra]:
+              for fp in files_in(folder, "*.csv"):
+                  pq_path = Path(fp).with_suffix(".parquet")
+                  try:
+                      df = pd.read_csv(fp, low_memory=False)
+                      df.to_parquet(pq_path, index=False)  # pyarrow/fastparquet
+                      print(f"→ parquet yazıldı: {pq_path}")
+                      converted_parquets.append(str(pq_path))
+                  except Exception as e:
+                      print(f"skip (csv->parquet) {fp}: {e}", file=sys.stderr)
+
+          # 2) ZIP'e hem CSV hem Parquet ekle (göreli yolu koru)
+          to_zip = set()
+          for folder in [base, extra]:
+              for patt in ("*.csv","*.parquet"):
+                  for fp in files_in(folder, patt):
+                      to_zip.add(fp)
+
+          with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              for fp in sorted(to_zip):
+                  p = Path(fp)
+                  try:
+                      # crime_prediction_data altında ise göreli yolu koru
+                      arcname = p.relative_to(base) if str(p).startswith(str(Path(base))) else p.name
+                  except Exception:
+                      arcname = p.name
+                  z.write(fp, arcname=str(arcname))
+                  print(f"+ ZIP'e eklendi: {arcname}")
+          print(f"✅ ZIP hazır: {out_zip} (toplam {len(to_zip)} dosya)")
+          PY
+
+          # Kısa kontrol
+          ls -lah "${CRIME_DATA_DIR}" | sed -n '1,200p'
+
       - name: Upload FR pipeline outputs
         uses: actions/upload-artifact@v4
         with:
@@ -209,10 +262,14 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
             ${{ env.CRIME_DATA_DIR }}/fr_crime_0*.csv
             ${{ env.CRIME_DATA_DIR }}/fr_crime_10.csv
+            ${{ env.CRIME_DATA_DIR }}/*.parquet
             outputs_feature_analysis_fr/**
+            outputs_feature_analysis_fr/*.parquet
             ${{ env.CRIME_DATA_DIR }}/neighbors.csv
             ${{ env.CRIME_DATA_DIR }}/risk_hourly*.csv
             ${{ env.CRIME_DATA_DIR }}/patrol_recs*.csv
             ${{ env.CRIME_DATA_DIR }}/metrics_*.csv
+            ${{ env.CRIME_DATA_DIR }}/fr_outputs_parquet.zip   # 👈 CSV+Parquet tek pakette
           if-no-files-found: warn
           retention-days: 14
+
