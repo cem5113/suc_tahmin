@@ -11,7 +11,7 @@ import shutil
 # Ayarlar (ENV ile özelleştirilebilir)
 # --------------------------
 EVENTS_PATH = Path(os.getenv("FR_EVENTS_PATH", "sf_crime.csv"))  # olay bazlı kaynak (suç_id içermeli)
-LABEL_PATH  = Path(os.getenv("FR_LABEL_PATH", "sf_crime_grid_full_labeled.csv"))  # grid etiket kaynağı (ya da sf_crime_L)
+LABEL_PATH  = Path(os.getenv("FR_LABEL_PATH", "sf_crime_L.csv"))  # grid etiket kaynağı (ya da sf_crime_L)
 OUT_PATH    = Path(os.getenv("FR_OUT_PATH",   "fr_crime.csv"))   # hedef: olay bazlı çıktı
 MIRROR_DIR  = Path(os.getenv("FR_MIRROR_DIR", "crime_prediction_data"))
 
