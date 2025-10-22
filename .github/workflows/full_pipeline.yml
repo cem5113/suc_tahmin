@@ -497,41 +497,6 @@ jobs:
             echo "⚠️ sf_crime_grid_full_labeled.csv bulunamadı; stacking bazı görünümleri atlayabilir."
           fi
 
-      - name: 10) sf_crime_08 üretimi (common.py)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -e
-          python - <<'PY'
-          import os
-          import pandas as pd
-          from pathlib import Path
-          from scripts.common import clean_and_save_crime_07
-
-          CRIME_DIR = os.getenv("CRIME_DATA_DIR")
-          candidates = [
-              Path(CRIME_DIR) / "sf_crime_07.csv",
-              Path("crime_prediction_data") / "sf_crime_08.csv",
-              Path("crime_data") / "sf_crime_07.csv",
-              Path("sf_crime_08.csv"),
-              Path("outputs") / "sf_crime_07.csv",
-          ]
-          src_path = next((p for p in candidates if p.exists()), None)
-          if src_path is None:
-              raise FileNotFoundError("sf_crime_07.csv not found in known locations")
-          src = str(src_path)
-          dst = str(Path(CRIME_DIR)/"sf_crime_08.csv")
-
-          clean_and_save_crime_08(src, dst)
-          print("✅ sf_crime_08 hazır →", dst)
-          try:
-              df = pd.read_csv(dst, low_memory=False)
-              with pd.option_context("display.max_columns", None, "display.width", 2000):
-                  print("📄 sf_crime_08.csv — ilk 5 satır:")
-                  print(df.head(5).to_string(index=False))
-          except Exception as e:
-              print(f"⚠️ Önizleme okunamadı: {e}")
-          PY
-
       - name: 10.5) neighbors.csv (kullan/normalize/üret + kalite kontrol)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
