@@ -160,13 +160,17 @@ jobs:
       - name: FR 10) Feature Analysis (FR → fr_crime_10.csv)
         run: |
           set -e
-          # Çalıştır: unified_feature_analysis_fr_only.py (repo kökünde veya scripts/ içindeyse yolu düzelt)
-          python -u unified_feature_analysis_fr_only.py \
+          # Çıktı klasörünü oluştur
+          mkdir -p "outputs_feature_analysis_fr"
+
+          # Çalıştır: scripts/unified_feature_analysis_fr_only.py (gerekirse yolu değiştir)
+          python -u scripts/unified_feature_analysis_fr_only.py \
             --csv "${CRIME_DATA_DIR}/fr_crime_09.csv" \
             --out_csv "${CRIME_DATA_DIR}/fr_crime_10.csv" \
-            --outdir "outputs_feature_analysis_fr" || true
+            --outdir "outputs_feature_analysis_fr"
 
-          # Hızlı göz at
+          # Hızlı kontrol
+          echo "🧠 Feature analysis completed. Checking outputs..."
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_10.csv" || true
           ls -lah "${CRIME_DATA_DIR}" || true
           ls -lah "outputs_feature_analysis_fr" || true
@@ -177,12 +181,13 @@ jobs:
           set -e
           if [ -s "${CRIME_DATA_DIR}/fr_crime_10.csv" ]; then
             echo "STACKING_DATASET=${CRIME_DATA_DIR}/fr_crime_10.csv" >> $GITHUB_ENV
-            echo "Using STACKING_DATASET=fr_crime_10.csv"
+            echo "✅ Using STACKING_DATASET=fr_crime_10.csv"
           else
             echo "STACKING_DATASET=${CRIME_DATA_DIR}/fr_crime_09.csv" >> $GITHUB_ENV
-            echo "Fallback STACKING_DATASET=fr_crime_09.csv (fr_crime_10.csv not found)"
+            echo "⚠️  Fallback STACKING_DATASET=fr_crime_09.csv (fr_crime_10.csv not found)"
           fi
 
+      # 🔁 Stacking modelini feature analysis çıktısıyla yeniden çalıştır
       - name: FR 11) Stacking
         env:
           STACKING_DATASET: ${{ env.STACKING_DATASET }}
@@ -192,9 +197,10 @@ jobs:
           FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
         run: |
           set -e
-          echo "STACKING_DATASET=${STACKING_DATASET}"
-          python -u stacking_risk_pipeline_fr.py || true
+          echo "🚀 Running stacking model with dataset: ${STACKING_DATASET}"
+          python -u stacking_risk_pipeline_fr.py
 
+      # 📦 Tüm çıktı dosyalarını artefact olarak yükle
       - name: Upload FR pipeline outputs
         uses: actions/upload-artifact@v4
         with:
