@@ -193,8 +193,7 @@ jobs:
 
       # ---- PIPELINE ----
       # Not: SF = GEOID bazlı, FR = event/suç id bazlı. Önce SF, ardından FR.
-      
-      - name: 01A) SF: Suç tabanı & grid → sf_crime.csv (+gridler)
+      - name: "01A) SF: Suç tabanı & grid → sf_crime.csv (+gridler)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           Y_CSV_NAME: ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
@@ -202,13 +201,27 @@ jobs:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
-          # Her zaman SF scriptini çalıştır (FR varyantı olsa bile önce SF hazırlanır)
+          echo "▶ SF base + grid başlıyor..."
+      
           PY="update_crime.py"
           if [ ! -f "$PY" ]; then
             echo "❌ $PY bulunamadı"; exit 2
           fi
           python -u "$PY"
       
+          # Kısa özet
+          if [ -f "${CRIME_DATA_DIR}/sf_crime.csv" ]; then
+            echo "---- sf_crime.csv (head) ----"
+            head -n 5 "${CRIME_DATA_DIR}/sf_crime.csv" || true
+          fi
+          if [ -f "sf_crime_grid_full_labeled.csv" ]; then
+            echo "---- sf_crime_grid_full_labeled.csv (head) ----"
+            head -n 5 "sf_crime_grid_full_labeled.csv" || true
+          elif [ -f "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv" ]; then
+            echo "---- sf_crime_grid_full_labeled.csv (head) ----"
+            head -n 5 "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv" || true
+          fi
+          
           # Üretilen başlıca dosyaların ilk 5 satırını göster
           SF="${CRIME_DATA_DIR}/sf_crime.csv"
           if [ -f "$SF" ]; then
