@@ -507,7 +507,7 @@ jobs:
           from pathlib import Path
           from scripts.common import clean_and_save_crime_07
 
-          CRIME_DIR = os.getenv("CRIME_DATA_DIR","crime_prediction_data")
+          CRIME_DIR = os.getenv("CRIME_DATA_DIR")
           candidates = [
               Path(CRIME_DIR) / "sf_crime_07.csv",
               Path("crime_prediction_data") / "sf_crime_08.csv",
@@ -636,7 +636,7 @@ jobs:
           except Exception:
               gpd = None
 
-          CRIME_DIR  = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
+          CRIME_DIR = Path("crime_prediction_data")
           GEOID_LEN  = int(os.environ.get("GEOID_LEN","11"))
           STRATEGY   = os.environ.get("NEIGHBOR_STRATEGY","queen").lower()
           MIN_DEG    = int(os.environ.get("MIN_NEIGHBOR_DEG","3"))
