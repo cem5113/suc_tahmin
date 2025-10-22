@@ -654,48 +654,48 @@ jobs:
                   elif [ -f "update_bus_fr.py" ]; then PY="update_bus_fr.py"; fi
                 fi
                 python -u "$PY"
-
-# =========================
-# 05) BUS — SF önce, sonra FR (tek başlık)
-# =========================
-
-- name: 05) Bus • SF: update_bus → sf_crime_04.csv (head)
-  if: ${{ steps.gate.outputs.proceed == 'true' }}
-  env:
-    CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-  run: |
-    set -euo pipefail
-    # SF hattı: sadece SF scriptlerini dene
-    if   [ -f "update_bus.py" ]; then PY="update_bus.py";
-    elif [ -f "scripts/update_bus.py" ]; then PY="scripts/update_bus.py";
-    else echo "❌ SF bus scripti bulunamadı"; exit 2; fi
-
-    python -u "$PY"
-
-    OUT="${CRIME_DATA_DIR}/sf_crime_04.csv"
-    if [ -f "$OUT" ]; then
-      echo "---- sf_crime_04.csv (head) ----"; head -n 5 "$OUT" || true
-    else
-      echo "ℹ️ Beklenen çıktı yok: $OUT"
-    fi
-
-- name: 05) Bus • FR: update_bus_fr → fr_crime_04.csv (head)
-  if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('**/update_bus.fr.py', '**/update_bus_fr.py', 'scripts/update_bus.fr.py', 'scripts/update_bus_fr.py') != '') }}
-  env:
-    CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-  run: |
-    set -euo pipefail
-    if   [ -f "update_bus.fr.py" ]; then PY="update_bus.fr.py";
-    elif [ -f "update_bus_fr.py" ]; then PY="update_bus_fr.py";
-    elif [ -f "scripts/update_bus.fr.py" ]; then PY="scripts/update_bus.fr.py";
-    elif [ -f "scripts/update_bus_fr.py" ]; then PY="scripts/update_bus_fr.py";
-    else echo "↪️ FR bus scripti yok, adım atlandı."; exit 0; fi
-
-    python -u "$PY"
-
-    OUT="${CRIME_DATA_DIR}/fr_crime_04.csv"
-    test -f "$OUT" || { echo "❌ fr_crime_04.csv üretilmedi"; exit 2; }
-    echo "---- fr_crime_04.csv (head) ----"; head -n 5 "$OUT" || true
+      
+      # =========================
+      # 05) BUS — SF önce, sonra FR (tek başlık)
+      # =========================
+      
+      - name: 05) Bus • SF: update_bus → sf_crime_04.csv (head)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+          # SF hattı: sadece SF scriptlerini dene
+          if   [ -f "update_bus.py" ]; then PY="update_bus.py";
+          elif [ -f "scripts/update_bus.py" ]; then PY="scripts/update_bus.py";
+          else echo "❌ SF bus scripti bulunamadı"; exit 2; fi
+      
+          python -u "$PY"
+      
+          OUT="${CRIME_DATA_DIR}/sf_crime_04.csv"
+          if [ -f "$OUT" ]; then
+            echo "---- sf_crime_04.csv (head) ----"; head -n 5 "$OUT" || true
+          else
+            echo "ℹ️ Beklenen çıktı yok: $OUT"
+          fi
+      
+      - name: 05) Bus • FR: update_bus_fr → fr_crime_04.csv (head)
+        if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('**/update_bus.fr.py', '**/update_bus_fr.py', 'scripts/update_bus.fr.py', 'scripts/update_bus_fr.py') != '') }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+          if   [ -f "update_bus.fr.py" ]; then PY="update_bus.fr.py";
+          elif [ -f "update_bus_fr.py" ]; then PY="update_bus_fr.py";
+          elif [ -f "scripts/update_bus.fr.py" ]; then PY="scripts/update_bus.fr.py";
+          elif [ -f "scripts/update_bus_fr.py" ]; then PY="scripts/update_bus_fr.py";
+          else echo "↪️ FR bus scripti yok, adım atlandı."; exit 0; fi
+      
+          python -u "$PY"
+      
+          OUT="${CRIME_DATA_DIR}/fr_crime_04.csv"
+          test -f "$OUT" || { echo "❌ fr_crime_04.csv üretilmedi"; exit 2; }
+          echo "---- fr_crime_04.csv (head) ----"; head -n 5 "$OUT" || true
 
       # =========================
       # 06) TRAIN — SF önce, sonra FR (tek başlık)
