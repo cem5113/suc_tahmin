@@ -78,8 +78,8 @@ def main():
     if events.empty:
         print(f"❌ Olay verisi boş veya yok: {EVENTS_PATH}")
         return 0
-    if "crime_id" not in events.columns:
-        print("⚠️ Uyarı: 'crime_id' kolonu bulunamadı. Yine de olay bazlı devam edilecek.")
+    if "id" not in events.columns:
+        print("⚠️ Uyarı: 'id' kolonu bulunamadı. Yine de olay bazlı devam edilecek.")
     events = normalize_event_df(events)
     base_len = len(events)
 
@@ -126,12 +126,12 @@ def main():
         print(vc.to_string())
 
     # 8) Temel kalite kontrolleri
-    if "crime_id" in out.columns:
-        dup = out["crime_id"].duplicated().sum()
+    if "id" in out.columns:
+        dup = out["id"].duplicated().sum()
         if dup:
-            print(f"⚠️ Uyarı: {dup} adet tekrar eden crime_id var.")
+            print(f"⚠️ Uyarı: {dup} adet tekrar eden id var.")
         else:
-            print("✅ crime_id benzersiz görünüyor.")
+            print("✅ id benzersiz görünüyor.")
 
     return 0
 
