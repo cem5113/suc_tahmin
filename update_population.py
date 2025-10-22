@@ -19,6 +19,7 @@ def _mode_len(series: pd.Series) -> int:
     return int(m.iloc[0]) if not m.empty else int(L.dropna().median())
 
 def _key(series: pd.Series, L: int) -> pd.Series:
+    # 11 hanelik GEOID anahtarı (leading zero korunur)
     s = _digits_only(series).str.replace(" ", "", regex=False)
     return s.str.zfill(L).str[:L]
 
@@ -48,18 +49,15 @@ def _find_population_col(df: pd.DataFrame) -> str | None:
             return c
     return None
 
-def _len_ok(s: pd.Series, L: int) -> float:
-    s = s.fillna("").astype(str)
-    return float((s.str.len() == L).mean())
-
-def _level_name(L: int) -> str:
-    return {5: "county", 11: "tract", 12: "blockgroup", 15: "block"}.get(L, f"L={L}")
-
 def _clean_to_numeric(s: pd.Series) -> pd.Series:
     return pd.to_numeric(
         s.astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
         errors="coerce"
     )
+
+def _len_ok(s: pd.Series, L: int) -> float:
+    s = s.fillna("").astype(str)
+    return float((s.str.len() == L).mean())
 
 # ----------------------------- Paths/ENV -----------------------------
 BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
@@ -77,7 +75,7 @@ if not CRIME_INPUT or not Path(CRIME_INPUT).exists():
 
 CRIME_OUTPUT = str(BASE_DIR / "sf_crime_03.csv")
 
-# Population input (yerel CSV veya artifact’tan kopyalanmış CSV)
+# Population input (yerel CSV; artifact'tan unzip ettiysen yol ver)
 POPULATION_PATH = (os.getenv("POPULATION_PATH", "") or "").strip()
 if not POPULATION_PATH:
     cand = BASE_DIR / "sf_population.csv"
@@ -93,14 +91,14 @@ else:
     if not Path(POPULATION_PATH).exists():
         raise FileNotFoundError(f"POPULATION_PATH yok: {POPULATION_PATH}")
 
-# ----------------------------- Read (string!) -----------------------------
-# Tüm kolonları string okumak GEOID'nin float'a dönüşmesini engeller
+# ----------------------------- Read (STRING) -----------------------------
+# Tüm kolonları string okuyarak GEOID'nin float'a dönüşmesini önlüyoruz
 crime = pd.read_csv(CRIME_INPUT, low_memory=False, dtype=str)
+pop   = pd.read_csv(POPULATION_PATH, low_memory=False, dtype=str)
+
 crime_geoid_col = _find_geoid_col(crime)
 if not crime_geoid_col:
     raise RuntimeError("Suç veri setinde GEOID kolonu bulunamadı.")
-
-pop = pd.read_csv(POPULATION_PATH, low_memory=False, dtype=str)
 pop_geoid_col = _find_geoid_col(pop)
 if not pop_geoid_col:
     raise RuntimeError("Nüfus CSV’de GEOID kolonu bulunamadı (örn. GEOID/geography_id).")
@@ -108,38 +106,44 @@ pop_val_col = _find_population_col(pop)
 if not pop_val_col:
     raise RuntimeError("Nüfus CSV’de nüfus değeri kolonu bulunamadı (örn. population/B01003_001E/estimate).")
 
-# ----------------------------- Force join_len=11 -----------------------------
+# ----------------------------- Force join_len=11 (TRACT) -----------------------------
 crime_len = _mode_len(_digits_only(crime[crime_geoid_col]))
 pop_len   = _mode_len(_digits_only(pop[pop_geoid_col]))
-join_len  = 11   # <— TRACT seviyesine zorunlu
-print(f"[info] crime GEO len≈{crime_len} | pop GEO len≈{pop_len} | join_len={join_len} ({_level_name(join_len)})")
+join_len  = 11
+print(f"[info] crime GEO len≈{crime_len} | pop GEO len≈{pop_len} | join_len={join_len} (tract)")
 
-# ----------------------------- Prep Population -----------------------------
+# ----------------------------- Prepare POPULATION -----------------------------
 pp = pop[[pop_geoid_col, pop_val_col]].copy()
 pp["_key"] = _key(pp[pop_geoid_col], join_len)
-
 pp["population"] = _clean_to_numeric(pp[pop_val_col]).fillna(0)
 
-# pop GEOID seviyesi > 11 ise (ör. 12, 15) → 11'e aggregate (sum)
+# Pop 12/15 hane ise → 11'e aggregate (sum)
 if pop_len > join_len:
     pp = pp.groupby("_key", as_index=False)["population"].sum()
 else:
-    # Aynı anahtarlar varsa sonuncuyu al; 11’e upsample etmiyoruz (county vb. ise bire bir eşleşme az olabilir)
     pp = pp[["_key", "population"]].drop_duplicates("_key", keep="last")
 
-# ----------------------------- Prep Crime & Merge -----------------------------
+# ----------------------------- Prepare CRIME & MERGE -----------------------------
 cc = crime.copy()
 cc["_key"] = _key(cc[crime_geoid_col], join_len)
 
-# Kalite göstergeleri
+# Final çıktıda GÖRÜNECEK GEOID'i açıkça 11 hanelik string olarak yazalım
+cc["GEOID_tract11"] = cc["_key"].astype("string")
+
+# Kalite logları
 ok_pop   = _len_ok(pp["_key"], join_len)
 ok_crime = _len_ok(cc["_key"], join_len)
 inter = len(set(cc["_key"]).intersection(set(pp["_key"])))
-print(f"🔎 GEO normalize: level={_level_name(join_len)} (L={join_len}) | pop_ok={ok_pop:.2%} | crime_ok={ok_crime:.2%}")
-print(f"🔎 Kesişim anahtar sayısı: {inter:,}")
+print(f"🔎 GEO normalize: L=11 | pop_ok={ok_pop:.2%} | crime_ok={ok_crime:.2%} | ortak_anahtar={inter:,}")
 
 out = cc.merge(pp, how="left", on="_key")
 out.drop(columns=["_key"], errors="ignore", inplace=True)
+
+# Eski GEOID sütunu float görünmesin diye: varsa kaldırıp, yerine 11 hanelik string GEOID'i koy
+if "GEOID" in out.columns and "GEOID" != "GEOID_tract11":
+    out.drop(columns=["GEOID"], errors="ignore", inplace=True)
+out.rename(columns={"GEOID_tract11": "GEOID"}, inplace=True)
+out["GEOID"] = out["GEOID"].astype("string")  # görünümde .0 yok
 
 # ----------------------------- Save & Logs -----------------------------
 Path(CRIME_OUTPUT).parent.mkdir(parents=True, exist_ok=True)
@@ -150,7 +154,7 @@ try:
     null_rate = out["population"].isna().mean()
     print(f"📊 satır: crime={len(crime):,} | pop={len(pp):,} | out={len(out):,} | population NaN oranı={null_rate:.2%}")
     with pd.option_context("display.max_columns", 60, "display.width", 2000):
-        print(out[[crime_geoid_col, "population"]].head(10).to_string(index=False))
+        print(out[["GEOID", "population"]].head(10).to_string(index=False))
 except Exception as e:
     print(f"ℹ️ Önizleme atlandı: {e}")
 
