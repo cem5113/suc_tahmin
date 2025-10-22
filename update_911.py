@@ -296,6 +296,7 @@ def ensure_geoid(df: pd.DataFrame) -> pd.DataFrame:
     if "GEOID" in df.columns and df["GEOID"].notna().any():
         return df
     if "latitude" not in df.columns or "longitude" not in df.columns:
+        # 1) intersection_point'tan türetme (varsa)
         if "intersection_point" in df.columns:
             def _lon(x):
                 if isinstance(x, dict) and "coordinates" in x:
@@ -313,11 +314,34 @@ def ensure_geoid(df: pd.DataFrame) -> pd.DataFrame:
                     if m:
                         lo, la = m.group(0).split(","); return float(la)
                 return None
-            df["longitude"], df["latitude"] = df["intersection_point"].apply(_lon), df["intersection_point"].apply(_lat)
-        for a,b in (("y","x"),("lat","long")):
-            if a in df.columns and b in df.columns and "latitude" not in df.columns:
-                df["latitude"], df["longitude"] = pd.to_numeric(df[a], errors="coerce"), pd.to_numeric(df[b], errors="coerce")
-                break
+            df["longitude"] = df.get("longitude", pd.Series(dtype="float64"))
+            df["latitude"]  = df.get("latitude",  pd.Series(dtype="float64"))
+            df.loc[df["longitude"].isna() if "longitude" in df.columns else slice(None), "longitude"] = df["intersection_point"].apply(_lon)
+            df.loc[df["latitude"].isna()  if "latitude"  in df.columns else slice(None), "latitude"]  = df["intersection_point"].apply(_lat)
+
+        # 2) Yaygın sütun adları listesi (case-insensitive)
+        lat_names = ["latitude","lat","y","Latitude","LAT","Y"]
+        lon_names = ["longitude","lon","x","Longitude","LON","X","long"]
+
+        # mevcut kolonlardan ilk eşleşeni bul
+        cols_lower = {c.lower(): c for c in df.columns}
+        found_lat = next((cols_lower[n] for n in (n.lower() for n in lat_names) if n in cols_lower), None)
+        found_lon = next((cols_lower[n] for n in (n.lower() for n in lon_names) if n in cols_lower), None)
+
+        # latitude/longitude oluştur
+        if found_lat and "latitude" not in df.columns:
+            df["latitude"] = pd.to_numeric(df[found_lat], errors="coerce")
+        if found_lon and "longitude" not in df.columns:
+            df["longitude"] = pd.to_numeric(df[found_lon], errors="coerce")
+
+        # Eski fallback: (y,x), (lat,long), (lat,lon) gibi bilinen çiftler
+        if "latitude" not in df.columns or "longitude" not in df.columns:
+            for a,b in (("y","x"),("lat","long"),("lat","lon")):
+                if a in df.columns and b in df.columns:
+                    df["latitude"]  = df.get("latitude",  pd.to_numeric(df[a], errors="coerce"))
+                    df["longitude"] = df.get("longitude", pd.to_numeric(df[b], errors="coerce"))
+                    break
+
     if "latitude" in df.columns and "longitude" in df.columns:
         min_lon, min_lat, max_lon, max_lat = SF_BBOX
         df = df[(df["latitude"].between(min_lat, max_lat)) & (df["longitude"].between(min_lon, max_lon))]
