@@ -459,7 +459,7 @@ jobs:
           elif [ -f scripts/enrich_police_gov_06_to_07.py ]; then python -u scripts/enrich_police_gov_06_to_07.py;
           else echo "Polis/Gov adımı bulunamadı"; exit 2; fi
 
-      - name: 09) Hava durumu → sf_crime_08.csv
+      - name: 09) Hava durumu — sadece update
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
@@ -470,42 +470,8 @@ jobs:
           else
             echo "❌ Weather script not found"; exit 2
           fi
-          echo "sf_crime_08.csv — ilk 5 satır:"
-          head -n 5 "${CRIME_DATA_DIR}/sf_crime_08.csv" || head -n 5 sf_crime_08.csv || true
-
-      # 09.9) sf_crime_08.csv dosyasını CRIME_DATA_DIR altına yerleştir
-      - name: Normalize sf_crime_08 into CRIME_DATA_DIR
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          DEST="${CRIME_DATA_DIR}/sf_crime_08.csv"
-          mkdir -p "${CRIME_DATA_DIR}"
-          FOUND=""
-
-          for p in \
-            "crime_prediction_data/sf_crime_08.csv" \
-            "crime_data/sf_crime_08.csv" \
-            "sf_crime_08.csv" \
-            "outputs/sf_crime_08.csv"
-          do
-            if [ -f "$p" ]; then
-              if [ -e "$DEST" ] && [ "$p" -ef "$DEST" ]; then
-                echo "ℹ️ Zaten hedefte: $DEST"
-              else
-                cp -f "$p" "$DEST"
-                echo "✅ Copied: $p → $DEST"
-              fi
-              FOUND="yes"
-              break
-            fi
-          done
-
-          if [ -z "$FOUND" ]; then
-            echo "❌ sf_crime_08.csv not found in known locations"
-            exit 2
-          fi
-          echo "---- sf_crime_08.csv (head) ----"
-          head -n 5 "$DEST" || true
+          echo "sf_weather_5years.csv — ilk 5 satır:"
+          head -n 5 "${CRIME_DATA_DIR}/sf_weather_5years.csv" || head -n 5 sf_weather_5years.csv || true
 
       - name: Normalize grid outputs (put under CRIME_DATA_DIR)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -531,7 +497,7 @@ jobs:
             echo "⚠️ sf_crime_grid_full_labeled.csv bulunamadı; stacking bazı görünümleri atlayabilir."
           fi
 
-      - name: 10) sf_crime_09 üretimi (common.py)
+      - name: 10) sf_crime_08 üretimi (common.py)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
@@ -539,28 +505,28 @@ jobs:
           import os
           import pandas as pd
           from pathlib import Path
-          from scripts.common import clean_and_save_crime_09
+          from scripts.common import clean_and_save_crime_07
 
           CRIME_DIR = os.getenv("CRIME_DATA_DIR","crime_prediction_data")
           candidates = [
-              Path(CRIME_DIR) / "sf_crime_08.csv",
+              Path(CRIME_DIR) / "sf_crime_07.csv",
               Path("crime_prediction_data") / "sf_crime_08.csv",
-              Path("crime_data") / "sf_crime_08.csv",
+              Path("crime_data") / "sf_crime_07.csv",
               Path("sf_crime_08.csv"),
-              Path("outputs") / "sf_crime_08.csv",
+              Path("outputs") / "sf_crime_07.csv",
           ]
           src_path = next((p for p in candidates if p.exists()), None)
           if src_path is None:
-              raise FileNotFoundError("sf_crime_08.csv not found in known locations")
+              raise FileNotFoundError("sf_crime_07.csv not found in known locations")
           src = str(src_path)
-          dst = str(Path(CRIME_DIR)/"sf_crime_09.csv")
+          dst = str(Path(CRIME_DIR)/"sf_crime_08.csv")
 
-          clean_and_save_crime_09(src, dst)
-          print("✅ sf_crime_09 hazır →", dst)
+          clean_and_save_crime_08(src, dst)
+          print("✅ sf_crime_08 hazır →", dst)
           try:
               df = pd.read_csv(dst, low_memory=False)
               with pd.option_context("display.max_columns", None, "display.width", 2000):
-                  print("📄 sf_crime_09.csv — ilk 5 satır:")
+                  print("📄 sf_crime_08.csv — ilk 5 satır:")
                   print(df.head(5).to_string(index=False))
           except Exception as e:
               print(f"⚠️ Önizleme okunamadı: {e}")
@@ -938,7 +904,6 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
             ${{ env.CRIME_DATA_DIR }}/sf_population.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_09.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_07.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_06.csv
@@ -1028,7 +993,7 @@ jobs:
             echo "## SF Crime Pipeline (Stacking dahil)"
             echo ""
             echo "- Çalışma zamanı (SF): **$(date)**"
-            echo "- Çıktılar: \`sf_crime_01..09.csv\`, 911/311 özetleri, geojson"
+            echo "- Çıktılar: \`sf_crime_01..08.csv\`, 911/311 özetleri, geojson"
             echo "- Stacking: \`risk_hourly*\`, \`patrol_recs*\`, \`metrics_*\`, \`models/*.joblib\`"
             echo "- Artifact adı: **sf-crime-pipeline-output**"
             echo "- PATROL_TOP_K: **${PATROL_TOP_K}**"
