@@ -42,13 +42,13 @@ OUTPUT_MERGED = os.getenv("FR_CRIME_01_FILE", "fr_crime_01.csv")
 
 # 911 özet adayları (önce _y)
 FR_911_CANDIDATES = [
-    Path(BASE_DIR) / "fr_911_last_5_year_y.csv",
-    Path(BASE_DIR) / "fr_911_last_5_year.csv",
+    Path(BASE_DIR) / "sf_911_last_5_year_y.csv",
+    Path(BASE_DIR) / "sf_911_last_5_year.csv",
 ]
 
 # GEOID poligonları (Fransa için senin blok/veri kümen)
 CENSUS_GEOJSON_CANDIDATES = [
-    Path(BASE_DIR) / "fr_census_blocks_with_population.geojson",
+    Path(BASE_DIR) / "sf_census_blocks_with_population.geojson",
     Path("./fr_census_blocks_with_population.geojson"),
 ]
 
