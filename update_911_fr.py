@@ -1,4 +1,6 @@
-# update_911_fr.py
+# update_911_fr.py  — FR hattı için 911 tabanlı mekânsal özellikler
+# Değişiklik: sf_crime_L.csv'den koordinat beklemek yerine
+#             suç noktalarını grid (tercih) ya da event (sf_crime_y.csv) içinden okur.
 
 from __future__ import annotations
 
@@ -18,8 +20,8 @@ def log(msg: str) -> None:
 
 
 def _pick_lat_lon(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
-    lat = next((c for c in ["latitude", "lat", "y", "_lat_"] if c in df.columns), None)
-    lon = next((c for c in ["longitude", "long", "lon", "x", "_lon_"] if c in df.columns), None)
+    lat = next((c for c in ["latitude", "lat", "y", "centroid_lat", "_lat_"] if c in df.columns), None)
+    lon = next((c for c in ["longitude", "long", "lon", "x", "centroid_lon", "_lon_"] if c in df.columns), None)
     return lat, lon
 
 
@@ -28,12 +30,11 @@ def _ensure_point_gdf(df: pd.DataFrame, lat_col: str, lon_col: str) -> gpd.GeoDa
     d[lat_col] = pd.to_numeric(d[lat_col], errors="coerce")
     d[lon_col] = pd.to_numeric(d[lon_col], errors="coerce")
     d = d.dropna(subset=[lat_col, lon_col])
-    gdf = gpd.GeoDataFrame(
+    return gpd.GeoDataFrame(
         d,
         geometry=gpd.points_from_xy(d[lon_col], d[lat_col]),
         crs="EPSG:4326",
     )
-    return gdf
 
 
 def _to_metric(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -41,7 +42,7 @@ def _to_metric(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     try:
         return gdf.to_crs(3857)  # Web Mercator (metre)
     except Exception:
-        return gdf.to_crs(32610)  # UTM Zone 10N (SF)
+        return gdf.to_crs(32610)  # UTM Zone 10N (SF çevresi)
 
 
 def _distance_nearest(src_m: gpd.GeoDataFrame, pts_m: gpd.GeoDataFrame) -> pd.Series:
@@ -56,7 +57,7 @@ def _distance_nearest(src_m: gpd.GeoDataFrame, pts_m: gpd.GeoDataFrame) -> pd.Se
             how="left",
             distance_col="_dist",
         )
-        # sjoin_nearest indexleri korur; sıraya göre hizayalım
+        # sjoin_nearest indexleri korur; sıraya göre hizalayalım
         return j["_dist"].reindex(src_m.index)
     except Exception:
         # yavaş ama güvenli fallback
@@ -112,7 +113,14 @@ def _count_within(src_m: gpd.GeoDataFrame, pts_m: gpd.GeoDataFrame, r: int) -> p
 SAVE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
 Path(SAVE_DIR).mkdir(parents=True, exist_ok=True)
 
-CRIME_IN = Path(SAVE_DIR) / "sf_crime_L.csv"
+# Suç noktaları için KOORDİNAT içeren aday kaynaklar
+CRIME_POINT_SOURCES = [
+    Path(SAVE_DIR) / "sf_crime_grid_full_labeled.csv",  # tercih: grid (lat/lon var)
+    Path(SAVE_DIR) / "sf_crime_y.csv",                  # fallback: event-level
+    Path(".")        / "sf_crime_grid_full_labeled.csv",
+    Path(".")        / "sf_crime_y.csv",
+]
+
 CRIME_OUT = Path(SAVE_DIR) / "fr_crime_01.csv"
 
 # 911 ham nokta dosya adayları (öncelik _y.csv)
@@ -127,29 +135,56 @@ SF911_CANDIDATES = [
 BUFFERS_M = [300, 600, 900]
 
 
+def _load_crime_points() -> tuple[pd.DataFrame, gpd.GeoDataFrame, str, str]:
+    """
+    Koordinat içeren bir suç kaynağı (grid veya event) döndürür.
+    Çıktı: (crime_df_raw, crime_gdf_wgs84, lat_col, lon_col)
+    """
+    for p in CRIME_POINT_SOURCES:
+        if not p.exists():
+            continue
+        try:
+            df = pd.read_csv(p, low_memory=False)
+        except Exception as e:
+            log(f"⚠️ Okuma hatası ({p.name}): {e}")
+            continue
+
+        lat_c, lon_c = _pick_lat_lon(df)
+        if not lat_c or not lon_c:
+            log(f"⚠️ {p.name}: lat/lon yok, atlandı.")
+            continue
+
+        # kaba SF BBOX (opsiyonel filtre)
+        df = df.copy()
+        df[lat_c] = pd.to_numeric(df[lat_c], errors="coerce")
+        df[lon_c] = pd.to_numeric(df[lon_c], errors="coerce")
+        df = df.dropna(subset=[lat_c, lon_c])
+        df = df[(df[lat_c].between(37.5, 38.2)) & (df[lon_c].between(-123.2, -122.0))]
+        if df.empty:
+            log(f"⚠️ {p.name}: SF BBOX içinde nokta yok, atlandı.")
+            continue
+
+        gdf = _ensure_point_gdf(df, lat_c, lon_c)
+        if not gdf.empty:
+            log(f"📥 Suç kaynağı: {p} (satır={len(gdf):,})")
+            return df, gdf, lat_c, lon_c
+
+    raise SystemExit(
+        "❌ Suç noktası kaynağı bulunamadı. 'sf_crime_grid_full_labeled.csv' veya 'sf_crime_y.csv' gerekli."
+    )
+
+
 # --------------------------------------------------------- ana akış
 def main() -> None:
-    # 1) Suç noktaları
-    if not CRIME_IN.exists():
-        log(f"❌ Bulunamadı: {CRIME_IN}")
-        sys.exit(1)
+    # 1) Suç noktaları (KOORDİNATLI kaynaklardan)
+    crime_df, g_crime, lat_c, lon_c = _load_crime_points()
+    # satır kimliği — geri birleştirmek için
+    crime_df = crime_df.reset_index(drop=False).rename(columns={"index": "__row_id"})
+    # gdf'ye aynı kimliği bindir
+    if "__row_id" not in g_crime.columns and len(g_crime) == len(crime_df):
+        g_crime = g_crime.copy()
+        g_crime["__row_id"] = crime_df["__row_id"].values
 
-    crime = pd.read_csv(CRIME_IN, low_memory=False)
-    if crime.empty:
-        log("❌ sf_crime_L.csv boş.")
-        sys.exit(1)
-
-    lat_c, lon_c = _pick_lat_lon(crime)
-    if not lat_c or not lon_c:
-        log("❌ sf_crime_L.csv içinde latitude/longitude yok (örn. latitude/longitude veya _lat_/_lon_).")
-        sys.exit(1)
-
-    # satır ID korumak için
-    crime = crime.reset_index(drop=False).rename(columns={"index": "__row_id"})
-    g_crime = _ensure_point_gdf(crime, lat_c, lon_c)
-    if g_crime.empty:
-        log("❌ Geçerli suç koordinatı yok.")
-        sys.exit(1)
     g_crime_m = _to_metric(g_crime)
 
     # 2) 911 ham nokta seçimi (öncelik _y.csv)
@@ -179,8 +214,7 @@ def main() -> None:
     src911[lon911] = pd.to_numeric(src911[lon911], errors="coerce")
     src911 = src911.dropna(subset=[lat911, lon911])
     src911 = src911[
-        (src911[lat911].between(37.5, 38.2))
-        & (src911[lon911].between(-123.2, -122.0))
+        (src911[lat911].between(37.5, 38.2)) & (src911[lon911].between(-123.2, -122.0))
     ]
 
     g_911 = _ensure_point_gdf(src911, lat911, lon911)
@@ -201,8 +235,7 @@ def main() -> None:
         + [f"911_cnt_{r}m" for r in BUFFERS_M]
     )
     feats = pd.DataFrame(g_crime_m[feat_cols].copy())
-
-    merged = crime.merge(feats, on="__row_id", how="left")
+    merged = crime_df.merge(feats, on="__row_id", how="left")
 
     # tip/doldurma
     for c in [f"911_cnt_{r}m" for r in BUFFERS_M]:
@@ -215,13 +248,13 @@ def main() -> None:
     out.to_csv(CRIME_OUT, index=False)
     log(f"✅ Yazıldı: {CRIME_OUT} | satır={len(out):,}")
 
+    # mini önizleme
     try:
         cols = [
-            "911_cnt_300m",
-            "911_cnt_600m",
-            "911_cnt_900m",
-            "911_dist_min_m",
-            "911_dist_min_range",
+            "GEOID",
+            lat_c, lon_c,
+            "911_cnt_300m", "911_cnt_600m", "911_cnt_900m",
+            "911_dist_min_m", "911_dist_min_range",
         ]
         view_cols = [c for c in cols if c in out.columns]
         if view_cols:
