@@ -372,7 +372,11 @@ jobs:
             echo "---- ${FR_MIRROR_DIR}/fr_crime.csv (head) ----"; head -n 5 "${FR_MIRROR_DIR}/fr_crime.csv" || true
           fi
 
-      - name: Restore 911 summary cache
+      # =========================
+      # 02) 911 — SF önce, sonra FR (tek başlık)
+      # =========================
+      
+      - name: 02) 911 • Restore SF summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         uses: actions/cache@v4
         with:
@@ -380,45 +384,49 @@ jobs:
           key: 911-${{ runner.os }}-${{ github.run_number }}
           restore-keys: |
             911-${{ runner.os }}-
-
-      - name: Prefetch sf_911_last_5_year_y.csv from previous successful run (artifact)
+      
+      - name: 02) 911 • Prefetch sf_911_last_5_year_y.csv (artifact)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT_NAME: sf-crime-pipeline-output
           WORKFLOW_NAME: Full Crime Pipeline (SF+FR)
           TARGET_FILE: sf_911_last_5_year_y.csv
-          OUT_DIR: crime_prediction_data
+          OUT_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
           mkdir -p "${OUT_DIR}"
           if [ -f "${OUT_DIR}/${TARGET_FILE}" ]; then
             echo "ℹ️ ${OUT_DIR}/${TARGET_FILE} zaten var, indirme atlandı."
-            exit 0
-          fi
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y unzip >/dev/null
-          if ! command -v gh >/dev/null; then
-            type -p curl >/dev/null && sudo curl -sSL https://raw.githubusercontent.com/cli/cli/trunk/script/install.sh | sh
-          fi
-          mkdir -p _prev
-          FOUND=""
-          for RID in $(gh run list -R "${GITHUB_REPOSITORY}" --workflow "${WORKFLOW_NAME}" --status success -L 10 --json databaseId -q '.[].databaseId'); do
-            rm -rf "_prev/$RID" && mkdir -p "_prev/$RID"
-            if gh run download -R "${GITHUB_REPOSITORY}" "$RID" -n "${ARTIFACT_NAME}" -D "_prev/$RID" >/dev/null 2>&1; then
-              F=$(find "_prev/$RID" -type f -iname "${TARGET_FILE}" | head -n1 || true)
-              if [ -n "${F:-}" ]; then
-                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"
-                echo "✅ Bulundu ve kopyalandı: $F → ${OUT_DIR}/${TARGET_FILE}"
-                FOUND="yes"; break
-              fi
+          else
+            sudo apt-get update -y >/dev/null
+            sudo apt-get install -y unzip >/dev/null
+            if ! command -v gh >/dev/null; then
+              type -p curl >/dev/null && sudo curl -sSL https://raw.githubusercontent.com/cli/cli/trunk/script/install.sh | sh
             fi
-          done
-          if [ -z "${FOUND}" ]; then
-            echo "ℹ️ ${TARGET_FILE} önceki artifact’larda bulunamadı; script release fallback kullanacak."
+            mkdir -p _prev
+            FOUND=""
+            for RID in $(gh run list -R "${GITHUB_REPOSITORY}" --workflow "${WORKFLOW_NAME}" --status success -L 10 --json databaseId -q '.[].databaseId'); do
+              rm -rf "_prev/$RID" && mkdir -p "_prev/$RID"
+              if gh run download -R "${GITHUB_REPOSITORY}" "$RID" -n "${ARTIFACT_NAME}" -D "_prev/$RID" >/dev/null 2>&1; then
+                F=$(find "_prev/$RID" -type f -iname "${TARGET_FILE}" | head -n1 || true)
+                if [ -n "${F:-}" ]; then
+                  cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"
+                  echo "✅ Bulundu ve kopyalandı: $F → ${OUT_DIR}/${TARGET_FILE}"
+                  FOUND="yes"; break
+                fi
+              fi
+            done
+            if [ -z "${FOUND}" ]; then
+              echo "ℹ️ ${TARGET_FILE} geçmiş artifact’larda yok; script kendi akışıyla devam edecek."
+            fi
           fi
-
-      - name: 02) 911 → sf_crime_01.csv (bulk 50k)
+      
+          # Prefetch/Cache varsa ilk 5 satırı göster
+          [ -f "${OUT_DIR}/sf_911_last_5_year.csv" ] && { echo "---- sf_911_last_5_year.csv (head) ----"; head -n 5 "${OUT_DIR}/sf_911_last_5_year.csv" || true; }
+          [ -f "${OUT_DIR}/sf_911_last_5_year_y.csv" ] && { echo "---- sf_911_last_5_year_y.csv (head) ----"; head -n 5 "${OUT_DIR}/sf_911_last_5_year_y.csv" || true; }
+      
+      - name: 02) 911 • SF: update_911 → sf_crime_01.csv (head)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
@@ -429,18 +437,26 @@ jobs:
           SF911_API_TOKEN:       ${{ env.SF911_API_TOKEN }}
           SOCS_APP_TOKEN:        ${{ env.SOCS_APP_TOKEN }}
           BACKFILL_DAYS:         ${{ env.BACKFILL_DAYS }}
+          CRIME_DATA_DIR:        ${{ env.CRIME_DATA_DIR }}
         run: |
-          set -e
-          PY="update_911.py"
-          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
-            if   [ -f "update_911.fr.py" ]; then PY="update_911.fr.py";
-            elif [ -f "update_911_fr.py" ]; then PY="update_911_fr.py"; fi
-          fi
+          set -euo pipefail
+          # SF hattı için FR scriptine geçmeyelim; daima SF 911 scriptini çalıştır
+          if   [ -f "update_911.py" ]; then PY="update_911.py";
+          elif [ -f "scripts/update_911.py" ]; then PY="scripts/update_911.py";
+          else echo "❌ SF 911 scripti bulunamadı"; exit 2; fi
+      
           python -u "$PY"
-
-      - name: FR 01) 911 → fr_crime_01.csv
-        if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' ||
-              hashFiles('**/update_911.fr.py', '**/update_911_fr.py', 'scripts/update_911.fr.py', 'scripts/update_911_fr.py') != '') }}
+      
+          # Çıktı head'leri
+          SF01="${CRIME_DATA_DIR}/sf_crime_01.csv"
+          if [ -f "$SF01" ]; then
+            echo "---- sf_crime_01.csv (head) ----"; head -n 5 "$SF01" || true
+          else
+            echo "ℹ️ Beklenen çıktı yok: $SF01"
+          fi
+      
+      - name: 02) 911 • FR: update_911_fr → fr_crime_01.csv (head)
+        if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('**/update_911.fr.py', '**/update_911_fr.py', 'scripts/update_911.fr.py', 'scripts/update_911_fr.py') != '') }}
         env:
           SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
           SF_SODA_PAGE_LIMIT:    ${{ env.SF_SODA_PAGE_LIMIT }}
@@ -458,8 +474,13 @@ jobs:
           elif [ -f "scripts/update_911.fr.py" ]; then PY="scripts/update_911.fr.py";
           elif [ -f "scripts/update_911_fr.py" ]; then PY="scripts/update_911_fr.py";
           else echo "↪️ FR 911 scripti yok, adım atlandı."; exit 0; fi
+      
           python -u "$PY"
-          test -f "${CRIME_DATA_DIR}/fr_crime_01.csv" || { echo "❌ fr_crime_01.csv üretilmedi"; exit 2; }
+      
+          OUT="${CRIME_DATA_DIR}/fr_crime_01.csv"
+          test -f "$OUT" || { echo "❌ fr_crime_01.csv üretilmedi"; exit 2; }
+          echo "---- fr_crime_01.csv (head) ----"
+          head -n 5 "$OUT" || true
 
       - name: Restore 311 summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
