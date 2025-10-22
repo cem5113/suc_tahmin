@@ -25,8 +25,6 @@ FR_OUT_PATH    = Path(BASE_DIR) / "fr_crime_02.csv"
 # 311 özet (yerelde hazır GEOID-bazlı)
 _311_SUMMARY_CANDS = [
     Path(BASE_DIR) / "sf_311_last_5_years.csv",
-    Path(BASE_DIR) / "sf_311_last_5_years_3h.csv",
-    Path(BASE_DIR) / "sf_311_last_5_year.csv",      # legacy ad
 ]
 
 # GEOID poligonları (lat/lon → GEOID için)
