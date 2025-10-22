@@ -192,21 +192,45 @@ jobs:
       # <<<
 
       # ---- PIPELINE ----
-      - name: 01) Suç tabanı ve grid → sf_crime.csv + gridler
+      # Not: SF = GEOID bazlı, FR = event/suç id bazlı. Önce SF, ardından FR.
+      
+      - name: 01A) SF: Suç tabanı & grid → sf_crime.csv (+gridler)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           Y_CSV_NAME: ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
           CACHE_WRITE_Y_ONLY: "1"
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
-          set -e
+          set -euo pipefail
+          # Her zaman SF scriptini çalıştır (FR varyantı olsa bile önce SF hazırlanır)
           PY="update_crime.py"
-          if [ "${PIPELINE_VARIANT}" = "fr" ]; then
-            if   [ -f "update_crime.fr.py" ]; then PY="update_crime.fr.py";
-            elif [ -f "update_crime_fr.py" ]; then PY="update_crime_fr.py"; fi
+          if [ ! -f "$PY" ]; then
+            echo "❌ $PY bulunamadı"; exit 2
           fi
           python -u "$PY"
-
-      - name: 01.1) GEOID+Y_label → sf_crime_L.csv
+      
+          # Üretilen başlıca dosyaların ilk 5 satırını göster
+          SF="${CRIME_DATA_DIR}/sf_crime.csv"
+          if [ -f "$SF" ]; then
+            echo "---- sf_crime.csv (head) ----"; head -n 5 "$SF" || true
+          else
+            echo "ℹ️ Beklenen çıktı yok: $SF"
+          fi
+      
+          # Grid dosyası adlarına hızlı bak ve head yazdır
+          for GRID in \
+            "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv" \
+            "sf_crime_grid_full_labeled.csv" \
+            "${CRIME_DATA_DIR}/sf_crime_grid.csv" \
+            "sf_crime_grid.csv"
+          do
+            if [ -f "$GRID" ]; then
+              echo "---- $(basename "$GRID") (head) ----"; head -n 5 "$GRID" || true
+              break
+            fi
+          done
+      
+      - name: 01.1) SF: GEOID+Y_label → sf_crime_L.csv (head dahil)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -214,47 +238,44 @@ jobs:
           AGGR_Y_THRESHOLD: ${{ env.AGGR_Y_THRESHOLD || '1' }}
         run: |
           set -euo pipefail
-
           python - <<'PY'
           import os, pandas as pd
-
+      
           cdir = os.environ["CRIME_DATA_DIR"]
           L   = int(os.environ.get("GEOID_LEN","11"))
           TH  = int(os.environ.get("AGGR_Y_THRESHOLD","1"))
-
+      
           def norm_geoid(s):
               return s.astype(str).str.extract(r"(\d+)", expand=False).str[:L].str.zfill(L)
-
-          # 1) Tercih: GRID (sf_crime_grid_full_labeled.csv)
+      
+          # 1) Öncelik: GRID
           grid_candidates = [
               "sf_crime_grid_full_labeled.csv",
               os.path.join(cdir, "sf_crime_grid_full_labeled.csv"),
           ]
           grid_src = next((p for p in grid_candidates if os.path.isfile(p)), None)
-
+      
           if grid_src:
               print(f"Kaynak: GRID → {grid_src}")
               df = pd.read_csv(grid_src, low_memory=False)
               cols = {c.lower(): c for c in df.columns}
-
-              # Y_label yoksa crime_count>=TH ile türet
+      
               if "y_label" not in cols:
                   if "crime_count" in cols:
                       df["Y_label"] = (pd.to_numeric(df[cols["crime_count"]], errors="coerce").fillna(0) >= TH).astype(int)
                       print(f"Not: GRID içinde Y_label yoktu, crime_count>={TH} ile üretildi.")
                   else:
                       raise SystemExit(f"GRID var ama Y_label/crime_count yok. Kolonlar: {list(df.columns)}")
-
+      
               geoid_col = cols.get("geoid")
               if not geoid_col:
                   raise SystemExit(f"GRID'de GEOID yok. Kolonlar: {list(df.columns)}")
-
+      
               out = df[[geoid_col, "Y_label"]].copy()
               out.columns = ["GEOID","Y_label"]
               out["GEOID"] = norm_geoid(out["GEOID"])
-              # Aynı GEOID için en az bir kez 1 görülmüşse 1
               out = out.groupby("GEOID", as_index=False)["Y_label"].max()
-
+      
           else:
               # 2) Fallback: event-level (sf_crime_y.csv / sf_crime.csv)
               for name in ("sf_crime_y.csv", "sf_crime.csv"):
@@ -263,14 +284,14 @@ jobs:
                       break
               else:
                   raise SystemExit("Girdi yok: GRID ya da sf_crime_y.csv / sf_crime.csv bulunamadı.")
-
+      
               print(f"Kaynak: EVENT → {src}")
               df = pd.read_csv(src, low_memory=False)
               low = {c.lower(): c for c in df.columns}
               geoid_col = low.get("geoid") or low.get("geography_id") or low.get("geoid11") or low.get("geoid_11")
               if not geoid_col:
                   raise SystemExit(f"GEOID kolonu yok. Kolonlar: {list(df.columns)}")
-
+      
               g = df[[geoid_col]].copy()
               g.columns = ["GEOID"]
               g["GEOID"] = norm_geoid(g["GEOID"])
@@ -279,49 +300,64 @@ jobs:
               g = g.drop_duplicates()
               g["Y_label"] = 1  # GEOID en az bir kere görüldüyse 1
               out = g
-
+      
           dest = os.path.join(cdir, "sf_crime_L.csv")
           out.to_csv(dest, index=False)
-          print(f"Yazıldı: {dest} | satır: {len(out)}")
+          print(f"Yazıldı: {dest} | satır: {len(out):,}")
           PY
-
+      
           echo "---- sf_crime_L.csv (head) ----"
           head -n 5 "${CRIME_DATA_DIR}/sf_crime_L.csv" || true
-
-      - name: 01.2) fr_crime.csv oluştur
+      
+      - name: 01B) FR: fr_crime.csv oluştur (head dahil)
         if: ${{ steps.gate.outputs.proceed == 'true' && env.PIPELINE_VARIANT == 'fr' }}
         env:
           FR_SRC_PATH: ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
           FR_OUT_PATH: fr_crime.csv
           FR_MIRROR_DIR: crime_prediction_data_pre
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
-          set -e
+          set -euo pipefail
           echo "➡️ fr_crime.csv üretiliyor..."
-    
-          if [ -f "update_crime_fr.py" ]; then
-            python -u update_crime_fr.py
+      
+          if [ -f "update_crime_fr.py" ] || [ -f "update_crime.fr.py" ] || [ -f "scripts/update_crime_fr.py" ] || [ -f "scripts/update_crime.fr.py" ]; then
+            PY="$( [ -f update_crime_fr.py ] && echo update_crime_fr.py || true )"
+            PY="${PY:-$( [ -f update_crime.fr.py ] && echo update_crime.fr.py || true )}"
+            PY="${PY:-$( [ -f scripts/update_crime_fr.py ] && echo scripts/update_crime_fr.py || true )}"
+            PY="${PY:-$( [ -f scripts/update_crime.fr.py ] && echo scripts/update_crime.fr.py || true )}"
+            python -u "$PY"
           else
             python - <<'PY'
             import pandas as pd, os, shutil
             from pathlib import Path
-    
-            src = Path(os.getenv("FR_SRC_PATH","sf_full_labeled.csv"))
+      
+            src = Path(os.getenv("FR_SRC_PATH","sf_crime_grid_full_labeled.csv"))
             if not src.exists():
                 raise SystemExit(f"❌ Kaynak bulunamadı: {src}")
-    
+      
             out = Path(os.getenv("FR_OUT_PATH","fr_crime.csv"))
             mir = Path(os.getenv("FR_MIRROR_DIR","crime_prediction_data_pre"))
-    
+      
             df = pd.read_csv(src, low_memory=False)
-            df["GEOID"] = df["GEOID"].astype(str).str.zfill(11)
+            # FR hattı event/suç id mantığında ilerlese de ortak kolonlar normalize edilir
+            if "GEOID" in df.columns:
+                df["GEOID"] = df["GEOID"].astype(str).str.zfill(11)
             df.to_csv(out, index=False)
             mir.mkdir(exist_ok=True)
             shutil.copy2(out, mir / out.name)
             print(f"✅ Kaydedildi: {out} ({len(df):,} satır)")
             PY
           fi
-    
-          head -n 5 fr_crime.csv || true
+      
+          # Başlıca çıktılar: fr_crime.csv ve mirror kopyası
+          if [ -f "fr_crime.csv" ]; then
+            echo "---- fr_crime.csv (head) ----"; head -n 5 fr_crime.csv || true
+          else
+            echo "ℹ️ fr_crime.csv üretilmedi."
+          fi
+          if [ -f "${FR_MIRROR_DIR}/fr_crime.csv" ]; then
+            echo "---- ${FR_MIRROR_DIR}/fr_crime.csv (head) ----"; head -n 5 "${FR_MIRROR_DIR}/fr_crime.csv" || true
+          fi
 
       - name: Restore 911 summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
