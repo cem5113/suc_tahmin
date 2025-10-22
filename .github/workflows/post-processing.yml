@@ -37,6 +37,27 @@ jobs:
           python -u update_crime_fr.py
           head -n 5 "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv" || true
 
+      - name: Prefetch FR 911 summary (optional)
+        run: |
+          set -e
+          mkdir -p "${CRIME_DATA_DIR}"
+          # varsa repoda ya da önceki artifact'tan kopyala (örnek yollar)
+          for p in \
+            "${CRIME_DATA_DIR}/fr_911_last_5_year_y.csv" \
+            "fr_911_last_5_year_y.csv" \
+            "inputs/fr_911_last_5_year_y.csv"; do
+            [ -f "$p" ] && { echo "found: $p"; cp -f "$p" "${CRIME_DATA_DIR}/fr_911_last_5_year_y.csv"; exit 0; }
+          done
+          # bulunamazsa: boş şema ile placeholder üret (script'in beklediği kolonlar)
+          python - <<'PY'
+          import os, pandas as pd
+          out = os.path.join(os.environ.get("CRIME_DATA_DIR","crime_prediction_data_fr"), "fr_911_last_5_year_y.csv")
+          cols = ["GEOID","date","hour_range","911_request_count_hour_range",
+                  "911_request_count_daily(before_24_hours)"]
+          pd.DataFrame(columns=cols).to_csv(out, index=False)
+          print("created empty placeholder:", out)
+          PY
+
       - name: FR 01) 911
         run: |
           set -e
