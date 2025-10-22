@@ -152,7 +152,7 @@ jobs:
           PY
 
       # >>> Prefetch sf_crime_y.csv
-      - name: 00) Prefetch sf_crime_y.csv from previous successful run (artifact)
+      - name: "00) Prefetch sf_crime_y.csv from previous successful run (artifact)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -319,7 +319,7 @@ jobs:
       # 02) 911 — SF önce, sonra FR (tek başlık)
       # =========================
       
-      - name: 02) 911 • Restore SF summary cache
+      - name: "02) 911 • Restore SF summary cache"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         uses: actions/cache@v4
         with:
@@ -328,7 +328,7 @@ jobs:
           restore-keys: |
             911-${{ runner.os }}-
       
-      - name: 02) 911 • Prefetch sf_911_last_5_year_y.csv (artifact)
+      - name: "02) 911 • Prefetch sf_911_last_5_year_y.csv (artifact)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -398,7 +398,7 @@ jobs:
             echo "ℹ️ Beklenen çıktı yok: $SF01"
           fi
       
-      - name: 02) 911 • FR: update_911_fr → fr_crime_01.csv (head)
+      - name: "02) 911 • FR: update_911_fr → fr_crime_01.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('**/update_911.fr.py', '**/update_911_fr.py', 'scripts/update_911.fr.py', 'scripts/update_911_fr.py') != '') }}
         env:
           SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
@@ -429,7 +429,7 @@ jobs:
       # 03) 311 — SF önce, sonra FR (tek başlık)
       # =========================
       
-      - name: 03) 311 • Restore SF summary cache
+      - name: "03) 311 • Restore SF summary" cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         uses: actions/cache@v4
         with:
@@ -438,7 +438,7 @@ jobs:
           restore-keys: |
             311-${{ runner.os }}-
       
-      - name: 03) 311 • Prefetch sf_311_last_5_years_y.csv (artifact)
+      - name: "03) 311 • Prefetch sf_311_last_5_years_y.csv (artifact)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -479,7 +479,7 @@ jobs:
           [ -f "${OUT_DIR}/sf_311_last_5_years.csv" ] && { echo "---- sf_311_last_5_years.csv (head) ----"; head -n 5 "${OUT_DIR}/sf_311_last_5_years.csv" || true; }
           [ -f "${OUT_DIR}/sf_311_last_5_years_y.csv" ] && { echo "---- sf_311_last_5_years_y.csv (head) ----"; head -n 5 "${OUT_DIR}/sf_311_last_5_years_y.csv" || true; }
       
-      - name: 03) 311 • SF: update_311 → sf_crime_02.csv (head)
+      - name: "03) 311 • SF: update_311 → sf_crime_02.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
@@ -505,7 +505,7 @@ jobs:
             echo "ℹ️ Beklenen çıktı yok: $SF02"
           fi
       
-      - name: 03) 311 • FR: update_311_fr → fr_crime_02.csv (head)
+      - name: "03) 311 • FR: update_311_fr → fr_crime_02.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('**/update_311.fr.py', '**/update_311_fr.py', 'scripts/update_311.fr.py', 'scripts/update_311_fr.py') != '') }}
         env:
           SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
@@ -533,7 +533,7 @@ jobs:
       # 04) Nüfus/Demografi — SF önce, sonra FR (tek başlık)
       # =========================
       
-      - name: 04) Population • Ensure sf_population.csv (head)
+      - name: "04) Population • Ensure sf_population.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -567,7 +567,7 @@ jobs:
           echo "---- sf_population.csv (head) ----"
           head -n 5 "$DEST" || true
       
-      - name: 04) Population • (Opsiyonel) Başlık normalize (GEOID & population)
+      - name: "04) Population • (Opsiyonel) Başlık normalize (GEOID & population)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -599,7 +599,7 @@ jobs:
           echo "---- sf_population.csv (post-normalize head) ----"
           head -n 5 "${CRIME_DATA_DIR}/sf_population.csv" || true
       
-      - name: 04) Population • SF: update_population → sf_crime_03.csv (head)
+      - name: "04) Population • SF: update_population → sf_crime_03.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           POPULATION_PATH:  ${{ env.CRIME_DATA_DIR }}/sf_population.csv
@@ -622,7 +622,7 @@ jobs:
             echo "ℹ️ Beklenen çıktı yok: $OUT"
           fi
       
-      - name: 04) Population • FR: update_population_fr → fr_crime_03.csv (head)
+      - name: "04) Population • FR: update_population_fr → fr_crime_03.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('**/update_population.fr.py', '**/update_population_fr.py', 'scripts/update_population.fr.py', 'scripts/update_population_fr.py') != '') }}
         env:
           CRIME_DATA_DIR:   ${{ env.CRIME_DATA_DIR }}
@@ -644,22 +644,11 @@ jobs:
           echo "---- fr_crime_03.csv (head) ----"
           head -n 5 "$OUT" || true
       
-            - name: 05) Otobüs → sf_crime_04.csv
-              if: ${{ steps.gate.outputs.proceed == 'true' }}
-              run: |
-                set -e
-                PY="update_bus.py"
-                if [ "${PIPELINE_VARIANT}" = "fr" ]; then
-                  if   [ -f "update_bus.fr.py" ]; then PY="update_bus.fr.py";
-                  elif [ -f "update_bus_fr.py" ]; then PY="update_bus_fr.py"; fi
-                fi
-                python -u "$PY"
-      
       # =========================
       # 05) BUS — SF önce, sonra FR (tek başlık)
       # =========================
       
-      - name: 05) Bus • SF: update_bus → sf_crime_04.csv (head)
+      - name: "05) Bus • SF: update_bus → sf_crime_04.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -679,7 +668,7 @@ jobs:
             echo "ℹ️ Beklenen çıktı yok: $OUT"
           fi
       
-      - name: 05) Bus • FR: update_bus_fr → fr_crime_04.csv (head)
+      - name: "05) Bus • FR: update_bus_fr → fr_crime_04.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('**/update_bus.fr.py', '**/update_bus_fr.py', 'scripts/update_bus.fr.py', 'scripts/update_bus_fr.py') != '') }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -701,7 +690,7 @@ jobs:
       # 06) TRAIN — SF önce, sonra FR (tek başlık)
       # =========================
       
-      - name: 06) Train • SF: update_train → sf_crime_05.csv (head)
+      - name: "06) Train • SF: update_train → sf_crime_05.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -721,7 +710,7 @@ jobs:
             echo "ℹ️ Beklenen çıktı yok: $OUT"
           fi
       
-      - name: 06) Train • FR: update_train_fr → fr_crime_05.csv (head)
+      - name: "06) Train • FR: update_train_fr → fr_crime_05.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('**/update_train.fr.py', '**/update_train_fr.py', 'scripts/update_train.fr.py', 'scripts/update_train_fr.py') != '') }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -743,7 +732,7 @@ jobs:
       # 07) POI — SF önce, sonra FR
       # =========================
       
-      - name: 07) POI • SF: update_poi → sf_crime_06.csv (head)
+      - name: "07) POI • SF: update_poi → sf_crime_06.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -766,7 +755,7 @@ jobs:
           fi
       
       
-      - name: 07) POI • FR: update_poi_fr → fr_crime_06.csv (head)
+      - name: "07) POI • FR: update_poi_fr → fr_crime_06.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('**/update_poi.fr.py', '**/update_poi_fr.py', 'scripts/update_poi.fr.py', 'scripts/update_poi_fr.py') != '') }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -790,7 +779,7 @@ jobs:
       # 08) Police & Government — SF önce, sonra FR
       # =========================
       
-      - name: 08) Police/Gov • SF: enrich → sf_crime_07.csv (head)
+      - name: "08) Police/Gov • SF: enrich → sf_crime_07.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -810,7 +799,7 @@ jobs:
             echo "ℹ️ Beklenen çıktı yok: $OUT"
           fi
       
-      - name: 08) Police/Gov • FR: enrich → fr_crime_07.csv (head)
+      - name: "08) Police/Gov • FR: enrich → fr_crime_07.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('**/update_police_gov.fr.py', '**/update_police_gov_fr.py', 'scripts/enrich_police_gov_06_to_07.fr.py', 'scripts/enrich_police_gov_06_to_07_fr.py') != '') }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -834,7 +823,7 @@ jobs:
       # 09) Weather — Yalnızca FR: arşiv + merge → fr_crime_08.csv
       # =========================
       
-      - name: 09) Weather • FR only: archive & merge → fr_crime_08.csv (head)
+      - name: "09) Weather • FR only: archive & merge → fr_crime_08.csv (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' && env.PIPELINE_VARIANT == 'fr' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -925,7 +914,7 @@ jobs:
       # =========================
       
       # SF: sf_crime_07.csv  →  sf_crime_08.csv
-      - name: 10) Neighbors • SF: 07 → 08 (head)
+      - name: "10) Neighbors • SF: 07 → 08 (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -952,7 +941,7 @@ jobs:
       
       # FR: fr_crime_08.csv  →  fr_crime_09.csv
       #     fr_crime_08 yoksa fr_crime_07.csv'den devam (fallback)
-      - name: 10) Neighbors • FR: 08/07 → 09 (head)
+      - name: "10) Neighbors • FR: 08/07 → 09 (head)"
         if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('scripts/make_neighbors_fr.py','make_neigbors_fr.py','scripts/make_neighbors.py','make_neigbors.py') != '') }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -986,7 +975,7 @@ jobs:
       # 11) Feature Analysis (EDA) — SF önce, sonra FR (tek başlık)
       # =========================
       
-      - name: 11) EDA • SF: unified_feature_analysis → outputs_feature_analysis/sf_08 (heads)
+      - name: "11) EDA • SF: unified_feature_analysis → outputs_feature_analysis/sf_08 (heads)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -1019,7 +1008,7 @@ jobs:
             echo "↪️ ${SF_IN} bulunamadı, SF EDA atlandı."
           fi
       
-      - name: 11) EDA • FR: unified_feature_analysis → outputs_feature_analysis/fr_09 (heads)
+      - name: "11) EDA • FR: unified_feature_analysis → outputs_feature_analysis/fr_09 (heads)"
         if: ${{ steps.gate.outputs.proceed == 'true' && (env.PIPELINE_VARIANT == 'fr' || hashFiles('unified_feature_analysis.py','scripts/unified_feature_analysis.py') != '') }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -1054,7 +1043,7 @@ jobs:
       # =========================
       # 12) QC + Quick Preview — SF(08) önce, FR(09) sonra (tek başlık)
       # =========================
-      - name: 12) QC & Preview • SF(08) + FR(09)
+      - name: "12) QC & Preview • SF(08) + FR(09)"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -1104,7 +1093,7 @@ jobs:
       # =========================
       # 13) Package — SF(08) & FR(09) + ana CSV'ler (head'lerle)
       # =========================
-      - name: 13) Package • Build paquet (zip) + preview
+      - name: "13) Package • Build paquet (zip) + preview"
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -1175,7 +1164,7 @@ jobs:
       # =========================
       
       # 14a) Artifact: paket zip + ana CSV'ler + FR EDA (opsiyonel ekler: fr_crime_08, weather)
-      - name: 14a) Upload artifacts (paquet + EDA + CSVs)
+      - name: "14a) Upload artifacts (paquet + EDA + CSVs)"
         if: ${{ steps.gate.outputs.proceed == 'true' && env.PERSIST_MODE == 'artifact' }}
         uses: actions/upload-artifact@v4
         with:
@@ -1193,7 +1182,7 @@ jobs:
             outputs_feature_analysis/sf_08/**
       
       # 14b) Commit: FR çıktıları + ana CSV'ler (zip commit edilmez)
-      - name: 14b) Commit outputs to repo
+      - name: "14b) Commit outputs to repo"
         if: ${{ steps.gate.outputs.proceed == 'true' && env.PERSIST_MODE == 'commit' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -1220,7 +1209,7 @@ jobs:
           fi
       
       # 14c) Release: zip + EDA + ana CSV'ler
-      - name: 14c) Release FR/SF outputs (zip dahil)
+      - name: "14c) Release FR/SF outputs (zip dahil)"
         if: ${{ steps.gate.outputs.proceed == 'true' && env.PERSIST_MODE == 'release' }}
         uses: softprops/action-gh-release@v2
         with:
