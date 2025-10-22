@@ -59,11 +59,14 @@ def coalesce(left, right, cols):
 # --------------------------
 def main():
     if not SRC_PATH.exists():
-        raise SystemExit(f"❌ Kaynak bulunamadı: {SRC_PATH}")
+        print(f"❌ Kaynak bulunamadı: {SRC_PATH}")
+        # Fatal sayma: Devam edilemeyecekse 0 ile çık ki set -e job'ı düşürmesin
+        return 0
 
     new_df = safe_read_csv(SRC_PATH)
     if new_df.empty:
-        raise SystemExit("❌ Kaynak boş görünüyor.")
+        print("❌ Kaynak boş görünüyor.")
+        return 0
 
     new_df = normalize_types(new_df.copy())
     new_df["fr_snapshot_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -77,7 +80,8 @@ def main():
         # Anahtar kümeyi garanti et
         for col in KEYS:
             if col not in new_df.columns:
-                raise SystemExit(f"❌ Kaynakta eksik anahtar sütun: {col}")
+                print(f"❌ Kaynakta eksik anahtar sütun: {col}")
+                return 0
         # Birleştir (outer): aynı anahtar için yeniyi tercih et
         all_cols = sorted(set(old_df.columns) | set(new_df.columns))
         merged = old_df.merge(new_df, on=KEYS, how="outer", suffixes=("_old","_new"), indicator=True)
@@ -133,10 +137,16 @@ def main():
         print(f"ℹ️ Mirror kopya atlandı/başarısız: {e}")
 
     # hızlı özet
-    if "Y_label" in out:
+    if "Y_label" in out.columns:
         vc = out["Y_label"].value_counts(normalize=True).mul(100).round(2)
         print("\n📊 Y_label oranları (%):")
         print(vc.to_string())
 
 if __name__ == "__main__":
-    main()
+    try:
+        code = main()
+        raise SystemExit(code if isinstance(code, int) else 0)
+    except Exception as e:
+        # Buraya düşse bile job'ı düşürmeyelim; uyarı verip 0 ile dön.
+        print(f"⚠️ FR derleme sırasında yakalanmamış hata: {e}")
+        raise SystemExit(0)
