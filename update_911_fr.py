@@ -1,11 +1,9 @@
 # update_911_fr.py
-
 from __future__ import annotations
 
 import io
 import os
 import re
-import sys
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -15,22 +13,21 @@ from typing import Optional, List
 import pandas as pd
 import requests
 
-
 # =========================
 # CONFIG
 # =========================
-
 DEFAULT_GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
 BASE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
 Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
 
-# Inputs / Outputs
-INCIDENT_CSV = os.getenv("INCIDENT_CSV", str(Path(BASE_DIR) / "incidents.csv"))
-OUT_INCIDENT_WITH_911 = os.getenv("OUT_INCIDENT_WITH_911", str(Path(BASE_DIR) / "incidents_with_911_features.csv"))
-LOCAL_911 = Path(BASE_DIR) / "sf_911_last_5_year.csv"
+# Çıktı (hedef: fr_crime_01.csv)
+OUT_FR_CRIME_01 = str(Path(BASE_DIR) / "fr_crime_01.csv")
+
+# Yerel 911 özetleri
+LOCAL_911   = Path(BASE_DIR) / "sf_911_last_5_year.csv"
 LOCAL_911_Y = Path(BASE_DIR) / "sf_911_last_5_year_y.csv"
 
-# Socrata API (fallback if we can't load from local/release)
+# Socrata API (fallback)
 SF911_API_URL = os.getenv("SF911_API_URL", "https://data.sfgov.org/resource/2zdj-bwza.json")
 SF_APP_TOKEN = os.getenv("SF911_API_TOKEN", "")
 AGENCY_FILTER = os.getenv("SF911_AGENCY_FILTER", "agency like '%Police%'")
@@ -41,7 +38,7 @@ SLEEP_BETWEEN_REQS = float(os.getenv("SF911_SLEEP", "0.2"))
 IS_V3 = "/api/v3/views/" in SF911_API_URL
 V3_PAGE_LIMIT = int(os.getenv("SF_V3_PAGE_LIMIT", "1000"))
 
-# Releases (prefer _y, then regular)
+# Release (önce _y, sonra regular)
 RAW_911_URL_ENV = os.getenv("RAW_911_URL", "").strip()
 RAW_911_URL_CANDIDATES = [
     RAW_911_URL_ENV or "",
@@ -49,16 +46,12 @@ RAW_911_URL_CANDIDATES = [
     "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year.csv",
 ]
 
-
 # =========================
 # UTILS
 # =========================
+def log(msg: str): print(msg, flush=True)
 
-def log(msg: str):
-    print(msg, flush=True)
-
-def ensure_parent(path: str):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+def ensure_parent(path: str): Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 def safe_save_csv(df: pd.DataFrame, path: str):
     ensure_parent(path)
@@ -69,8 +62,7 @@ def safe_save_csv(df: pd.DataFrame, path: str):
         df.to_csv(path + ".bak", index=False)
         log(f"📁 Yedek oluşturuldu: {path}.bak")
 
-def to_date(s):
-    return pd.to_datetime(s, errors="coerce").dt.date
+def to_date(s): return pd.to_datetime(s, errors="coerce").dt.date
 
 def normalize_geoid(s: pd.Series, target_len: int) -> pd.Series:
     s = s.astype(str).str.extract(r"(\d+)", expand=False)
@@ -83,11 +75,13 @@ def log_shape(df, label):
     except Exception:
         pass
 
+def _mtime(p: Path) -> float:
+    try: return p.stat().st_mtime
+    except Exception: return -1.0
 
 # =========================
-# MINIMAL 911 SUMMARY HELPERS (if local file missing)
+# 911 SUMMARY HELPERS
 # =========================
-
 ALLOWED_911_FEATURES = {
     "event_hour",
     "911_request_count_hour_range",
@@ -109,40 +103,35 @@ def _hour_from_range(s: str) -> int:
     return int(m.group(1)) % 24 if m else 0
 
 def make_standard_summary(raw: pd.DataFrame) -> pd.DataFrame:
-    """From raw 911 rows -> hourly + daily counts. No spatial ops; GEOID already present in source."""
+    """Ham 911 satırlarından saatlik ve günlük sayılar üret."""
     if raw is None or raw.empty:
-        return pd.DataFrame(columns=["GEOID","date","hour_range","event_hour",
-                                     "911_request_count_hour_range","911_request_count_daily(before_24_hours)"])
+        return pd.DataFrame(columns=[
+            "GEOID","date","hour_range","event_hour",
+            "911_request_count_hour_range","911_request_count_daily(before_24_hours)"
+        ])
 
     df = raw.copy()
-
-    # pick timestamp column
     ts_col = None
-    for cand in ["received_time","received_datetime","date","datetime","timestamp","call_received_datetime"]:
+    for cand in ["received_time","received_datetime","date","datetime","timestamp","call_received_datetime","call_datetime","received_dttm","call_date"]:
         if cand in df.columns:
             ts_col = cand; break
     if ts_col is None:
-        raise ValueError("Zaman kolonu yok (received_time/received_datetime/date/...)")
+        raise ValueError("911 kaynağında zaman kolonu bulunamadı.")
 
     df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
     df = df[df[ts_col].notna()].copy()
-
     df["date"] = df[ts_col].dt.date
     df["event_hour"] = df[ts_col].dt.hour.astype("int16")
     df["hour_range"] = df["event_hour"].apply(_fmt_hour_range_from_hour)
 
-    # hourly counts
-    grp_hr = (["GEOID"] if "GEOID" in df.columns else []) + ["date","hour_range"]
-    hr = df.groupby(grp_hr, dropna=False, observed=True).size().reset_index(name="911_request_count_hour_range")
-
-    # daily counts
+    grp_hr  = (["GEOID"] if "GEOID" in df.columns else []) + ["date","hour_range"]
     grp_day = (["GEOID"] if "GEOID" in df.columns else []) + ["date"]
-    day = df.groupby(grp_day, dropna=False, observed=True).size().reset_index(name="911_request_count_daily(before_24_hours)")
 
+    hr  = df.groupby(grp_hr,  dropna=False, observed=True).size().reset_index(name="911_request_count_hour_range")
+    day = df.groupby(grp_day, dropna=False, observed=True).size().reset_index(name="911_request_count_daily(before_24_hours)")
     out = hr.merge(day, on=grp_day, how="left")
     out["event_hour"] = out["hour_range"].apply(_hour_from_range).astype("int16")
 
-    # enforce schema
     if "received_time" not in out.columns:
         out["received_time"] = pd.NaT
     if "GEOID" in out.columns:
@@ -154,62 +143,49 @@ def make_standard_summary(raw: pd.DataFrame) -> pd.DataFrame:
     keep_present = [c for c in keep if c in out.columns]
     tail = [c for c in ["date","hour_range","GEOID"] if c in out.columns]
     head = [c for c in keep_present if c not in tail]
-    out = out[head + tail]
-    return out
+    return out[head + tail]
 
 def coerce_to_summary_like(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # unify count column name
     for cnt in ["911_request_count_hour_range","call_count","count","requests","n"]:
         if cnt in df.columns:
             if cnt != "911_request_count_hour_range":
                 df = df.rename(columns={cnt: "911_request_count_hour_range"})
             break
-    # hour_range normalize
     if "hour_range" in df.columns:
         def _fmt_hr(hr):
             m = re.match(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$", str(hr))
             if not m: return None
-            a = int(m.group(1)) % 24; b = int(m.group(2)); b = b if b > a else min(a+3, 24)
+            a = int(m.group(1)) % 24
+            b = int(m.group(2))
+            b = b if b > a else min(a+3, 24)
             return f"{a:02d}-{b:02d}"
         df["hour_range"] = df["hour_range"].apply(_fmt_hr)
     if "date" in df.columns:
         df["date"] = to_date(df["date"])
     if "GEOID" in df.columns:
         df["GEOID"] = normalize_geoid(df["GEOID"], DEFAULT_GEOID_LEN)
-    # ensure daily column
+
     if "911_request_count_daily(before_24_hours)" not in df.columns and \
        {"date","hour_range","911_request_count_hour_range"}.issubset(df.columns):
         keys = (["GEOID"] if "GEOID" in df.columns else []) + ["date"]
-        day = df.groupby(keys, dropna=False, observed=True)["911_request_count_hour_range"] \
-                .sum().reset_index(name="911_request_count_daily(before_24_hours)")
+        day = df.groupby(keys, dropna=False, observed=True)["911_request_count_hour_range"].sum() \
+                .reset_index(name="911_request_count_daily(before_24_hours)")
         df = df.merge(day, on=keys, how="left")
-    # ensure event_hour
+
     if "event_hour" not in df.columns and "hour_range" in df.columns:
         df["event_hour"] = df["hour_range"].apply(_hour_from_range).astype("int16")
     if "received_time" not in df.columns:
         df["received_time"] = pd.NaT
+
     keep = [c for c in df.columns if c in ALLOWED_911_FEATURES or c in {"event_hour"}]
     return df[keep]
 
 def ensure_local_911_base() -> Optional[Path]:
-    y_candidates = [
-        LOCAL_911_Y,
-        Path("./sf_911_last_5_year_y.csv"),
-        Path("outputs/sf_911_last_5_year_y.csv"),
-    ]
-    for p in y_candidates:
-        if p.exists() and p.suffix == ".csv":
-            log(f"📦 Yerel 911 (Y) bulundu: {p}")
-            return p
-    regular_candidates = [
-        LOCAL_911,
-        Path("./sf_911_last_5_year.csv"),
-    ]
-    for p in regular_candidates:
-        if p.exists() and p.suffix == ".csv":
-            log(f"📦 Yerel 911 (regular) bulundu: {p}")
-            return p
+    for p in [LOCAL_911_Y, Path("./sf_911_last_5_year_y.csv"), Path("outputs/sf_911_last_5_year_y.csv")]:
+        if p.exists(): log(f"📦 Yerel 911 (Y) bulundu: {p}"); return p
+    for p in [LOCAL_911, Path("./sf_911_last_5_year.csv")]:
+        if p.exists(): log(f"📦 Yerel 911 (regular) bulundu: {p}"); return p
     return None
 
 def _pick_working_release_url(candidates: List[str]) -> str:
@@ -229,11 +205,9 @@ def _pick_working_release_url(candidates: List[str]) -> str:
 def summary_from_local(path: Path | str, min_date=None) -> pd.DataFrame:
     log(f"📥 Yerel 911 okunuyor: {path}")
     df = pd.read_csv(path, low_memory=False, dtype={"GEOID":"string"})
-    is_already_summary = (
-        {"date","hour_range"}.issubset(df.columns)
-        and any(c in df.columns for c in ["911_request_count_hour_range","call_count","count","requests","n"])
-    )
-    df = coerce_to_summary_like(df) if is_already_summary else make_standard_summary(df)
+    is_summary = {"date","hour_range"}.issubset(df.columns) and \
+                 any(c in df.columns for c in ["911_request_count_hour_range","call_count","count","requests","n"])
+    df = coerce_to_summary_like(df) if is_summary else make_standard_summary(df)
     if min_date is not None and "date" in df.columns:
         df = df[df["date"] >= min_date]
     return df
@@ -244,11 +218,9 @@ def summary_from_release(url: str, min_date=None) -> pd.DataFrame:
     tmp = Path(BASE_DIR) / "_tmp_911.csv"
     ensure_parent(str(tmp)); tmp.write_bytes(r.content)
     df = pd.read_csv(tmp, low_memory=False, dtype={"GEOID":"string"})
-    is_already_summary = (
-        {"date","hour_range"}.issubset(df.columns)
-        and any(c in df.columns for c in ["911_request_count_hour_range","call_count","count","requests","n"])
-    )
-    df = coerce_to_summary_like(df) if is_already_summary else make_standard_summary(df)
+    is_summary = {"date","hour_range"}.issubset(df.columns) and \
+                 any(c in df.columns for c in ["911_request_count_hour_range","call_count","count","requests","n"])
+    df = coerce_to_summary_like(df) if is_summary else make_standard_summary(df)
     if min_date is not None and "date" in df.columns:
         df = df[df["date"] >= min_date]
     return df
@@ -369,7 +341,7 @@ def fetch_v3_range_all_chunks(start_day, end_day) -> Optional[pd.DataFrame]:
     return pd.DataFrame(all_rows)
 
 def minimal_911_summary_ensure() -> pd.DataFrame:
-    """Ensure a minimal 911 summary CSV exists locally; otherwise create from release/API."""
+    """Yerelde/yayın’da yoksa 5 yıllık 911 özetini üret/indir."""
     five_years_ago = datetime.now(timezone.utc).date() - timedelta(days=5*365)
     final_911 = None
     try:
@@ -410,87 +382,111 @@ def minimal_911_summary_ensure() -> pd.DataFrame:
             raise
     return final_911
 
-
 # =========================
-# INCIDENT-LEVEL FEATURES
+# CRIME (sf_crime_y.csv / sf_crime.csv) OKUYUCU
 # =========================
+def pick_crime_source() -> Path:
+    """Öncelik: sf_crime_y.csv → sf_crime.csv; varsa en güncelini seç."""
+    cands: List[Path] = []
+    for name in ["sf_crime_y.csv", "sf_crime.csv"]:
+        for base in [Path(BASE_DIR), Path(".")]:
+            p = base / name
+            if p.exists():
+                cands.append(p)
+    if not cands:
+        raise FileNotFoundError("Suç tabanı bulunamadı (sf_crime_y.csv veya sf_crime.csv).")
+    # sf_crime_y.csv'e öncelik; yoksa mtime'a göre en güncel
+    y = [p for p in cands if p.name == "sf_crime_y.csv"]
+    if y: 
+        return max(y, key=_mtime)
+    return max([p for p in cands if p.name == "sf_crime.csv"], key=_mtime)
 
-def read_incidents(path: str) -> pd.DataFrame:
-    """Load incident data and detect timestamp column + GEOID. Expected columns:
-       - incident_id (optional)
-       - GEOID (string-ish)
-       - timestamp (or one of: datetime, occurred_at, report_datetime)
-    """
-    if not Path(path).exists():
-        raise FileNotFoundError(f"Incident CSV bulunamadı: {path}")
-    df = pd.read_csv(path, low_memory=False)
-    # detect timestamp col
-    ts_cands = ["timestamp", "datetime", "occurred_at", "report_datetime", "incident_datetime"]
-    ts_col = next((c for c in ts_cands if c in df.columns), None)
+def read_crime_df(path: Path) -> pd.DataFrame:
+    log(f"📥 Crime kaynağı: {path}")
+    df = pd.read_csv(path, low_memory=False, dtype={"GEOID":"string"})
+    if df.empty:
+        raise ValueError("Suç dosyası boş.")
+
+    # GEOID
+    if "GEOID" not in df.columns:
+        raise ValueError("Suç verisinde GEOID kolonu yok.")
+    df["GEOID"] = normalize_geoid(df["GEOID"], DEFAULT_GEOID_LEN)
+
+    # Zamanı yakala: date+time veya tek datetime
+    ts_col = None
+    if "datetime" in df.columns:
+        ts_col = "datetime"
+    else:
+        # date + time varsa birleştir
+        if "date" in df.columns:
+            d = pd.to_datetime(df["date"], errors="coerce")
+            t = df["time"] if "time" in df.columns else "00:00:00"
+            dt = pd.to_datetime(d.dt.strftime("%Y-%m-%d") + " " + t.astype(str), errors="coerce")
+            df["datetime"] = dt
+            ts_col = "datetime"
+        else:
+            # başka zaman kolonlarını dene
+            for c in ["occurred_at","report_datetime","incident_datetime","timestamp","received_time"]:
+                if c in df.columns:
+                    ts_col = c; break
+            if ts_col is None:
+                # her kolonu dene (name contains time/date)
+                for c in df.columns:
+                    if re.search(r"(time|date)", str(c), flags=re.I):
+                        s = pd.to_datetime(df[c], errors="coerce")
+                        if s.notna().mean() > 0.5:
+                            df["datetime"] = s; ts_col = "datetime"; break
+
     if ts_col is None:
-        # try parse any column ending with 'time' or 'date'
-        ok = [c for c in df.columns if re.search(r"(time|date)", str(c), flags=re.I)]
-        for c in ok:
-            s = pd.to_datetime(df[c], errors="coerce")
-            if s.notna().mean() > 0.8:
-                ts_col = c; break
-    if ts_col is None:
-        raise ValueError("Incident verisinde zaman kolonu bulunamadı (timestamp/datetime/occurred_at/...).")
+        raise ValueError("Suç verisinde zaman bilgisi bulunamadı (date/time veya datetime).")
+
     df["_ts"] = pd.to_datetime(df[ts_col], errors="coerce")
     df = df[df["_ts"].notna()].copy()
-
-    # geoid normalize / presence
-    if "GEOID" not in df.columns:
-        raise ValueError("Incident verisinde GEOID yok. GEOID olmadan 911 ile eşleştirme yapılamaz.")
-    df["GEOID"] = normalize_geoid(df["GEOID"].astype(str), DEFAULT_GEOID_LEN)
-
-    # hour bin
     df["date"] = df["_ts"].dt.date
     df["event_hour"] = df["_ts"].dt.hour.astype("int16")
     df["hr_key"] = ((df["event_hour"] // 3) * 3).astype(int)
     df["hour_range"] = df["hr_key"].apply(lambda h: f"{h:02d}-{min(h+3,24):02d}")
-    # hour_ts = date + hr_key (start of 3h bin)
     df["hour_ts"] = pd.to_datetime(df["date"].astype(str)) + pd.to_timedelta(df["hr_key"], unit="h")
     return df
 
+# =========================
+# 911 → ÖZELLİK ÜRET (LEAKAGE-SAFE) ve MERGE
+# =========================
 def prepare_calls(calls: pd.DataFrame) -> pd.DataFrame:
-    """Normalize and build lag/rolling features from 911 summary (no leakage)."""
     df = calls.copy()
-    # rename counts
     if "911_request_count_hour_range" in df.columns:
         df = df.rename(columns={"911_request_count_hour_range": "hr_cnt"})
     if "911_request_count_daily(before_24_hours)" in df.columns:
         df = df.rename(columns={"911_request_count_daily(before_24_hours)": "daily_cnt"})
-    # add hour_ts
+
     if "date" not in df.columns or "hour_range" not in df.columns:
         raise ValueError("911 özetinde 'date' ve 'hour_range' kolonları gerekli.")
+
     df["date"] = to_date(df["date"])
     df["hr_key"] = df["hour_range"].str.slice(0,2).astype(int)
     df["hour_ts"] = pd.to_datetime(df["date"].astype(str)) + pd.to_timedelta(df["hr_key"], unit="h")
-    # types
+
     if "GEOID" in df.columns:
-        df["GEOID"] = normalize_geoid(df["GEOID"].astype(str), DEFAULT_GEOID_LEN)
-    # sort for rolling
+        df["GEOID"] = normalize_geoid(df["GEOID"], DEFAULT_GEOID_LEN)
+
     df = df.sort_values(["GEOID","hour_ts"]).reset_index(drop=True)
-    # ensure hr_cnt/daily_cnt exist
+
     if "hr_cnt" not in df.columns:
         df["hr_cnt"] = 0
     if "daily_cnt" not in df.columns:
-        # reconstruct daily_cnt as sum of hours per day
         tmp = df.groupby(["GEOID","date"], observed=True)["hr_cnt"].sum().reset_index(name="daily_cnt")
         df = df.merge(tmp, on=["GEOID","date"], how="left")
 
-    # leakage-safe lags (shift BEFORE joining to incidents)
+    # sızıntı güvenli laglar (olaylarla birleştirmeden ÖNCE shift)
     df["hr_cnt_t1"] = df.groupby("GEOID", observed=True)["hr_cnt"].shift(1).fillna(0).astype(int)
     df["hr_cnt_last3h"] = (df.groupby("GEOID", observed=True)["hr_cnt"]
                              .transform(lambda s: s.shift(1).rolling(3, min_periods=1).sum())
                              .fillna(0).astype(int))
     df["daily_cnt_prev"] = df.groupby("GEOID", observed=True)["daily_cnt"].shift(1).fillna(0).astype(int)
 
-    # pass-through rolling windows if exist
+    # varsa dışarıdan gelen pencereler (3g/7g)
     for col in ["911_geo_last3d","911_geo_last7d"]:
         if col in df.columns:
-            # keep numeric
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
     keep_cols = ["GEOID","hour_ts","hr_cnt_t1","hr_cnt_last3h","daily_cnt_prev","date"]
@@ -498,58 +494,47 @@ def prepare_calls(calls: pd.DataFrame) -> pd.DataFrame:
         if k in df.columns: keep_cols.append(k)
     return df[keep_cols]
 
-def build_incident_features(inc: pd.DataFrame, calls_feat: pd.DataFrame) -> pd.DataFrame:
-    out = inc.merge(
-        calls_feat,
-        on=["GEOID","hour_ts"],
-        how="left"
-    )
-    # fill NaNs with 0 for the engineered numeric features
+def merge_crime_with_911(crime_df: pd.DataFrame, calls_feat: pd.DataFrame) -> pd.DataFrame:
+    out = crime_df.merge(calls_feat, on=["GEOID","hour_ts"], how="left")
     for c in ["hr_cnt_t1","hr_cnt_last3h","daily_cnt_prev","911_geo_last3d","911_geo_last7d"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
     return out
 
-
 # =========================
 # MAIN
 # =========================
-
 def main():
     log(f"📁 BASE_DIR: {BASE_DIR}")
-    # 1) ensure 911 summary exists (or load it)
-    try:
-        calls = minimal_911_summary_ensure()
-    except Exception:
-        log("⚠️ 911 özet üretilemedi; var olan LOCAL_911 deneniyor.")
-        if not LOCAL_911.exists():
-            raise
-        calls = pd.read_csv(LOCAL_911, low_memory=False, dtype={"GEOID": "string"})
 
+    # 1) 911 özetini hazırla/garanti et
+    calls = minimal_911_summary_ensure()
     log_shape(calls, "911 summary (loaded)")
 
-    # 2) read incidents
-    inc = read_incidents(INCIDENT_CSV)
-    log_shape(inc, "incidents (loaded)")
+    # 2) Crime kaynağını seç + oku
+    crime_path = pick_crime_source()
+    crime_df = read_crime_df(crime_path)
+    log_shape(crime_df, "crime (loaded)")
 
-    # 3) prepare calls with leakage-safe lags
+    # 3) 911 lag özelliklerini hazırla
     calls_feat = prepare_calls(calls)
     log_shape(calls_feat, "911 features (prepared)")
 
-    # 4) merge -> incident-level features
-    inc_feat = build_incident_features(inc, calls_feat)
-    log_shape(inc_feat, "incidents × 911 (merged)")
+    # 4) Birleştir → fr_crime_01.csv
+    merged = merge_crime_with_911(crime_df, calls_feat)
+    log_shape(merged, "crime × 911 (merged)")
 
-    # 5) save
-    safe_save_csv(inc_feat, OUT_INCIDENT_WITH_911)
-    log(f"✅ Yazıldı: {OUT_INCIDENT_WITH_911}")
+    # 5) Kaydet
+    safe_save_csv(merged, OUT_FR_CRIME_01)
+    log(f"✅ Yazıldı: {OUT_FR_CRIME_01}")
 
-    # quick preview
     try:
-        print(inc_feat.head(10).to_string(index=False))
+        preview_cols = ["GEOID","date","hour_range","hr_cnt_t1","hr_cnt_last3h","daily_cnt_prev"]
+        show = [c for c in preview_cols if c in merged.columns]
+        if show:
+            print(merged[show].head(10).to_string(index=False))
     except Exception:
         pass
-
 
 if __name__ == "__main__":
     main()
