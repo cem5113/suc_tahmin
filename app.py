@@ -206,6 +206,7 @@ RAW_911_URL = pick_url(
 )
 
 CRIME_CSV_URL = "https://github.com/cem5113/crime_prediction_data/raw/main/sf_crime.csv"
+CRIME_CSV_LATEST = CRIME_CSV_URL 
 SF311_URL     = "https://github.com/cem5113/crime_prediction_data/raw/main/sf_311_last_5_years.csv"
 
 
@@ -225,7 +226,7 @@ SF911_AGENCY_FILTER = pick_url("SF911_AGENCY_FILTER", "agency like '%Police%'")
 SF911_API_TOKEN     = pick_url("SF911_API_TOKEN", "")
 
 # Çocuk süreçlerin de aynı değerleri görmesi için ENV
-os.environ["CRIME_CSV_URL"] = CRIME_CSV_URL
+os.environ["CRIME_CSV_URL"] = CRIME_CSV_LATEST
 os.environ["RAW_911_URL"]   = RAW_911_URL
 os.environ["SF311_URL"]     = SF311_URL
 os.environ["GEOID_LEN"]     = os.environ.get("GEOID_LEN", "11")
