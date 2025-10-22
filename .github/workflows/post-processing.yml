@@ -11,9 +11,11 @@ jobs:
       WX_LOCATION: "paris"
       WX_UNIT: "metric"
       GEOID_LEN: "11"
-      # 🔽 artifact tabanlı okuma/yazma için ENV
-      ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
-      ARTIFACT_DIR: artifact_unzipped
+
+      # Artifact-first okuma/yazma için ENV
+      # Not: dawidd6 action dosyaları ZIP olarak değil doğrudan klasöre indirir/açar.
+      ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip   # yoksa sorun değil; kod klasörden okur
+      ARTIFACT_DIR: artifact                                 # indirilen içerik burada
       FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
       FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
 
@@ -33,20 +35,21 @@ jobs:
           python -m pip install -U pip wheel setuptools
           [ -f requirements.txt ] && pip install -r requirements.txt || true
 
-      # 🔽 Upstream pipeline artifact'ını indir (ZIP)
-      - name: Download upstream artifact
-        uses: actions/download-artifact@v4
+      # ⬇️ Upstream pipeline artifact'ını başka workflow/run'dan indir
+      - name: Download upstream artifact (from another workflow)
+        uses: dawidd6/action-download-artifact@v6
         with:
-          name: sf-crime-pipeline-output
-          path: artifact
-        continue-on-error: true  # artifact bulunamazsa fallback dizinleri devreye girer
+          workflow: full_pipeline.yml        # artifact'ı üreten workflow dosyası
+          workflow_conclusion: success       # son başarılı run
+          branch: main
+          name: sf-crime-pipeline-output     # indirmek istediğin artifact adı
+          path: artifact                     # içerikleri buraya aç
 
       - name: Set STACKING_DATASET
         run: echo "STACKING_DATASET=${CRIME_DATA_DIR}/fr_crime_09.csv" >> $GITHUB_ENV
 
       - name: FR 00) Base grid / event label merge
         env:
-          # (scriptler artifact_utils kullanıyorsa bu ENV'ler otomatik devrede)
           ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
           ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
           FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
@@ -54,12 +57,7 @@ jobs:
         run: |
           set -e
           python -u update_crime_fr.py
-          # grid dosyası artifacts'ta olabilir; varsa göster, yoksa sorun değil
           head -n 5 "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv" || true
-
-      # ❌ (İsteğe bağlı) Artık gerek yok: 911 özetini artifacts'tan okuyoruz
-      # - name: Prefetch FR 911 summary (optional)
-      #   run: ...
 
       - name: FR 01) 911
         env:
