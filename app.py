@@ -264,9 +264,11 @@ os.environ["DEMOG_WHITELIST"] = st.secrets.get(
     os.environ.get("DEMOG_WHITELIST", "")
 )
 
-# --- GitHub Actions entegrasyonu ---
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "cem5113/crime_prediction_data")
-GITHUB_WORKFLOW = os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml")
+
+# ENV'de yoksa varsayılanı ENV'e de yaz (dispatch tarafı için güvenli)
+os.environ["GITHUB_WORKFLOW"] = os.environ.get("GITHUB_WORKFLOW", "full_pipeline.yml")
+GITHUB_WORKFLOW = os.environ["GITHUB_WORKFLOW"]
 
 ARTIFACT_NAMES = [
     "crime-pipeline-output",       # ✅ yeni
