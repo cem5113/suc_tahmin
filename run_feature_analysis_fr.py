@@ -57,8 +57,10 @@ def sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     for c in df.columns:
         nc = re.sub(r"[^\w]+", "_", str(c), flags=re.UNICODE)
         nc = re.sub(r"_+", "_", nc).strip("_")
-        if nc in seen: seen[nc]+=1; nc=f"{nc}_dup{seen[nc]}"
-        else: seen[nc]=0
+        if nc in seen:
+            seen[nc]+=1; nc=f"{nc}_dup{seen[nc]}"
+        else:
+            seen[nc]=0
         new_cols.append(nc)
     df.columns = new_cols
     return df
@@ -71,14 +73,17 @@ def extract_quantile_label(val):
 def coerce_numeric(df: pd.DataFrame, exclude_cols: List[str]) -> Tuple[pd.DataFrame, List[str], List[str]]:
     numeric_cols, categorical_cols = [], []
     for c in df.columns:
-        if c in exclude_cols: categorical_cols.append(c); continue
+        if c in exclude_cols:
+            categorical_cols.append(c); continue
         if df[c].dtype == object:
             qvals = df[c].map(extract_quantile_label)
             if qvals.notna().mean() > 0.6: df[c] = qvals
         if df[c].dtype == object:
             conv = pd.to_numeric(df[c], errors="coerce")
-            if conv.notna().mean() > 0.8: df[c] = conv; numeric_cols.append(c)
-            else: categorical_cols.append(c)
+            if conv.notna().mean() > 0.8:
+                df[c] = conv; numeric_cols.append(c)
+            else:
+                categorical_cols.append(c)
         else:
             numeric_cols.append(c)
     return df, numeric_cols, categorical_cols
@@ -118,6 +123,56 @@ def collapse_to_base_feature(feature_names_transformed: List[str]) -> Dict[str, 
         base = name.split("_", 1)[0] if ("_" in name) else name
         mapping.setdefault(base, []).append(i)
     return mapping
+
+# --- YENİ: dönüşmüş isimleri güvenle al + importances hizalama yardımcıları ---
+def get_transformed_feature_names(pre: ColumnTransformer, X_sample: pd.DataFrame) -> List[str]:
+    """
+    ColumnTransformer'dan dönüşmüş kolon isimlerini güvenle döndürür.
+    Öncelik: pre.get_feature_names_out(); değilse fallback (num + OHE) veya f{i}.
+    """
+    try:
+        names = pre.get_feature_names_out()  # "num__colA", "cat__day_of_week_Mon" vb.
+        return [n.split("__", 1)[1] if "__" in n else n for n in names]
+    except Exception:
+        try:
+            ohe = pre.named_transformers_["cat"].named_steps["ohe"]
+            num_cols_final = pre.transformers_[0][2]
+            cat_cols_final = pre.transformers_[1][2]
+            ohe_names = ohe.get_feature_names_out(cat_cols_final).tolist()
+            return list(num_cols_final) + ohe_names
+        except Exception:
+            n_trans = pre.transform(X_sample).shape[1]
+            return [f"f{i}" for i in range(n_trans)]
+
+def make_importance_series_from_model(model, pre, X_sample, feature_names: List[str]) -> pd.Series | None:
+    """
+    Modelden önem vektörünü alır ve feature_names ile güvenle hizalar.
+    XGB özelinde booster skorları fN -> vektöre çevrilir. Uyuşmazlıkta trim yapar.
+    """
+    # toplam transform kolon sayısı
+    n_trans = pre.transform(X_sample).shape[1]
+
+    if hasattr(model, "feature_importances_"):
+        vals = getattr(model, "feature_importances_", None)
+        if vals is None: return None
+        vals = np.asarray(vals)
+        # isim uzunluğu ile vektörü hizala
+        n = min(len(feature_names), len(vals), n_trans)
+        if n == 0: return None
+        return pd.Series(vals[:n], index=feature_names[:n]).clip(lower=0.0)
+
+    if hasattr(model, "get_booster"):  # XGB
+        try:
+            raw = model.get_booster().get_score(importance_type="gain")
+            tmp = pd.Series({int(k[1:]): v for k, v in raw.items()})
+            tmp = tmp.reindex(range(n_trans)).fillna(0.0)
+            n = min(len(feature_names), n_trans)
+            if n == 0: return None
+            return pd.Series(tmp.values[:n], index=feature_names[:n]).clip(lower=0.0)
+        except Exception:
+            return None
+
+    return None
 
 
 # ---------------- çekirdek: etiketsiz ----------------
@@ -163,22 +218,15 @@ def unsupervised_feature_selection(df_raw: pd.DataFrame, outdir: Path, desired_o
     rf = RandomForestClassifier(n_estimators=500, n_jobs=-1, random_state=42)
     rf.fit(Xt_dense, best_labels)
 
-    # Dönüşmüş isimleri çıkar
-    try:
-        ohe = pre.named_transformers_["cat"].named_steps["ohe"]
-        num_cols_final = pre.transformers_[0][2]
-        cat_cols_final = pre.transformers_[1][2]
-        ohe_names = ohe.get_feature_names_out(cat_cols_final).tolist()
-        feature_names_transformed = list(num_cols_final) + ohe_names
-    except Exception:
-        feature_names_transformed = [f"f{i}" for i in range(Xt_dense.shape[1])]
-
-    imp = pd.Series(getattr(rf, "feature_importances_", np.zeros(len(feature_names_transformed))),
-                    index=feature_names_transformed).clip(lower=0.0)
-    if imp.sum() == 0:
+    # Dönüşmüş isimleri güvenle al + hizalama
+    feature_names_transformed = get_transformed_feature_names(pre, X)
+    imp_ser = make_importance_series_from_model(rf, pre, X, feature_names_transformed)
+    if imp_ser is None or imp_ser.sum() == 0:
         raise RuntimeError("RF önemleri hesaplanamadı.")
-    imp_norm = (imp / imp.sum()).sort_values(ascending=False)
-    imp_norm.to_csv(outdir / "feature_importance_unsupervised_transformed.csv")
+    imp_norm = (imp_ser / imp_ser.sum()).sort_values(ascending=False)
+    (outdir / "feature_importance_unsupervised_transformed.csv").write_text(
+        imp_norm.to_csv(), encoding="utf-8"
+    )
     plot_and_save_importance(imp_norm, outdir / "feature_importance_unsupervised.png", 30, "Unsupervised RF Importance")
 
     # OHE -> ana sütun
@@ -280,27 +328,12 @@ def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desire
     with open(outdir / "metrics_supervised.json","w",encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
-    # önem isimleri
-    try:
-        pre_fit = clf.named_steps["pre"]
-        ohe = pre_fit.named_transformers_["cat"].named_steps["ohe"]
-        num_cols_final = pre_fit.transformers_[0][2]
-        cat_cols_final = pre_fit.transformers_[1][2]
-        ohe_names = ohe.get_feature_names_out(cat_cols_final).tolist()
-        feature_names_transformed = list(num_cols_final) + ohe_names
-    except Exception:
-        feature_names_transformed = [f"f{i}" for i in range(clf.named_steps["pre"].transform(X_tr).shape[1])]
+    # --- YENİ: dönüşmüş isimleri güvenle al + importances hizala ---
+    pre_fit = clf.named_steps["pre"]
+    feature_names_transformed = get_transformed_feature_names(pre_fit, X_tr)
+    imp = make_importance_series_from_model(clf.named_steps["model"], pre_fit, X_tr, feature_names_transformed)
 
-    imp = None
-    model = clf.named_steps["model"]
-    if hasattr(model, "feature_importances_"):
-        imp = pd.Series(model.feature_importances_, index=feature_names_transformed).clip(lower=0.0)
-    elif hasattr(model, "get_booster"):
-        raw = model.get_booster().get_score(importance_type="gain")
-        ser = pd.Series({int(k[1:]): v for k,v in raw.items()})
-        ser = ser.reindex(range(len(feature_names_transformed))).fillna(0.0)
-        imp = pd.Series(ser.values, index=feature_names_transformed)
-    if imp is None or imp.sum()==0:
+    if imp is None or imp.sum() == 0:
         joblib.dump(clf, outdir / "model_pipeline.joblib")
         return True
 
