@@ -12,10 +12,12 @@ Akış (etiketsiz):
 - RF feature_importances_ (dönüşmüş uzayda)
 - OHE alt-kolonlarını ana sütuna toplayıp ileri seçim (proxy=küme)
 - Seçilen ana sütunlarla çıktı CSV yazılır (+ GEOID passthrough)
+- YENİ: ileri-seçim eğrisi CSV/PNG + özet JSON (best_k / elbow / plateau)
 
 Akış (hedef varsa):
 - Basit denetimli: aynı preprocess + RF/XGB/LGBM, önem + ileri seçim (F1)
 - Çıktı CSV: GEOID (passthrough) + seçilen özellikler + hedef
+- YENİ: denetimli ileri-seçim eğrisi CSV/PNG + özet JSON (best_k / elbow / plateau)
 """
 
 import argparse, json, re, warnings, joblib
@@ -142,7 +144,7 @@ def extract_geoid_series(df_raw: pd.DataFrame) -> pd.Series | None:
     s.name = "GEOID"
     return s
 
-# --- YENİ: dönüşmüş isimleri güvenle al + importances hizalama yardımcıları ---
+# --- dönüşmüş isimleri güvenle al + importances hizalama yardımcıları ---
 def get_transformed_feature_names(pre: ColumnTransformer, X_sample: pd.DataFrame) -> List[str]:
     """ColumnTransformer'dan dönüşmüş kolon isimlerini güvenle döndürür."""
     try:
@@ -183,6 +185,59 @@ def make_importance_series_from_model(model, pre, X_sample, feature_names: List[
             return None
 
     return None
+
+# --- ileri-seçim eğrisi analizi + artefaktlar (YENİ) ---
+def _analyze_forward_curve(curve: List[dict], key: str, eps: float = 0.0015, plateau_win: int = 3):
+    """
+    curve: [{"k": int, key: float, ...}, ...]
+    key  : "acc_proxy" (etiketsiz) ya da "f1" (denetimli)
+    eps  : marjinal kazanç eşiği; bunun altı 'plato' sayılır.
+    """
+    if not curve:
+        return {"best_k": None, "best_score": None, "elbow_k": None, "plateau_from": None}
+
+    ks = [int(c["k"]) for c in curve]
+    vs = [float(c.get(key, float("nan"))) for c in curve]
+
+    best_idx = int(np.nanargmax(vs))
+    best_k = ks[best_idx]
+    best_score = float(vs[best_idx])
+
+    gains = [float("nan")] + [vs[i] - vs[i-1] for i in range(1, len(vs))]
+
+    elbow_k = None
+    for i in range(1, len(ks)):
+        if gains[i] < eps:
+            elbow_k = ks[i]
+            break
+
+    plateau_from = None
+    for i in range(plateau_win, len(ks)):
+        window = gains[i-plateau_win+1:i+1]
+        if all(g < eps for g in window):
+            plateau_from = ks[i-plateau_win+1]
+            break
+
+    return {
+        "best_k": int(best_k),
+        "best_score": best_score,
+        "elbow_k": int(elbow_k) if elbow_k is not None else None,
+        "plateau_from": int(plateau_from) if plateau_from is not None else None,
+    }
+
+def _save_forward_curve_artifacts(curve: List[dict], key: str, outdir: Path, title: str):
+    # CSV
+    dfc = pd.DataFrame(curve)
+    dfc.to_csv(outdir / "forward_selection_curve.csv", index=False)
+    # PNG
+    plt.figure(figsize=(7.5, 4.5))
+    plt.plot(dfc["k"], dfc[key], marker="o")
+    plt.xlabel("k (seçilen temel değişken sayısı)")
+    plt.ylabel(key)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(outdir / "forward_selection_curve.png", dpi=180)
+    plt.close()
 
 
 # ---------------- çekirdek: etiketsiz ----------------
@@ -270,8 +325,17 @@ def unsupervised_feature_selection(df_raw: pd.DataFrame, outdir: Path, desired_o
         if score > best_score:
             best_score, best_set = score, chosen.copy()
 
+    # Eğri artefaktları + özet
     with open(outdir / "forward_selection_unsupervised.json","w",encoding="utf-8") as f:
         json.dump({"forward_curve": curve, "best_k": len(best_set)}, f, ensure_ascii=False, indent=2)
+    summary = _analyze_forward_curve(curve, key="acc_proxy", eps=0.002)
+    with open(outdir / "forward_selection_summary.json","w",encoding="utf-8") as f:
+        json.dump({"mode":"unsupervised", **summary}, f, ensure_ascii=False, indent=2)
+    _save_forward_curve_artifacts(curve, key="acc_proxy", outdir=outdir,
+                                  title="Forward Selection (Unsupervised, proxy accuracy)")
+    print(f"🏁 Unsupervised özet → best_k={summary['best_k']}, "
+          f"best_score={summary['best_score']:.4f}, "
+          f"elbow_k={summary['elbow_k']}, plateau_from={summary['plateau_from']}")
 
     # --- ÇIKIŞ: GEOID passthrough + seçilen özellikler ---
     selected_cols = [c for c in best_set if c in X.columns]
@@ -372,7 +436,7 @@ def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desire
 
     # ileri seçim (F1)
     template_model = pick_model()[1]
-    chosen, best_set, best_score = [], [], -1
+    chosen, best_set, best_score, curve = [], [], -1, []
     def transform_and_select(pre, Xdf, chosen_bases):
         Xt = pre.transform(Xdf);  Xt = Xt.toarray() if hasattr(Xt,"toarray") else Xt
         keep_idx = sorted(set(sum((base_map[b] for b in chosen_bases), [])))
@@ -386,7 +450,20 @@ def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desire
         p = template_model.predict_proba(Xte_sel)[:,1] if hasattr(template_model,"predict_proba") else template_model.predict(Xte_sel)
         yhat = (p >= 0.5).astype(int) if p.ndim==1 else p
         f1 = f1_score(y_te, yhat)
+        curve.append({"k": len(chosen), "f1": float(f1)})
         if f1 > best_score: best_score, best_set = f1, chosen.copy()
+
+    # Eğri artefaktları + özet
+    with open(outdir / "forward_selection_supervised.json","w",encoding="utf-8") as f:
+        json.dump({"forward_curve": curve, "best_k": len(best_set)}, f, ensure_ascii=False, indent=2)
+    summary = _analyze_forward_curve(curve, key="f1", eps=0.0015)
+    with open(outdir / "forward_selection_summary.json","w",encoding="utf-8") as f:
+        json.dump({"mode":"supervised", **summary}, f, ensure_ascii=False, indent=2)
+    _save_forward_curve_artifacts(curve, key="f1", outdir=outdir,
+                                  title="Forward Selection (Supervised, F1)")
+    print(f"🏁 Supervised özet → best_k={summary['best_k']}, "
+          f"best_f1={summary['best_score']:.4f}, "
+          f"elbow_k={summary['elbow_k']}, plateau_from={summary['plateau_from']}")
 
     # --- ÇIKIŞ: GEOID passthrough + seçilen özellikler + hedef ---
     selected_cols = [c for c in best_set if c in X.columns]
@@ -424,10 +501,20 @@ def main():
 
     # önce hedef var mı diye bak; varsa denetimli yoldan ilerle
     if supervised_if_target(df_raw, target=args.target, outdir=outdir, desired_output_csv=desired_out):
-        return
+        pass
+    else:
+        print("🔎 Tip: fr (etiketsiz) → Denetimsiz özellik seçimi.")
+        unsupervised_feature_selection(df_raw, outdir=outdir, desired_output_csv=desired_out)
 
-    print("🔎 Tip: fr (etiketsiz) → Denetimsiz özellik seçimi.")
-    unsupervised_feature_selection(df_raw, outdir=outdir, desired_output_csv=desired_out)
+    # Çalışma özeti (varsa)
+    try:
+        s = json.loads((outdir / "forward_selection_summary.json").read_text(encoding="utf-8"))
+        mode = s.get("mode")
+        print(f"🔎 Özet ({mode}): "
+              f"best_k={s.get('best_k')}, score={s.get('best_score'):.4f} | "
+              f"elbow_k={s.get('elbow_k')}, plateau_from={s.get('plateau_from')}")
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()
