@@ -10,7 +10,7 @@ import shutil
 # --------------------------
 # Basit ayarlar (ENV ile özelleştirilebilir)
 # --------------------------
-SRC_PATH   = Path(os.getenv("FR_SRC_PATH", "sf_full_labeled.csv"))          # kaynak (zenginleştirilmiş) grid
+SRC_PATH   = Path(os.getenv("FR_SRC_PATH", "sf_crime_grid_full_labeled.csv"))          # kaynak (zenginleştirilmiş) grid
 OUT_PATH   = Path(os.getenv("FR_OUT_PATH", "fr_crime.csv"))                 # çıktı
 MIRROR_DIR = Path(os.getenv("FR_MIRROR_DIR", "crime_prediction_data"))  # opsiyonel ayna klasörü
 KEYS       = ["GEOID","season","day_of_week","event_hour"]                  # grid anahtarı
