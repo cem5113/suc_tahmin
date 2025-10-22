@@ -288,40 +288,40 @@ jobs:
           echo "---- sf_crime_L.csv (head) ----"
           head -n 5 "${CRIME_DATA_DIR}/sf_crime_L.csv" || true
 
-          - name: 01.2) fr_crime.csv oluştur
-            if: ${{ steps.gate.outputs.proceed == 'true' && env.PIPELINE_VARIANT == 'fr' }}
-            env:
-              FR_SRC_PATH: ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
-              FR_OUT_PATH: fr_crime.csv
-              FR_MIRROR_DIR: crime_prediction_data_pre
-            run: |
-              set -e
-              echo "➡️ fr_crime.csv üretiliyor..."
-        
-              if [ -f "update_crime_fr.py" ]; then
-                python -u update_crime_fr.py
-              else
-                python - <<'PY'
-                import pandas as pd, os, shutil
-                from pathlib import Path
-        
-                src = Path(os.getenv("FR_SRC_PATH","sf_full_labeled.csv"))
-                if not src.exists():
-                    raise SystemExit(f"❌ Kaynak bulunamadı: {src}")
-        
-                out = Path(os.getenv("FR_OUT_PATH","fr_crime.csv"))
-                mir = Path(os.getenv("FR_MIRROR_DIR","crime_prediction_data_pre"))
-        
-                df = pd.read_csv(src, low_memory=False)
-                df["GEOID"] = df["GEOID"].astype(str).str.zfill(11)
-                df.to_csv(out, index=False)
-                mir.mkdir(exist_ok=True)
-                shutil.copy2(out, mir / out.name)
-                print(f"✅ Kaydedildi: {out} ({len(df):,} satır)")
-                PY
-              fi
-        
-              head -n 5 fr_crime.csv || true
+      - name: 01.2) fr_crime.csv oluştur
+        if: ${{ steps.gate.outputs.proceed == 'true' && env.PIPELINE_VARIANT == 'fr' }}
+        env:
+          FR_SRC_PATH: ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
+          FR_OUT_PATH: fr_crime.csv
+          FR_MIRROR_DIR: crime_prediction_data_pre
+        run: |
+          set -e
+          echo "➡️ fr_crime.csv üretiliyor..."
+    
+          if [ -f "update_crime_fr.py" ]; then
+            python -u update_crime_fr.py
+          else
+            python - <<'PY'
+            import pandas as pd, os, shutil
+            from pathlib import Path
+    
+            src = Path(os.getenv("FR_SRC_PATH","sf_full_labeled.csv"))
+            if not src.exists():
+                raise SystemExit(f"❌ Kaynak bulunamadı: {src}")
+    
+            out = Path(os.getenv("FR_OUT_PATH","fr_crime.csv"))
+            mir = Path(os.getenv("FR_MIRROR_DIR","crime_prediction_data_pre"))
+    
+            df = pd.read_csv(src, low_memory=False)
+            df["GEOID"] = df["GEOID"].astype(str).str.zfill(11)
+            df.to_csv(out, index=False)
+            mir.mkdir(exist_ok=True)
+            shutil.copy2(out, mir / out.name)
+            print(f"✅ Kaydedildi: {out} ({len(df):,} satır)")
+            PY
+          fi
+    
+          head -n 5 fr_crime.csv || true
 
       - name: Restore 911 summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
