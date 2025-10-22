@@ -54,12 +54,15 @@ def save_atomic(df, path):
     os.replace(tmp, path)
 
 # ================== AYARLAR ==================
-SAVE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
+# SAVE_DIR: normalize + depo adıyla çakışmayı engelle
+_raw_save_dir = os.getenv("CRIME_DATA_DIR", "crime_prediction_data").strip().strip("/\\")
+_repo_leaf = Path.cwd().name  # örn: 'crime_prediction_data' (Actions'ta /work/<repo>/<repo>)
+if not os.path.isabs(_raw_save_dir) and Path(_raw_save_dir).name == _repo_leaf:
+    _raw_save_dir = "."  # aynı ada sahip alt klasörü tekrar oluşturma
+SAVE_DIR = os.path.normpath(_raw_save_dir)
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# 🔴 Adlandırma standardı
-# - Ham 5y kayıt:             sf_311_last_5_years_y.csv
-# - 3 saatlik özet (3h bin):  sf_311_last_5_years.csv  (alias: sf_311_last_5_years_3h.csv)
+# Adlandırma
 RAW_311_NAME_Y = os.getenv("RAW_311_NAME_Y", "sf_311_last_5_years_y.csv")
 AGG_BASENAME   = os.getenv("AGG_311_NAME",   "sf_311_last_5_years.csv")
 AGG_ALIAS      = os.getenv("AGG_311_ALIAS",  "sf_311_last_5_years_3h.csv")
@@ -72,11 +75,10 @@ LEGACY_311   = os.getenv("LEGACY_311",   "sf_311_last_5_year.csv")
 DATASET_BASE = os.getenv("SF311_DATASET", "https://data.sfgov.org/resource/vw6y-z8j6.json")
 SOCRATA_APP_TOKEN = os.getenv("SOCS_APP_TOKEN", "").strip()
 
-# GeoJSON adayları
+# GeoJSON adayları (sadeleştirildi)
 GEOJSON_NAME = os.getenv("SF_BLOCKS_GEOJSON", "sf_census_blocks_with_population.geojson")
 GEOJSON_CANDIDATES = [
     os.path.join(SAVE_DIR, GEOJSON_NAME),
-    os.path.join("crime_prediction_data", GEOJSON_NAME),
     os.path.join(".", GEOJSON_NAME),
 ]
 
@@ -87,16 +89,16 @@ SLEEP_SEC       = float(os.getenv("SF_SODA_THROTTLE_SEC", "0.25"))
 SODA_TIMEOUT    = int(os.getenv("SF_SODA_TIMEOUT", "90"))
 SODA_RETRIES    = int(os.getenv("SF_SODA_RETRIES", "5"))
 
-# Chunk modu: tarih aralığına böl (timeout’lara karşı daha dayanıklı)
-CHUNK_DAYS              = int(os.getenv("SF311_CHUNK_DAYS", "31"))    # ~aylık
+# Chunk modu
+CHUNK_DAYS              = int(os.getenv("SF311_CHUNK_DAYS", "31"))
 MAX_PAGES_PER_CHUNK     = int(os.getenv("SF311_MAX_PAGES_PER_CHUNK", "40"))
-MAX_CONSEC_EMPTY_CHUNKS = int(os.getenv("SF311_MAX_EMPTY_CHUNKS", "8"))  # çok boş geliyorsa erken çık
+MAX_CONSEC_EMPTY_CHUNKS = int(os.getenv("SF311_MAX_EMPTY_CHUNKS", "8"))
 
-# Pencere: varsayılan 5 yıl veya BACKFILL_DAYS override
+# Pencere: 5 yıl veya BACKFILL_DAYS
 FIVE_YEARS     = 5 * 365
 TODAY          = datetime.utcnow().date()
 DEFAULT_START  = TODAY - timedelta(days=FIVE_YEARS)
-BACKFILL_DAYS  = int(os.getenv("BACKFILL_DAYS", "0"))
+BACKFILL_DAYS  = int(os.getenv("BACKFILL_DAYS", "0"))  # ← bug fix
 
 # ================== SOCRATA ==================
 def socrata_get(session: requests.Session, url, params):
@@ -178,7 +180,6 @@ def geotag_to_geoid11(df_new):
 # ================== YARDIMCI: şema tespiti & tohum yükleme ==================
 def _looks_like_raw_311(cols: list[str]) -> bool:
     lc = {c.lower() for c in cols}
-    # raw için karakteristik alanlar
     return any(x in lc for x in ["id", "service_request_id"]) and \
            any(x in lc for x in ["time", "requested_datetime"]) and \
            any(x in lc for x in ["latitude", "lat"]) and \
@@ -195,7 +196,6 @@ def _load_raw_seed_from_base(base_csv_path: str) -> pd.DataFrame:
         print(f"ℹ️ {base_csv_path} özet (3h) gibi görünüyor; ham seed olarak kullanılamaz.")
         return pd.DataFrame()
 
-    # alan adlarını normalize et
     rename_map = {}
     if "service_request_id" in df.columns:
         rename_map["service_request_id"] = "id"
@@ -206,7 +206,6 @@ def _load_raw_seed_from_base(base_csv_path: str) -> pd.DataFrame:
     if rename_map:
         df = df.rename(columns=rename_map)
 
-    # datetime / date / time kur
     if "datetime" not in df.columns:
         if "requested_datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["requested_datetime"], errors="coerce", utc=True)
@@ -219,7 +218,6 @@ def _load_raw_seed_from_base(base_csv_path: str) -> pd.DataFrame:
     if "time" not in df.columns:
         df["time"] = pd.to_datetime(df["datetime"], errors="coerce").dt.time
 
-    # kolon setini tamamla
     keep = ["id","datetime","date","time","lat","long","category","subcategory",
             "agency_responsible","latitude","longitude"]
     for c in keep:
@@ -248,13 +246,11 @@ def resolve_existing_raw_path():
 
 def load_existing_raw_or_seed(raw_path: str) -> pd.DataFrame:
     """Önce _y dosyasını yükle; yoksa repo’daki base CSV ham ise seed olarak kullan."""
-    # 1) _y varsa onu yükle
     if os.path.exists(raw_path):
         df = pd.read_csv(raw_path, dtype={"GEOID": str}, low_memory=False)
         print(f"📥 _y ham dosya yüklendi: {os.path.abspath(raw_path)}")
         return df
 
-    # 2) Repo base (ham ise) → seed
     base_csv = os.path.join(SAVE_DIR, AGG_BASENAME)
     if not os.path.exists(base_csv):
         base_csv = os.path.join(".", AGG_BASENAME)
@@ -262,19 +258,16 @@ def load_existing_raw_or_seed(raw_path: str) -> pd.DataFrame:
         print(f"🔎 Base CSV bulundu: {os.path.abspath(base_csv)}")
         seed = _load_raw_seed_from_base(base_csv)
         if not seed.empty:
-            # GEOID yoksa üret (varsa koru)
             if "GEOID" not in seed.columns or seed["GEOID"].isna().all():
                 seed_geo = geotag_to_geoid11(seed)
             else:
                 seed_geo = seed.copy()
-            # tipler
             seed_geo["datetime"] = pd.to_datetime(seed_geo["datetime"], errors="coerce", utc=True)
             seed_geo["date"]     = pd.to_datetime(seed_geo["date"], errors="coerce").dt.date
             save_atomic(seed_geo, raw_path)
             print(f"✅ Base CSV ham seed olarak işlendi ve {_short(raw_path)} yazıldı.")
             return seed_geo
 
-    # 3) Hiçbiri yoksa boş
     print("ℹ️ Seed bulunamadı; API’den yeni ham üretilecek.")
     return pd.DataFrame()
 
@@ -320,10 +313,6 @@ def decide_start_date(df_existing):
 
 # ================== İNDİRME (TARİH CHUNK) ==================
 def download_by_date_chunks(start_date):
-    """
-    5 yıl gibi geniş aralıkları offset yerine tarih parçalara bölerek indir.
-    Her chunk’ta yine sayfalama var; chunk başarısızsa retry sonrası pas geçilir.
-    """
     print(f"🧩 İndirme modu: DATE-CHUNKS ({CHUNK_DAYS}gün) + paging")
     session = requests.Session()
     police_filter = "(agency_responsible like '%Police%' OR agency_responsible like '%SFPD%')"
@@ -401,10 +390,12 @@ def main():
     print("🔎 CWD:", os.getcwd())
     print("🔎 Tercih edilen SAVE_DIR:", os.path.abspath(SAVE_DIR))
 
-    # 1) Mevcut ham dosya (artifact’tan gelmiş olabilir) veya base’den seed
+    # 1) Mevcut ham dosya veya base’den seed
     raw_path = resolve_existing_raw_path()
-    agg_path = os.path.join(os.path.dirname(raw_path) or ".", AGG_BASENAME)
-    agg_alias_path = os.path.join(os.path.dirname(raw_path) or ".", AGG_ALIAS)
+
+    # Özet dosyaları her zaman SAVE_DIR altında üret
+    agg_path = os.path.join(SAVE_DIR, AGG_BASENAME)
+    agg_alias_path = os.path.join(SAVE_DIR, AGG_ALIAS)
 
     df_raw = load_existing_raw_or_seed(raw_path)
 
@@ -458,10 +449,10 @@ def main():
         df_raw["datetime"] = pd.to_datetime(df_raw["datetime"], errors="coerce", utc=True)
         df_raw.sort_values("datetime", inplace=True)
 
-        save_atomic(df_raw, raw_path)  # << artifact adı
+        save_atomic(df_raw, raw_path)
         print(f"✅ Ham (5y/chunk) kaydedildi: {os.path.abspath(raw_path)}")
 
-        # Uyumluluk kopyaları (workflow eski adları arıyor olabilir)
+        # Uyumluluk kopyaları
         try:
             save_atomic(df_raw, os.path.join(SAVE_DIR, RAW_311_NAME_Y))
             save_atomic(df_raw, os.path.join(SAVE_DIR, LEGACY_311_Y))
@@ -491,7 +482,6 @@ def main():
     # 5) 3 SAATLİK ÖZET (sf_311_last_5_years.csv + alias)
     if not df_raw.empty:
         df_ok = df_raw.dropna(subset=["date"]).copy()
-        # GEOID yoksa özet üretilemez; uyarı ver, boş şemalı özet yaz
         if "GEOID" not in df_ok.columns or df_ok["GEOID"].isna().all():
             print("⚠️ GEOID üretilemedi; özet boş yazılacak.")
             grouped = pd.DataFrame(columns=["GEOID","date","hour_range","311_request_count"])
@@ -519,7 +509,7 @@ def main():
     else:
         print("ℹ️ Özet adımı skip (ham veri yok).")
 
-    # 6) 311 ÖZET + SUÇ (sf_crime_01.csv) → sf_crime_02.csv (fallback’lı)
+    # 6) 311 ÖZET + SUÇ (sf_crime_01.csv) → sf_crime_02.csv
     try:
         crime_01_path = os.path.join(SAVE_DIR, "sf_crime_01.csv")
         if not os.path.exists(crime_01_path):
