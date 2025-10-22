@@ -205,6 +205,10 @@ RAW_911_URL = pick_url(
     "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year.csv",
 )
 
+CRIME_CSV_URL = "https://github.com/cem5113/crime_prediction_data/raw/main/sf_crime.csv"
+SF311_URL     = "https://github.com/cem5113/crime_prediction_data/raw/main/sf_311_last_5_years.csv"
+
+
 # CSV-ONLY: Nüfus verisi yerel dosyadan okunacak
 DEFAULT_POP_CSV = str((Path(os.environ.get("CRIME_DATA_DIR", "crime_prediction_data")) / "sf_population.csv").resolve())
 POPULATION_PATH = pick_url("POPULATION_PATH", DEFAULT_POP_CSV)
