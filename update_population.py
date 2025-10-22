@@ -1,5 +1,4 @@
-# update_population.py — nüfus (GEOID + population) zenginleştirme → sf_crime_03.csv
-
+# update_population.py — GEOID (11 hane, tract) zenginleştirme → sf_crime_03.csv
 import os
 import re
 from pathlib import Path
@@ -33,21 +32,17 @@ def _find_geoid_col(df: pd.DataFrame) -> str | None:
     for n in cands:
         if n.lower() in low:
             return low[n.lower()]
-    # fallback: içinde 'geoid' geçen herhangi bir kolon
     for c in df.columns:
         if "geoid" in c.lower():
             return c
     return None
 
 def _find_population_col(df: pd.DataFrame) -> str | None:
-    cands = [
-        "population","pop","total_population","B01003_001E","estimate","total",
-    ]
+    cands = ["population","pop","total_population","B01003_001E","estimate","total","value"]
     low = {c.lower(): c for c in df.columns}
     for n in cands:
         if n.lower() in low:
             return low[n.lower()]
-    # çok sade dosyalarda 'value' gibi gelebilir
     for c in df.columns:
         if re.fullmatch(r"(pop.*|.*population.*|value)", c, flags=re.I):
             return c
@@ -59,6 +54,12 @@ def _len_ok(s: pd.Series, L: int) -> float:
 
 def _level_name(L: int) -> str:
     return {5: "county", 11: "tract", 12: "blockgroup", 15: "block"}.get(L, f"L={L}")
+
+def _clean_to_numeric(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(
+        s.astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
+        errors="coerce"
+    )
 
 # ----------------------------- Paths/ENV -----------------------------
 BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
@@ -76,7 +77,7 @@ if not CRIME_INPUT or not Path(CRIME_INPUT).exists():
 
 CRIME_OUTPUT = str(BASE_DIR / "sf_crime_03.csv")
 
-# Population input: sadece YEREL CSV
+# Population input (yerel CSV veya artifact’tan kopyalanmış CSV)
 POPULATION_PATH = (os.getenv("POPULATION_PATH", "") or "").strip()
 if not POPULATION_PATH:
     cand = BASE_DIR / "sf_population.csv"
@@ -92,67 +93,52 @@ else:
     if not Path(POPULATION_PATH).exists():
         raise FileNotFoundError(f"POPULATION_PATH yok: {POPULATION_PATH}")
 
-# İsteğe bağlı hedef seviye (auto: veri uzunluğundan çıkar)
-CENSUS_GEO_LEVEL = os.getenv("CENSUS_GEO_LEVEL", "auto").strip().lower()
-MAP_LEN = {"county": 5, "tract": 11, "blockgroup": 12, "block": 15}
-
-# ----------------------------- Read -----------------------------
-crime = pd.read_csv(CRIME_INPUT, low_memory=False)
+# ----------------------------- Read (string!) -----------------------------
+# Tüm kolonları string okumak GEOID'nin float'a dönüşmesini engeller
+crime = pd.read_csv(CRIME_INPUT, low_memory=False, dtype=str)
 crime_geoid_col = _find_geoid_col(crime)
 if not crime_geoid_col:
     raise RuntimeError("Suç veri setinde GEOID kolonu bulunamadı.")
 
-# Nüfusu str okuyalım ki virgül/format bozulmasın
 pop = pd.read_csv(POPULATION_PATH, low_memory=False, dtype=str)
 pop_geoid_col = _find_geoid_col(pop)
 if not pop_geoid_col:
     raise RuntimeError("Nüfus CSV’de GEOID kolonu bulunamadı (örn. GEOID/geography_id).")
-
 pop_val_col = _find_population_col(pop)
 if not pop_val_col:
-    raise RuntimeError("Nüfus CSV’de nüfus değeri için bir kolon bulunamadı (örn. population/B01003_001E/estimate).")
+    raise RuntimeError("Nüfus CSV’de nüfus değeri kolonu bulunamadı (örn. population/B01003_001E/estimate).")
 
-# ----------------------------- Level & Keys -----------------------------
+# ----------------------------- Force join_len=11 -----------------------------
 crime_len = _mode_len(_digits_only(crime[crime_geoid_col]))
 pop_len   = _mode_len(_digits_only(pop[pop_geoid_col]))
-
-if CENSUS_GEO_LEVEL in MAP_LEN:
-    join_len = MAP_LEN[CENSUS_GEO_LEVEL]
-else:
-    # auto: veriye göre makul birleşik anahtar uzunluğu
-    # Daha ince veriyi daha kaba seviyeye toplayabiliriz; county ise 5’te birleşir.
-    join_len = min(max(5, crime_len), max(5, pop_len))
-
+join_len  = 11   # <— TRACT seviyesine zorunlu
 print(f"[info] crime GEO len≈{crime_len} | pop GEO len≈{pop_len} | join_len={join_len} ({_level_name(join_len)})")
 
 # ----------------------------- Prep Population -----------------------------
 pp = pop[[pop_geoid_col, pop_val_col]].copy()
 pp["_key"] = _key(pp[pop_geoid_col], join_len)
 
-# nüfusu numeriğe çevir (virgül/boşluk temizliği)
-pp["population"] = (
-    pp[pop_val_col].astype(str)
-    .str.replace(",", "", regex=False)
-    .str.replace(" ", "", regex=False)
-)
-pp["population"] = pd.to_numeric(pp["population"], errors="coerce").fillna(0)
+pp["population"] = _clean_to_numeric(pp[pop_val_col]).fillna(0)
 
-# Eğer pop daha ince ise (ör. blockgroup 12 → join 11), aggregate et
+# pop GEOID seviyesi > 11 ise (ör. 12, 15) → 11'e aggregate (sum)
 if pop_len > join_len:
     pp = pp.groupby("_key", as_index=False)["population"].sum()
 else:
-    pp = pp[["_key", "population"]].drop_duplicates("_key")
+    # Aynı anahtarlar varsa sonuncuyu al; 11’e upsample etmiyoruz (county vb. ise bire bir eşleşme az olabilir)
+    pp = pp[["_key", "population"]].drop_duplicates("_key", keep="last")
 
 # ----------------------------- Prep Crime & Merge -----------------------------
 cc = crime.copy()
 cc["_key"] = _key(cc[crime_geoid_col], join_len)
 
-# Hızlı kalite göstergesi
+# Kalite göstergeleri
 ok_pop   = _len_ok(pp["_key"], join_len)
 ok_crime = _len_ok(cc["_key"], join_len)
+inter = len(set(cc["_key"]).intersection(set(pp["_key"])))
 print(f"🔎 GEO normalize: level={_level_name(join_len)} (L={join_len}) | pop_ok={ok_pop:.2%} | crime_ok={ok_crime:.2%}")
+print(f"🔎 Kesişim anahtar sayısı: {inter:,}")
 
-out = cc.merge(pp, how="left", on="_key", suffixes=("", "_demog"))
+out = cc.merge(pp, how="left", on="_key")
 out.drop(columns=["_key"], errors="ignore", inplace=True)
 
 # ----------------------------- Save & Logs -----------------------------
@@ -161,9 +147,10 @@ out.to_csv(CRIME_OUTPUT, index=False)
 print(f"✅ Kaydedildi → {CRIME_OUTPUT}")
 
 try:
-    print(f"📊 satır: crime={len(crime):,} | pop={len(pp):,} | out={len(out):,}")
-    with pd.option_context("display.max_columns", 50, "display.width", 2000):
-        print(out[[crime_geoid_col, "population"]].head(5).to_string(index=False))
+    null_rate = out["population"].isna().mean()
+    print(f"📊 satır: crime={len(crime):,} | pop={len(pp):,} | out={len(out):,} | population NaN oranı={null_rate:.2%}")
+    with pd.option_context("display.max_columns", 60, "display.width", 2000):
+        print(out[[crime_geoid_col, "population"]].head(10).to_string(index=False))
 except Exception as e:
     print(f"ℹ️ Önizleme atlandı: {e}")
 
