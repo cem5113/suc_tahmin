@@ -242,6 +242,13 @@ def plot_and_save_importance(importances: pd.Series, out_png: Path, top_n: int =
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--csv",
+        type=str,
+        required=False,
+        default=os.getenv("CRIME_CSV", "crime_prediction_data/fr_crime_09.csv"),
+        help="Girdi CSV yolu. Verilmezse CRIME_CSV ENV veya 'crime_prediction_data/fr_crime_09.csv' kullanılır."
+    )
     parser.add_argument("--csv", type=str, required=True, help="Girdi CSV yolu (örn. fr_crime_grid_full_labeled.csv)")
     parser.add_argument("--target", type=str, default="Y_label", help="Hedef sütun adı (binary 0/1)")
     parser.add_argument("--id_col", type=str, default="id", help="ID sütunu (varsa)")
@@ -251,6 +258,13 @@ def main():
     parser.add_argument("--outdir", type=str, default="outputs_feature_analysis", help="Çıktı klasörü")
     args = parser.parse_args()
 
+    csv_path = args.csv
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(
+            f"CSV dosyası bulunamadı: {csv_path}. "
+            f"Komutu '--csv <dosya>' ile verin ya da CRIME_CSV ortam değişkenini ayarlayın."
+        )
+        
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
