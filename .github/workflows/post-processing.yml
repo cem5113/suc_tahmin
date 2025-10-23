@@ -162,22 +162,21 @@ jobs:
           python -u make_neighbors_fr.py || true
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
 
-      # ✅ YENİ: Özellik analizi → fr_crime_10.csv üret
       - name: FR 10) Feature Analysis (FR → fr_crime_10.csv)
         run: |
           set -e
-          # Çıktı klasörünü oluştur
-          mkdir -p "outputs_feature_analysis_fr"
+          mkdir -p outputs_feature_analysis_fr
+          python -u crime_feature_analysis.py \
+            --csv "${CRIME_DATA_DIR}/fr_crime_08.csv" \
+            --target "Y_label" \
+            --sample_n 300000 \
+            --test_size 0.2 \
+            --random_state 42 \
+            --outdir "outputs_feature_analysis_fr" \
+            --out_csv "${CRIME_DATA_DIR}/fr_crime_09.csv"
 
-          # Çalıştır: run_feature_analysis_fr.py (main dizininde)
-          python -u run_feature_analysis_fr.py \
-            --csv "${CRIME_DATA_DIR}/fr_crime_09.csv" \
-            --out_csv "${CRIME_DATA_DIR}/fr_crime_10.csv" \
-            --outdir "outputs_feature_analysis_fr"
-
-          # Hızlı kontrol
           echo "🧠 Feature analysis completed. Checking outputs..."
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_10.csv" || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
           ls -lah "${CRIME_DATA_DIR}" || true
           ls -lah "outputs_feature_analysis_fr" || true
 
