@@ -57,7 +57,7 @@ try:
 except Exception:
     HAS_SHAP = False
 
-
+CRIME_CSV: ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
 # ---------- yardımcılar ----------
 def sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Sütun adlarını güvenli/sade hale getirir."""
