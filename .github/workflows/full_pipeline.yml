@@ -14,7 +14,7 @@ on:
         description: "Manuel tetiklemede 07:00 kapısını YOK SAY"
         type: boolean
         default: true
-      top_k:
+      top_k: 
         description: "Stacking: her saat dilimi için önerilecek GEOID sayısı"
         default: "50"
 
