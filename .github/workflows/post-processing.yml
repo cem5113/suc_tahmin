@@ -1,15 +1,15 @@
 name: Post Processing (FR)
 
-permissions:
-  contents: read
-  actions: read
-
 on:
   workflow_run:
     workflows: ["Full SF Crime Pipeline"]   # upstream workflow adı
     types: [completed]
     branches: [main]
 
+permissions:
+  contents: read
+  actions: read
+  
 jobs:
   run_fr:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
