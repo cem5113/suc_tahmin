@@ -720,10 +720,10 @@ jobs:
           NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
         run: |
           set -e
-          echo "▶️ sf_crime_07 + neighbors → sf_crime_08"
-          ls -lah "${CRIME_DATA_DIR}" | grep sf_crime_07 || echo "⚠️ sf_crime_07 yok"
+          [ -f "${CRIME_DATA_DIR}/sf_crime_07.csv" ] || { echo "❌ sf_crime_07.csv yok"; exit 2; }
+          [ -f "${NEIGH_FILE}" ] || { echo "❌ neighbors.csv yok: ${NEIGH_FILE}"; exit 3; }
           python -u make_neighbors.py
-          ls -lah "${CRIME_DATA_DIR}/sf_crime_08.csv" || echo "❌ sf_crime_08.csv oluşmadı!"
+          [ -f "${CRIME_DATA_DIR}/sf_crime_08.csv" ] || { echo "❌ sf_crime_08.csv oluşmadı"; exit 4; }
 
       - name: 11) Install ML deps for stacking
         if: ${{ steps.gate.outputs.proceed == 'true' }}
