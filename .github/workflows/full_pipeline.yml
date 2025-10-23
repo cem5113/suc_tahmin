@@ -741,13 +741,13 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          CRIME_CSV: ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv   # <— eklendi
         run: |
           set -e
           echo "---- run_feature_analysis.py (ilk 40 satır) ----"
           sed -n '1,40p' run_feature_analysis.py || true
           if [ -f run_feature_analysis.py ]; then
             python -u run_feature_analysis.py \
-              --csv "${CRIME_DATA_DIR}/sf_crime_08.csv" \
               --outdir "${CRIME_DATA_DIR}/outputs_feature_analysis" \
               --out_csv "${CRIME_DATA_DIR}/sf_crime_09.csv" \
               --group_by_geoid
