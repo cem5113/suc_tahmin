@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
   actions: read
-  
+
 jobs:
   run_fr:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
@@ -42,7 +42,7 @@ jobs:
           python -m pip install -U pip wheel setuptools
           [ -f requirements.txt ] && pip install -r requirements.txt || true
 
-      # ⬇️ Upstream pipeline artifact'ını başka workflow/run'dan indir
+      # ⬇️ Upstream pipeline artifact'ını tetikleyen run'dan indir
       - name: Download upstream artifact (triggering run)
         uses: dawidd6/action-download-artifact@v6
         with:
@@ -50,7 +50,17 @@ jobs:
           name: sf-crime-pipeline-output
           path: artifact
 
-      # Not: stacking dataset ini en sonda (özellik analizinden sonra) set edeceğiz.
+      # (Opsiyonel) Eğer bazı adımlar ZIP bekliyorsa:
+      - name: Unzip artifact if present (optional)
+        run: |
+          set -e
+          if [ -f "${{ env.ARTIFACT_ZIP }}" ]; then
+            sudo apt-get update -y >/dev/null
+            sudo apt-get install -y unzip >/dev/null
+            unzip -o "${{ env.ARTIFACT_ZIP }}" -d "${{ env.ARTIFACT_DIR }}"
+          else
+            echo "No artifact ZIP file found (this is fine)."
+          fi
 
       - name: FR 00) Base grid / event label merge
         env:
@@ -153,111 +163,82 @@ jobs:
 
       - name: FR 09) Neighbors
         env:
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
         run: |
           set -e
-          python -u make_neighbors_fr.py || true
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
-
-      - name: FR 10) Feature Analysis (FR → fr_crime_10.csv)
-        run: |
-          set -e
-          mkdir -p outputs_feature_analysis_fr
-          python -u crime_feature_analysis.py \
-            --csv "${CRIME_DATA_DIR}/fr_crime_08.csv" \
-            --target "Y_label" \
-            --sample_n 300000 \
-            --test_size 0.2 \
-            --random_state 42 \
-            --outdir "outputs_feature_analysis_fr" \
-            --out_csv "${CRIME_DATA_DIR}/fr_crime_09.csv"
-
-          echo "🧠 Feature analysis completed. Checking outputs..."
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
-          ls -lah "${CRIME_DATA_DIR}" || true
-          ls -lah "outputs_feature_analysis_fr" || true
-
-      # STACKING_DATASET'i 10'a yönlendir; dosya yoksa 09'a düş
-      - name: Set STACKING_DATASET (prefer fr_crime_10.csv)
-        run: |
-          set -e
-          if [ -s "${CRIME_DATA_DIR}/fr_crime_10.csv" ]; then
-            echo "STACKING_DATASET=${CRIME_DATA_DIR}/fr_crime_10.csv" >> $GITHUB_ENV
-            echo "✅ Using STACKING_DATASET=fr_crime_10.csv"
+          # Betik yolunu bul
+          if [ -f scripts/make_neighbors_fr.py ]; then
+            PY=scripts/make_neighbors_fr.py
+          elif [ -f make_neighbors_fr.py ]; then
+            PY=make_neighbors_fr.py
           else
-            echo "STACKING_DATASET=${CRIME_DATA_DIR}/fr_crime_09.csv" >> $GITHUB_ENV
-            echo "⚠️  Fallback STACKING_DATASET=fr_crime_09.csv (fr_crime_10.csv not found)"
+            echo "⚠️ make_neighbors_fr.py bulunamadı, adım atlanıyor."
+            exit 0
           fi
+          # Girdiler kabaca mevcut mu? (opsiyonel uyarı)
+          test -f "${CRIME_DATA_DIR}/fr_crime_08.csv" || echo "⚠️ fr_crime_08.csv yok (devam edilebilir)."
 
-      # 🔁 Stacking modelini feature analysis çıktısıyla yeniden çalıştır
-      - name: FR 11) Stacking
-        env:
-          STACKING_DATASET: ${{ env.STACKING_DATASET }}
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+          python -u "$PY" || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
+
+      # Parquet motorunu kur
+      - name: Install parquet engine
         run: |
-          set -e
-          echo "🚀 Running stacking model with dataset: ${STACKING_DATASET}"
-          python -u stacking_risk_pipeline_fr.py
+          python -m pip install -U pyarrow
 
       # ✅ CSV'leri Parquet'e çevir ve hem CSV hem Parquet'i tek bir ZIP'e topla
       - name: FR 12) Convert outputs to Parquet & ZIP
+        env:
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
         run: |
           set -e
-          # Parquet dönüştürme: crime_prediction_data ve outputs_feature_analysis_fr içindeki tüm CSV'ler
           python - <<'PY'
           import os, glob, sys, zipfile
           from pathlib import Path
           import pandas as pd
 
           base = os.environ.get("CRIME_DATA_DIR","crime_prediction_data")
-          extra = "outputs_feature_analysis_fr"
+          extra = os.environ.get("ARTIFACT_DIR","artifact")
           out_zip = Path(base) / "fr_outputs_parquet.zip"
 
           def files_in(dirpath, pattern):
-              if not os.path.isdir(dirpath): return []
-              return sorted(glob.glob(os.path.join(dirpath, pattern)))
+            if not os.path.isdir(dirpath): return []
+            return sorted(glob.glob(os.path.join(dirpath, pattern)))
 
           # 1) CSV -> Parquet dönüştür
           converted_parquets = []
           for folder in [base, extra]:
-              for fp in files_in(folder, "*.csv"):
-                  pq_path = Path(fp).with_suffix(".parquet")
-                  try:
-                      df = pd.read_csv(fp, low_memory=False)
-                      df.to_parquet(pq_path, index=False)  # pyarrow/fastparquet
-                      print(f"→ parquet yazıldı: {pq_path}")
-                      converted_parquets.append(str(pq_path))
-                  except Exception as e:
-                      print(f"skip (csv->parquet) {fp}: {e}", file=sys.stderr)
+            for fp in files_in(folder, "*.csv"):
+              pq_path = Path(fp).with_suffix(".parquet")
+              try:
+                df = pd.read_csv(fp, low_memory=False)
+                df.to_parquet(pq_path, index=False)  # pyarrow
+                print(f"→ parquet yazıldı: {pq_path}")
+                converted_parquets.append(str(pq_path))
+              except Exception as e:
+                print(f"skip (csv->parquet) {fp}: {e}", file=sys.stderr)
 
           # 2) ZIP'e hem CSV hem Parquet ekle (göreli yolu koru)
           to_zip = set()
           for folder in [base, extra]:
-              for patt in ("*.csv","*.parquet"):
-                  for fp in files_in(folder, patt):
-                      to_zip.add(fp)
+            for patt in ("*.csv","*.parquet"):
+              for fp in files_in(folder, patt):
+                to_zip.add(fp)
 
           with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-              for fp in sorted(to_zip):
-                  p = Path(fp)
-                  try:
-                      # crime_prediction_data altında ise göreli yolu koru
-                      arcname = p.relative_to(base) if str(p).startswith(str(Path(base))) else p.name
-                  except Exception:
-                      arcname = p.name
-                  z.write(fp, arcname=str(arcname))
-                  print(f"+ ZIP'e eklendi: {arcname}")
+            for fp in sorted(to_zip):
+              p = Path(fp)
+              try:
+                # crime_prediction_data altında ise göreli yolu koru
+                arcname = p.relative_to(base) if str(p).startswith(str(Path(base))) else p.name
+              except Exception:
+                arcname = p.name
+              z.write(fp, arcname=str(arcname))
+              print(f"+ ZIP'e eklendi: {arcname}")
+
           print(f"✅ ZIP hazır: {out_zip} (toplam {len(to_zip)} dosya)")
           PY
-
-          # Kısa kontrol
-          ls -lah "${CRIME_DATA_DIR}" | sed -n '1,200p'
 
       - name: Upload FR pipeline outputs
         uses: actions/upload-artifact@v4
@@ -268,12 +249,9 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/fr_crime_0*.csv
             ${{ env.CRIME_DATA_DIR }}/fr_crime_10.csv
             ${{ env.CRIME_DATA_DIR }}/*.parquet
-            outputs_feature_analysis_fr/**
-            outputs_feature_analysis_fr/*.parquet
             ${{ env.CRIME_DATA_DIR }}/neighbors.csv
             ${{ env.CRIME_DATA_DIR }}/risk_hourly*.csv
             ${{ env.CRIME_DATA_DIR }}/patrol_recs*.csv
             ${{ env.CRIME_DATA_DIR }}/metrics_*.csv
-            ${{ env.CRIME_DATA_DIR }}/fr_outputs_parquet.zip   # 👈 CSV+Parquet tek pakette
           if-no-files-found: warn
           retention-days: 14
