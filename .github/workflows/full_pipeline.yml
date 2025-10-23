@@ -749,12 +749,12 @@ jobs:
           MAX_CAT_UNIQUE: "60"           # OHE üst sınırı
         run: |
           set -e
-          echo "---- crime_feature_analysis.py (ilk 40 satır) ----"
-          sed -n '1,40p' crime_feature_analysis.py || true
-          if [ -f crime_feature_analysis.py ]; then
-            python -u crime_feature_analysis.py
+          echo "---- run_feature_analysis.py (ilk 40 satır) ----"
+          sed -n '1,40p' run_feature_analysis.py || true
+          if [ -f run_feature_analysis.py ]; then
+            python -u run_feature_analysis.py
           else
-            echo "❌ crime_feature_analysis.py dosyası repo’da yok."
+            echo "❌ run_feature_analysis.py dosyası repo’da yok."
             exit 2
           fi
 
