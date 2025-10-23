@@ -1,7 +1,7 @@
 # update_weather_fr.py
 # Amaç: Şehir-geneli günlük hava verisini suç verisine sadece "tarih" üzerinden eklemek.
-# Girdi: fr_crime_08.csv / sf_crime_08.csv (veya alternatif adaylar)
-# Çıkış: fr_crime_09.csv / sf_crime_09.csv
+# Girdi: fr_crime_07.csv / sf_crime_07.csv (veya alternatif adaylar)
+# Çıkış: fr_crime_08.csv / sf_crime_08.csv
 
 import os
 from pathlib import Path
@@ -110,8 +110,8 @@ BASE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
 Path(BASE_DIR).mkdir(exist_ok=True)
 
 CRIME_IN_CANDS = [
-    os.path.join(BASE_DIR, "fr_crime_08.csv"),
-    os.path.join(BASE_DIR, "sf_crime_08.csv"),
+    os.path.join(BASE_DIR, "fr_crime_07.csv"),
+    os.path.join(BASE_DIR, "sf_crime_07.csv"),
     os.path.join(BASE_DIR, "fr_crime.csv"),
     os.path.join(BASE_DIR, "sf_crime.csv"),
 ]
@@ -129,7 +129,7 @@ def pick_existing(paths):
 
 CRIME_IN = pick_existing(CRIME_IN_CANDS)
 if not CRIME_IN:
-    raise FileNotFoundError("❌ Suç girdisi bulunamadı: fr_crime_08.csv / sf_crime_08.csv / fr_crime.csv / sf_crime.csv")
+    raise FileNotFoundError("❌ Suç girdisi bulunamadı: fr_crime_07.csv / sf_crime_07.csv / fr_crime.csv / sf_crime.csv")
 
 WEATHER_IN = pick_existing(WEATHER_CANDS)
 if not WEATHER_IN:
@@ -138,7 +138,7 @@ if not WEATHER_IN:
 # Çıkış dosya adı: girdinin prefix'ine göre ayarla
 fname = os.path.basename(CRIME_IN)
 prefix = "fr" if fname.startswith("fr_") else ("sf" if fname.startswith("sf_") else "fr")
-CRIME_OUT = os.path.join(BASE_DIR, f"{prefix}_crime_09.csv")
+CRIME_OUT = os.path.join(BASE_DIR, f"{prefix}_crime_08.csv")
 
 # ---------------- LOAD & MERGE ----------------
 print(f"📥 Suç: {CRIME_IN}")
