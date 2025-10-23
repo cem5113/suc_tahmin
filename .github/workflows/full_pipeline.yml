@@ -722,9 +722,24 @@ jobs:
           set -e
           [ -f "${CRIME_DATA_DIR}/sf_crime_07.csv" ] || { echo "❌ sf_crime_07.csv yok"; exit 2; }
           [ -f "${NEIGH_FILE}" ] || { echo "❌ neighbors.csv yok: ${NEIGH_FILE}"; exit 3; }
-          python -u make_neighbors.py
-          [ -f "${CRIME_DATA_DIR}/sf_crime_08.csv" ] || { echo "❌ sf_crime_08.csv oluşmadı"; exit 4; }
 
+          # Doğru betik yolunu bul ve çalıştır
+          if [ -f scripts/make_neighbors.py ]; then
+            PY=scripts/make_neighbors.py
+          elif [ -f make_neighbors.py ]; then
+            PY=make_neighbors.py
+          else
+            echo "❌ make_neighbors.py bulunamadı (scripts/ altında olmalı)."
+            exit 4
+          fi
+
+          python -u "$PY"
+
+          # Çıktıyı doğrula
+          [ -f "${CRIME_DATA_DIR}/sf_crime_08.csv" ] || { echo "❌ sf_crime_08.csv oluşmadı"; exit 5; }
+          echo "---- sf_crime_08.csv (head) ----"
+          head -n 10 "${CRIME_DATA_DIR}/sf_crime_08.csv" || true
+          
       - name: 11) Install ML deps for stacking
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
