@@ -122,3 +122,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # === fr_crime_09.csv'nin ilk 5 satırını göster ve kaydet ===
+    try:
+        df_out = pd.read_csv(OUT_CSV)
+        print("\n📊 fr_crime_09.csv — ilk 5 satır:")
+        print(df_out.head())
+
+    except Exception as e:
+        print(f"⚠️ Önizleme yüklenemedi: {e}")
