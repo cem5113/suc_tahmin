@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-unified_feature_analysis_sf_only.py
+run_feature_analysis.py
 
 Girdi:  sf_crime_08.csv (veya hedefi olan başka bir CSV)
 Çıktı:  varsayılan sf_crime_09.csv (veya --out_csv ile belirtilen)
