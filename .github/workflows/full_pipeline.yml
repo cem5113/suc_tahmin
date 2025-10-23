@@ -741,20 +741,40 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          CRIME_CSV: ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv   # <— eklendi
+          CRIME_CSV: ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
         run: |
           set -e
+          echo "PWD: $(pwd)"
+          echo "CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+          echo "CRIME_CSV=${CRIME_CSV}"
+      
+          echo "---- List CRIME_DATA_DIR ----"
+          ls -lah "${CRIME_DATA_DIR}" || true
+          echo "---- Grep sf_crime_08.csv in workspace ----"
+          find . -maxdepth 4 -type f -name "sf_crime_08.csv" -printf "FOUND: %p\n" || true
+      
+          if [ ! -f "${CRIME_CSV}" ]; then
+            echo "❌ CRIME_CSV işaret ettiği dosya yok: ${CRIME_CSV}"
+            echo "İpuçları:"
+            echo " - Dosyayı önceki adım gerçekten üretti mi?"
+            echo " - Aynı job içinde mi, yoksa artifact olarak indirmeniz mi gerekiyor?"
+            exit 3
+          fi
+      
           echo "---- run_feature_analysis.py (ilk 40 satır) ----"
           sed -n '1,40p' run_feature_analysis.py || true
+      
           if [ -f run_feature_analysis.py ]; then
             python -u run_feature_analysis.py \
+              --csv "${CRIME_CSV}" \
               --outdir "${CRIME_DATA_DIR}/outputs_feature_analysis" \
               --out_csv "${CRIME_DATA_DIR}/sf_crime_09.csv" \
               --group_by_geoid
           else
-            echo "❌ run_feature_analysis.py dosyası repo’da yok."
+            echo "❌ run_feature_analysis.py repo kökünde bulunamadı."
             exit 2
           fi
+
 
       - name: 14) Re-run stacking on sf_crime_09.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
