@@ -738,7 +738,7 @@ jobs:
           STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
           ENABLE_SPATIAL_TE: "1"
           TE_ALPHA: "50"
-          NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+          NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
           ENABLE_TE_ABLATION: "1"
           ABLASYON_BASIS: "ohe"
         run: |
@@ -794,7 +794,7 @@ jobs:
           STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/sf_crime_09.csv
           ENABLE_SPATIAL_TE: "1"
           TE_ALPHA: "50"
-          NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+          NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
           ENABLE_TE_ABLATION: "1"
           ABLASYON_BASIS: "ohe"
         run: |
