@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-run_feature_analysis.py
+crime_feature_analysis.py
 
 Girdi:  sf_crime_08.csv (veya hedefi olan başka bir CSV)
 Çıktı:  varsayılan sf_crime_09.csv (veya --out_csv ile belirtilen)
@@ -12,9 +12,9 @@ Girdi:  sf_crime_08.csv (veya hedefi olan başka bir CSV)
 - OHE alt-kolonlarını "taban sütun" düzeyinde gruplayıp ileri seçim (F1) ile en iyi seti yazar.
 
 Kullanım:
-  python run_feature_analysis.py --csv sf_crime_08.csv --outdir outputs_feature_analysis --group_by_geoid
+  python crime_feature_analysis.py --csv sf_crime_08.csv --outdir outputs_feature_analysis --group_by_geoid
   # veya
-  export CRIME_CSV=sf_crime_08.csv && python run_feature_analysis.py
+  export CRIME_CSV=sf_crime_08.csv && python crime_feature_analysis.py
 """
 import os, argparse, json, re, warnings, joblib
 warnings.filterwarnings("ignore")
