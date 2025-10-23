@@ -1,10 +1,15 @@
 name: Post Processing (FR)
 
+permissions:
+  contents: read
+  actions: read
+
 on:
   workflow_dispatch:
 
 jobs:
   run_fr:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     env:
       CRIME_DATA_DIR: crime_prediction_data
@@ -34,13 +39,10 @@ jobs:
           python -m pip install -U pip wheel setuptools
           [ -f requirements.txt ] && pip install -r requirements.txt || true
 
-      # ⬇️ Upstream pipeline artifact'ını başka workflow/run'dan indir
-      - name: Download upstream artifact (from another workflow)
+      - name: Download upstream artifact (triggering run)
         uses: dawidd6/action-download-artifact@v6
         with:
-          workflow: full_pipeline.yml
-          workflow_conclusion: success
-          branch: main
+          run_id: ${{ github.event.workflow_run.id }}   # 👈 tetikleyen run
           name: sf-crime-pipeline-output
           path: artifact
 
