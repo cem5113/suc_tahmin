@@ -10,20 +10,20 @@ Akış (etiketsiz):
 - Preprocess (impute, OHE, scale)
 - KMeans k=2..4 -> en iyi silhouette
 - RF feature_importances_ (dönüşmüş uzayda)
-- OHE alt-kolonlarını ana sütuna toplayıp ileri seçim (proxy=küme)
+- OHE alt-kolonlarını "taban sütun" düzeyinde toplayıp ileri seçim (proxy=küme)
 - Seçilen ana sütunlarla çıktı CSV yazılır (+ GEOID passthrough)
-- YENİ: ileri-seçim eğrisi CSV/PNG + özet JSON (best_k / elbow / plateau)
+- İleri-seçim eğrisi CSV/PNG + özet JSON (best_k / elbow / plateau)
 
 Akış (hedef varsa):
 - Basit denetimli: aynı preprocess + RF/XGB/LGBM, önem + ileri seçim (F1)
 - Çıktı CSV: GEOID (passthrough) + seçilen özellikler + hedef
-- YENİ: denetimli ileri-seçim eğrisi CSV/PNG + özet JSON (best_k / elbow / plateau)
+- Denetimli ileri-seçim eğrisi CSV/PNG + özet JSON (best_k / elbow / plateau)
 """
 
-import argparse, json, re, warnings, joblib
+import os, argparse, json, re, warnings, joblib
 warnings.filterwarnings("ignore")
 from pathlib import Path
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -61,22 +61,28 @@ def sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
         nc = re.sub(r"[^\w]+", "_", str(c), flags=re.UNICODE)
         nc = re.sub(r"_+", "_", nc).strip("_")
         if nc in seen:
-            seen[nc]+=1; nc=f"{nc}_dup{seen[nc]}"
+            seen[nc] += 1; nc = f"{nc}_dup{seen[nc]}"
         else:
-            seen[nc]=0
+            seen[nc] = 0
         new_cols.append(nc)
     df.columns = new_cols
     return df
 
+
 def extract_quantile_label(val):
     if pd.isna(val): return np.nan
     m = re.match(r"Q(\d+)", str(val).strip())
-    return int(m.group(1)) if m else np.nan
+    try:
+        return int(m.group(1)) if m else np.nan
+    except Exception:
+        return np.nan
 
-def coerce_numeric(df: pd.DataFrame, exclude_cols: List[str]) -> Tuple[pd.DataFrame, List[str], List[str]]:
+
+def coerce_numeric(df: pd.DataFrame, exclude_cols: Sequence[str]) -> Tuple[pd.DataFrame, List[str], List[str]]:
     numeric_cols, categorical_cols = [], []
+    excl = set(exclude_cols)
     for c in df.columns:
-        if c in exclude_cols:
+        if c in excl:
             categorical_cols.append(c); continue
         if df[c].dtype == object:
             qvals = df[c].map(extract_quantile_label)
@@ -91,28 +97,31 @@ def coerce_numeric(df: pd.DataFrame, exclude_cols: List[str]) -> Tuple[pd.DataFr
             numeric_cols.append(c)
     return df, numeric_cols, categorical_cols
 
+
 def pick_model():
     if HAS_XGB:
         return "xgb", XGBClassifier(
             n_estimators=500, max_depth=6, learning_rate=0.07,
             subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
             tree_method="hist", objective="binary:logistic",
-            eval_metric="auc", n_jobs=-1
+            eval_metric="auc", n_jobs=-1, random_state=42
         )
     if HAS_LGBM:
         return "lgbm", LGBMClassifier(
             n_estimators=800, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, n_jobs=-1
+            subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, n_jobs=-1, random_state=42
         )
     return "rf", RandomForestClassifier(
         n_estimators=500, max_depth=None, n_jobs=-1,
         class_weight="balanced_subsample", random_state=42
     )
 
+
 def compute_class_weight(y: pd.Series) -> float:
     y = pd.to_numeric(y, errors="coerce").fillna(0).astype(int).clip(0,1)
     pos, neg = int((y==1).sum()), int((y==0).sum())
     return float(neg)/float(pos) if pos>0 else 1.0
+
 
 def plot_and_save_importance(importances: pd.Series, out_png: Path, top_n: int = 30, title: str = "Feature Importance"):
     top = importances.sort_values(ascending=False).head(top_n)
@@ -120,15 +129,97 @@ def plot_and_save_importance(importances: pd.Series, out_png: Path, top_n: int =
     top.iloc[::-1].plot(kind="barh")
     plt.title(title); plt.tight_layout(); plt.savefig(out_png, dpi=200); plt.close()
 
-def collapse_to_base_feature(feature_names_transformed: List[str]) -> Dict[str, List[int]]:
-    mapping = {}
-    for i, name in enumerate(feature_names_transformed):
-        base = name.split("_", 1)[0] if ("_" in name) else name
+
+def make_ohe_compat(**kwargs):
+    """OneHotEncoder sparse_output (>=1.2) ile sparse (<=1.1) arasında uyumluluk."""
+    try:
+        return OneHotEncoder(**kwargs, handle_unknown="ignore", sparse_output=True)
+    except TypeError:
+        return OneHotEncoder(**kwargs, handle_unknown="ignore", sparse=True)
+
+
+def get_transformed_feature_names(pre: ColumnTransformer,
+                                  numeric_cols_in_use: Sequence[str],
+                                  categorical_cols_in_use: Sequence[str],
+                                  X_sample: pd.DataFrame) -> List[str]:
+    """
+    Numeric + OHE sonrası nihai öznitelik adlarını döndürür; kategorikler 'col=val' olarak yazılır.
+    """
+    names: List[str] = []
+    # sayısal
+    names.extend(list(numeric_cols_in_use))
+    # kategorik
+    try:
+        ohe = pre.named_transformers_["cat"].named_steps["ohe"]
+        ohe_raw = ohe.get_feature_names_out(categorical_cols_in_use).tolist()
+        pretty = []
+        for nm in ohe_raw:
+            matched = False
+            for base in categorical_cols_in_use:
+                pref = f"{base}_"
+                if nm.startswith(pref):
+                    pretty.append(f"{base}={nm[len(pref):]}")
+                    matched = True
+                    break
+            if not matched:
+                pretty.append(nm)
+        names.extend(pretty)
+    except Exception:
+        # son çare: boyut üzerinden isim
+        try:
+            n_total = pre.transform(X_sample).shape[1]
+        except Exception:
+            n_total = len(numeric_cols_in_use)
+        rest = n_total - len(numeric_cols_in_use)
+        names.extend([f"ohe_f{i}" for i in range(rest)])
+    return names
+
+
+def collapse_to_base_feature(feature_names_transformed: Sequence[str]) -> Dict[str, List[int]]:
+    """
+    “Taban sütun” → dönüştürülmüş indeks listesi.
+    - Sayısallar: kendi adı tek indeks.
+    - Kategorikler: 'col=val' ile başlayan tüm indeksler aynı tabana (col) gider.
+    """
+    mapping: Dict[str, List[int]] = {}
+    for i, nm in enumerate(feature_names_transformed):
+        if "=" in nm:
+            base = nm.split("=", 1)[0]
+        else:
+            base = nm
         mapping.setdefault(base, []).append(i)
     return mapping
 
-# --- GEOID passthrough: ham DF'den bul ve 'GEOID' adında döndür ---
-def extract_geoid_series(df_raw: pd.DataFrame) -> pd.Series | None:
+
+def make_importance_series_from_model(model, pre: ColumnTransformer, X_sample: pd.DataFrame,
+                                      feature_names: Sequence[str]) -> Optional[pd.Series]:
+    """Model önem vektörünü isimlerle hizalayıp döndürür; uyuşmazlıkta güvenli trim yapar."""
+    n_trans = pre.transform(X_sample).shape[1]
+
+    if hasattr(model, "feature_importances_"):
+        vals = getattr(model, "feature_importances_", None)
+        if vals is None: return None
+        vals = np.asarray(vals)
+        n = min(len(feature_names), len(vals), n_trans)
+        if n == 0: return None
+        return pd.Series(vals[:n], index=list(feature_names)[:n]).clip(lower=0.0)
+
+    if hasattr(model, "get_booster"):  # XGB
+        try:
+            raw = model.get_booster().get_score(importance_type="gain")
+            tmp = pd.Series({int(k[1:]): v for k, v in raw.items()})
+            tmp = tmp.reindex(range(n_trans)).fillna(0.0)
+            n = min(len(feature_names), n_trans)
+            if n == 0: return None
+            return pd.Series(tmp.values[:n], index=list(feature_names)[:n]).clip(lower=0.0)
+        except Exception:
+            return None
+
+    return None
+
+
+def extract_geoid_series(df_raw: pd.DataFrame) -> Optional[pd.Series]:
+    """Ham DF'den GEOID benzeri sütunu bul ve 'GEOID' adıyla döndür."""
     candidates = ["GEOID", "geoid", "geo_id", "tract_geoid", "geoid10", "tract", "blockgroup", "block_group", "block"]
     found = None
     for cand in candidates:
@@ -144,92 +235,33 @@ def extract_geoid_series(df_raw: pd.DataFrame) -> pd.Series | None:
     s.name = "GEOID"
     return s
 
-# --- dönüşmüş isimleri güvenle al + importances hizalama yardımcıları ---
-def get_transformed_feature_names(pre: ColumnTransformer, X_sample: pd.DataFrame) -> List[str]:
-    """ColumnTransformer'dan dönüşmüş kolon isimlerini güvenle döndürür."""
-    try:
-        names = pre.get_feature_names_out()  # "num__colA", "cat__x_y" ...
-        return [n.split("__", 1)[1] if "__" in n else n for n in names]
-    except Exception:
-        try:
-            ohe = pre.named_transformers_["cat"].named_steps["ohe"]
-            num_cols_final = pre.transformers_[0][2]
-            cat_cols_final = pre.transformers_[1][2]
-            ohe_names = ohe.get_feature_names_out(cat_cols_final).tolist()
-            return list(num_cols_final) + ohe_names
-        except Exception:
-            n_trans = pre.transform(X_sample).shape[1]
-            return [f"f{i}" for i in range(n_trans)]
 
-def make_importance_series_from_model(model, pre, X_sample, feature_names: List[str]) -> pd.Series | None:
-    """Model önem vektörünü isimlerle hizalayıp döndürür; uyuşmazlıkta güvenli trim yapar."""
-    n_trans = pre.transform(X_sample).shape[1]
-
-    if hasattr(model, "feature_importances_"):
-        vals = getattr(model, "feature_importances_", None)
-        if vals is None: return None
-        vals = np.asarray(vals)
-        n = min(len(feature_names), len(vals), n_trans)
-        if n == 0: return None
-        return pd.Series(vals[:n], index=feature_names[:n]).clip(lower=0.0)
-
-    if hasattr(model, "get_booster"):  # XGB
-        try:
-            raw = model.get_booster().get_score(importance_type="gain")
-            tmp = pd.Series({int(k[1:]): v for k, v in raw.items()})
-            tmp = tmp.reindex(range(n_trans)).fillna(0.0)
-            n = min(len(feature_names), n_trans)
-            if n == 0: return None
-            return pd.Series(tmp.values[:n], index=feature_names[:n]).clip(lower=0.0)
-        except Exception:
-            return None
-
-    return None
-
-# --- ileri-seçim eğrisi analizi + artefaktlar (YENİ) ---
+# --- ileri-seçim eğrisi analizi + artefaktlar ---
 def _analyze_forward_curve(curve: List[dict], key: str, eps: float = 0.0015, plateau_win: int = 3):
-    """
-    curve: [{"k": int, key: float, ...}, ...]
-    key  : "acc_proxy" (etiketsiz) ya da "f1" (denetimli)
-    eps  : marjinal kazanç eşiği; bunun altı 'plato' sayılır.
-    """
     if not curve:
         return {"best_k": None, "best_score": None, "elbow_k": None, "plateau_from": None}
-
     ks = [int(c["k"]) for c in curve]
     vs = [float(c.get(key, float("nan"))) for c in curve]
-
     best_idx = int(np.nanargmax(vs))
-    best_k = ks[best_idx]
-    best_score = float(vs[best_idx])
-
+    best_k = ks[best_idx]; best_score = float(vs[best_idx])
     gains = [float("nan")] + [vs[i] - vs[i-1] for i in range(1, len(vs))]
-
     elbow_k = None
     for i in range(1, len(ks)):
         if gains[i] < eps:
-            elbow_k = ks[i]
-            break
-
+            elbow_k = ks[i]; break
     plateau_from = None
     for i in range(plateau_win, len(ks)):
         window = gains[i-plateau_win+1:i+1]
         if all(g < eps for g in window):
-            plateau_from = ks[i-plateau_win+1]
-            break
+            plateau_from = ks[i-plateau_win+1]; break
+    return {"best_k": int(best_k), "best_score": best_score,
+            "elbow_k": int(elbow_k) if elbow_k is not None else None,
+            "plateau_from": int(plateau_from) if plateau_from is not None else None}
 
-    return {
-        "best_k": int(best_k),
-        "best_score": best_score,
-        "elbow_k": int(elbow_k) if elbow_k is not None else None,
-        "plateau_from": int(plateau_from) if plateau_from is not None else None,
-    }
 
 def _save_forward_curve_artifacts(curve: List[dict], key: str, outdir: Path, title: str):
-    # CSV
     dfc = pd.DataFrame(curve)
     dfc.to_csv(outdir / "forward_selection_curve.csv", index=False)
-    # PNG
     plt.figure(figsize=(7.5, 4.5))
     plt.plot(dfc["k"], dfc[key], marker="o")
     plt.xlabel("k (seçilen temel değişken sayısı)")
@@ -259,11 +291,11 @@ def unsupervised_feature_selection(df_raw: pd.DataFrame, outdir: Path, desired_o
                                      "hour_range_x","hour_range_y"] if c in X.columns]
     X, numeric_cols, categorical_cols = coerce_numeric(X, exclude_cols=force_categorical)
 
-    # pipeline (yalnız preprocess)
+    # pipeline (yalnız preprocess) - OHE uyumlu
     num_pipe = Pipeline([("imputer", SimpleImputer(strategy="median")),
                          ("scaler", StandardScaler(with_mean=False))])
     cat_pipe = Pipeline([("imputer", SimpleImputer(strategy="most_frequent")),
-                         ("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=True))])
+                         ("ohe", make_ohe_compat())])
     pre = ColumnTransformer([("num", num_pipe, [c for c in numeric_cols if c in X.columns]),
                              ("cat", cat_pipe, [c for c in categorical_cols if c in X.columns])],
                             remainder="drop")
@@ -284,7 +316,11 @@ def unsupervised_feature_selection(df_raw: pd.DataFrame, outdir: Path, desired_o
     rf.fit(Xt_dense, best_labels)
 
     # Dönüşmüş isimleri güvenle al + hizalama
-    feature_names_transformed = get_transformed_feature_names(pre, X)
+    feature_names_transformed = get_transformed_feature_names(pre,
+        numeric_cols_in_use=[c for c in numeric_cols if c in X.columns],
+        categorical_cols_in_use=[c for c in categorical_cols if c in X.columns],
+        X_sample=X
+    )
     imp_ser = make_importance_series_from_model(rf, pre, X, feature_names_transformed)
     if imp_ser is None or imp_ser.sum() == 0:
         raise RuntimeError("RF önemleri hesaplanamadı.")
@@ -294,25 +330,26 @@ def unsupervised_feature_selection(df_raw: pd.DataFrame, outdir: Path, desired_o
     )
     plot_and_save_importance(imp_norm, outdir / "feature_importance_unsupervised.png", 30, "Unsupervised RF Importance")
 
-    # OHE -> ana sütun
-    base_map = collapse_to_base_feature(imp_norm.index.tolist())
-    base_scores = {b: float(imp_norm.iloc[[i for i,_ in enumerate(imp_norm.index) if i in idxs]].sum())
-                   for b, idxs in base_map.items()}
+    # OHE -> ana sütun eşlemesi
+    base_map = collapse_to_base_feature(feature_names_transformed)
+    # taban skorlarını ensemble olmadan RF önemleri üzerinden hesaplayalım
+    base_scores = {}
+    for b, idxs in base_map.items():
+        names_for_b = [feature_names_transformed[i] for i in idxs if 0 <= i < len(feature_names_transformed)]
+        base_scores[b] = float(imp_norm.loc[imp_norm.index.intersection(names_for_b)].sum())
     base_rank = pd.Series(base_scores).sort_values(ascending=False)
     base_rank.to_csv(outdir / "feature_importance_unsupervised_base.csv")
 
     # İleri seçim (proxy hedef = best_labels)
     model_name, base_model = pick_model()
-    chosen, best_set, best_score, curve = [], [], -1, []
+    chosen, best_set, best_score, curve = [], [], -1.0, []
     X_tr, X_va, y_tr, y_va = train_test_split(X, best_labels, test_size=0.25, random_state=42, stratify=best_labels)
 
     def transform_and_select(pre, Xdf, chosen_bases):
         Xt = pre.transform(Xdf)
         if hasattr(Xt, "toarray"): Xt = Xt.toarray()
-        keep_idx = []
-        for b in chosen_bases: keep_idx.extend(base_map[b])
-        keep_idx = sorted(set(keep_idx))
-        return Xt[:, keep_idx]
+        keep_idx = sorted(set(sum((base_map[b] for b in chosen_bases if b in base_map), [])))
+        return Xt[:, keep_idx] if keep_idx else Xt
 
     pre.fit(X_tr)
     for k, base_feat in enumerate(base_rank.index.tolist(), start=1):
@@ -382,11 +419,11 @@ def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desire
             X[col] = pd.to_numeric(X[col], errors="coerce")
 
     X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
     pre = ColumnTransformer([
         ("num", Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler(with_mean=False))]),
          [c for c in numeric_cols if c in X.columns]),
-        ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")),
-                          ("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=True))]),
+        ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("ohe", make_ohe_compat())]),
          [c for c in categorical_cols if c in X.columns])
     ], remainder="drop")
 
@@ -397,58 +434,83 @@ def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desire
     clf = Pipeline([("pre", pre), ("model", base_model)])
     clf.fit(X_tr, y_tr)
 
-    proba = clf.predict_proba(X_te)[:,1] if hasattr(base_model, "predict_proba") else clf.predict(X_te)
-    yhat = (proba >= 0.5).astype(int) if proba.ndim==1 else proba
+    # metrikler
+    if hasattr(base_model, "predict_proba"):
+        proba = clf.predict_proba(X_te)[:,1]
+        yhat = (proba >= 0.5).astype(int)
+        roc = float(roc_auc_score(y_te, proba))
+    else:
+        pred = clf.predict(X_te)
+        if pred.ndim > 1: pred = pred[:,0]
+        yhat = pred
+        roc = None
+
+    prec, rec, _, _ = precision_recall_fscore_support(y_te, yhat, average="binary", zero_division=0)
     metrics = {
         "model": model_name,
-        "roc_auc": float(roc_auc_score(y_te, proba)) if proba.ndim==1 else None,
+        "roc_auc": roc,
         "f1_default_0.50": float(f1_score(y_te, yhat)),
-        "precision_default_0.50": float(precision_recall_fscore_support(y_te, yhat, average="binary", zero_division=0)[0]),
-        "recall_default_0.50": float(precision_recall_fscore_support(y_te, yhat, average="binary", zero_division=0)[1])
+        "precision_default_0.50": float(prec),
+        "recall_default_0.50": float(rec)
     }
     with open(outdir / "metrics_supervised.json","w",encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
     # Dönüşmüş isimleri güvenle al + importances hizala
     pre_fit = clf.named_steps["pre"]
-    feature_names_transformed = get_transformed_feature_names(pre_fit, X_tr)
+    feature_names_transformed = get_transformed_feature_names(
+        pre_fit,
+        numeric_cols_in_use=[c for c in numeric_cols if c in X.columns],
+        categorical_cols_in_use=[c for c in categorical_cols if c in X.columns],
+        X_sample=X_tr
+    )
     imp = make_importance_series_from_model(clf.named_steps["model"], pre_fit, X_tr, feature_names_transformed)
 
     if imp is None or imp.sum() == 0:
         joblib.dump(clf, outdir / "model_pipeline.joblib")
         # Çıkışı yine de üret (en azından GEOID + hedef ile)
         geo = extract_geoid_series(df_raw)
-        out_df = pd.concat(
-            [d.reset_index(drop=True) for d in ([geo] if geo is not None else []) + [X.reset_index(drop=True), y.rename(target).reset_index(drop=True)]],
-            axis=1
-        )
+        parts = []
+        if geo is not None:
+            parts.append(geo.reset_index(drop=True))
+        parts.extend([X.reset_index(drop=True), y.rename(target).reset_index(drop=True)])
+        out_df = pd.concat(parts, axis=1)
         out_df.to_csv(desired_output_csv, index=False)
+        print("⚠️ Önem bulunamadı; tüm özelliklerle çıktı üretildi.")
         return True
 
     imp_norm = (imp/imp.sum()).sort_values(ascending=False)
     imp_norm.to_csv(outdir / "feature_importance_supervised_transformed.csv")
     plot_and_save_importance(imp_norm, outdir / "feature_importance_supervised.png", 30, "Supervised Importance")
 
-    base_map = collapse_to_base_feature(imp_norm.index.tolist())
-    base_scores = {b: float(imp_norm.iloc[[i for i,_ in enumerate(imp_norm.index) if i in idxs]].sum())
-                   for b, idxs in base_map.items()}
+    base_map = collapse_to_base_feature(feature_names_transformed)
+    # taban skoru, isim eşlemesiyle
+    base_scores = {}
+    for b, idxs in base_map.items():
+        names_for_b = [feature_names_transformed[i] for i in idxs if 0 <= i < len(feature_names_transformed)]
+        base_scores[b] = float(imp_norm.loc[imp_norm.index.intersection(names_for_b)].sum())
     base_rank = pd.Series(base_scores).sort_values(ascending=False)
 
     # ileri seçim (F1)
     template_model = pick_model()[1]
-    chosen, best_set, best_score, curve = [], [], -1, []
+    chosen, best_set, best_score, curve = [], [], -1.0, []
     def transform_and_select(pre, Xdf, chosen_bases):
         Xt = pre.transform(Xdf);  Xt = Xt.toarray() if hasattr(Xt,"toarray") else Xt
-        keep_idx = sorted(set(sum((base_map[b] for b in chosen_bases), [])))
-        return Xt[:, keep_idx]
+        keep_idx = sorted(set(sum((base_map[b] for b in chosen_bases if b in base_map), [])))
+        return Xt[:, keep_idx] if keep_idx else Xt
     pre.fit(X_tr)
     for b in base_rank.index.tolist():
         chosen.append(b)
         Xtr_sel = transform_and_select(pre, X_tr, chosen)
         Xte_sel = transform_and_select(pre, X_te, chosen)
-        template_model.fit(Xtr_sel, y_tr)
-        p = template_model.predict_proba(Xte_sel)[:,1] if hasattr(template_model,"predict_proba") else template_model.predict(Xte_sel)
-        yhat = (p >= 0.5).astype(int) if p.ndim==1 else p
+        if hasattr(template_model, "fit"):
+            template_model.fit(Xtr_sel, y_tr)
+        if hasattr(template_model, "predict_proba"):
+            p = template_model.predict_proba(Xte_sel)[:,1]
+            yhat = (p >= 0.5).astype(int)
+        else:
+            pred = template_model.predict(Xte_sel)
+            yhat = pred[:,0] if getattr(pred, "ndim", 1) > 1 else pred
         f1 = f1_score(y_te, yhat)
         curve.append({"k": len(chosen), "f1": float(f1)})
         if f1 > best_score: best_score, best_set = f1, chosen.copy()
@@ -485,36 +547,53 @@ def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desire
 # ---------------- main ----------------
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--csv", type=str, required=True, help="Girdi CSV (vars: fr_crime_09.csv)")
+    # --csv opsiyonel: CRIME_CSV_FR → CRIME_CSV → 'fr_crime_09.csv' (varsa)
+    p.add_argument("--csv", type=str, default=os.getenv("CRIME_CSV_FR", os.getenv("CRIME_CSV", "")),
+                   help="Girdi CSV (vars: fr_crime_09.csv). Verilmezse CRIME_CSV_FR/CRIME_CSV ortam değişkeni kullanılır.")
     p.add_argument("--target", type=str, default="Y_label", help="Hedef sütun adı (varsa)")
     p.add_argument("--outdir", type=str, default="outputs_feature_analysis_fr", help="Çıktı klasörü")
     p.add_argument("--out_csv", type=str, default="", help="Çıktı CSV yolu (vars: fr_crime_10.csv)")
     args = p.parse_args()
 
+    csv_path = args.csv
+    if not csv_path:
+        guess = Path("fr_crime_09.csv")
+        if guess.exists():
+            csv_path = str(guess)
+    if not csv_path or not Path(csv_path).exists():
+        raise FileNotFoundError(
+            "CSV bulunamadı. '--csv <dosya>' verin ya da CRIME_CSV_FR / CRIME_CSV ortam değişkenini ayarlayın. "
+            "Örn: --csv fr_crime_09.csv"
+        )
+
     outdir = Path(args.outdir); outdir.mkdir(parents=True, exist_ok=True)
-    df_raw = pd.read_csv(args.csv, low_memory=False)
-    fname = Path(args.csv).name.lower()
+    df_raw = pd.read_csv(csv_path, low_memory=False)
+    fname = Path(csv_path).name.lower()
 
     desired_out = Path(args.out_csv) if args.out_csv else (
-        Path(args.csv).with_name("fr_crime_10.csv") if fname.startswith("fr_") else Path(args.csv).with_name("selected_output.csv")
+        Path(csv_path).with_name("fr_crime_10.csv") if fname.startswith("fr_") else Path(csv_path).with_name("selected_output.csv")
     )
 
     # önce hedef var mı diye bak; varsa denetimli yoldan ilerle
     if supervised_if_target(df_raw, target=args.target, outdir=outdir, desired_output_csv=desired_out):
-        pass
+        mode = "supervised"
     else:
         print("🔎 Tip: fr (etiketsiz) → Denetimsiz özellik seçimi.")
         unsupervised_feature_selection(df_raw, outdir=outdir, desired_output_csv=desired_out)
+        mode = "unsupervised"
 
     # Çalışma özeti (varsa)
     try:
         s = json.loads((outdir / "forward_selection_summary.json").read_text(encoding="utf-8"))
-        mode = s.get("mode")
         print(f"🔎 Özet ({mode}): "
               f"best_k={s.get('best_k')}, score={s.get('best_score'):.4f} | "
               f"elbow_k={s.get('elbow_k')}, plateau_from={s.get('plateau_from')}")
     except Exception:
         pass
+
+    print(f"📥 Girdi: {csv_path}")
+    print(f"📤 Çıktı CSV: {desired_out}")
+    print(f"📁 Outdir: {outdir.resolve()}")
 
 if __name__ == "__main__":
     main()
