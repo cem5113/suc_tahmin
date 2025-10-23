@@ -737,12 +737,50 @@ jobs:
           fi
           python -u stacking_risk_pipeline.py
 
-      - name: 13) Install extra deps for patrol
+      - name: 13) Feature analysis → sf_crime_09.csv
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          INPUT_FILE: ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
+          OUTPUT_FILE: ${{ env.CRIME_DATA_DIR }}/sf_crime_09.csv
+          TARGET_COL: Y_label
+          TOP_N_FEATURES: "200"          # istersen 100/150/None
+          NULL_DROP_THRESH: "0.7"        # %70 ve üstü boş ise ele
+          MAX_CAT_UNIQUE: "60"           # OHE üst sınırı
+        run: |
+          set -e
+          echo "---- crime_feature_analysis.py (ilk 40 satır) ----"
+          sed -n '1,40p' crime_feature_analysis.py || true
+          if [ -f crime_feature_analysis.py ]; then
+            python -u crime_feature_analysis.py
+          else
+            echo "❌ crime_feature_analysis.py dosyası repo’da yok."
+            exit 2
+          fi
+
+      - name: 14) Re-run stacking on sf_crime_09.csv
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/sf_crime_09.csv
+          ENABLE_SPATIAL_TE: "1"
+          TE_ALPHA: "50"
+          NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+          ENABLE_TE_ABLATION: "1"
+          ABLASYON_BASIS: "ohe"
+        run: |
+          set -e
+          if [ ! -f "${STACKING_DATASET}" ]; then
+            echo "❌ STACKING_DATASET yok: ${STACKING_DATASET}"
+            exit 2
+          fi
+          python -u stacking_risk_pipeline.py
+
+      - name: 15) Install extra deps for patrol
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           python -m pip install -U requests tzdata
 
-      - name: 14) Produce yarin.csv & week.csv (Visual Crossing)
+      - name: 16) Produce yarin.csv & week.csv (Visual Crossing)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           VISUAL_CROSSING_API_KEY: ${{ secrets.VISUAL_CROSSING_API_KEY }}
