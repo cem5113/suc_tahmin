@@ -5,7 +5,10 @@ permissions:
   actions: read
 
 on:
-  workflow_dispatch:
+  workflow_run:
+    workflows: ["Full SF Crime Pipeline"]   # upstream workflow adı
+    types: [completed]
+    branches: [main]
 
 jobs:
   run_fr:
@@ -39,6 +42,7 @@ jobs:
           python -m pip install -U pip wheel setuptools
           [ -f requirements.txt ] && pip install -r requirements.txt || true
 
+      # ⬇️ Upstream pipeline artifact'ını başka workflow/run'dan indir
       - name: Download upstream artifact (triggering run)
         uses: dawidd6/action-download-artifact@v6
         with:
@@ -274,4 +278,3 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/fr_outputs_parquet.zip   # 👈 CSV+Parquet tek pakette
           if-no-files-found: warn
           retention-days: 14
-
