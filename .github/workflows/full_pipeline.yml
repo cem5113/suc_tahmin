@@ -749,6 +749,26 @@ jobs:
           fi
           python -u stacking_risk_pipeline.py
 
+      - name: Resolve feature CSV (prefer 08)
+        id: featurecsv
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -e
+          for f in \
+            "${CRIME_DATA_DIR}/sf_crime_08.csv" \
+            "${CRIME_DATA_DIR}/sf_crime_07.csv" \
+            "${CRIME_DATA_DIR}/sf_crime_06.csv" \
+            "${CRIME_DATA_DIR}/sf_crime_05.csv"; do
+            if [ -f "$f" ]; then
+              echo "csv=$f" >> "$GITHUB_OUTPUT"
+              echo "✅ Seçilen feature CSV: $f"
+              exit 0
+            fi
+          done
+          echo "❌ sf_crime_08/07/06/03 bulunamadı"
+          exit 1
+
       - name: 13) Feature analysis → sf_crime_09.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
