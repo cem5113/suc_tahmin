@@ -741,18 +741,16 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          INPUT_FILE: ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
-          OUTPUT_FILE: ${{ env.CRIME_DATA_DIR }}/sf_crime_09.csv
-          TARGET_COL: Y_label
-          TOP_N_FEATURES: "200"          # istersen 100/150/None
-          NULL_DROP_THRESH: "0.7"        # %70 ve üstü boş ise ele
-          MAX_CAT_UNIQUE: "60"           # OHE üst sınırı
         run: |
           set -e
           echo "---- run_feature_analysis.py (ilk 40 satır) ----"
           sed -n '1,40p' run_feature_analysis.py || true
           if [ -f run_feature_analysis.py ]; then
-            python -u run_feature_analysis.py
+            python -u run_feature_analysis.py \
+              --csv "${CRIME_DATA_DIR}/sf_crime_08.csv" \
+              --outdir "${CRIME_DATA_DIR}/outputs_feature_analysis" \
+              --out_csv "${CRIME_DATA_DIR}/sf_crime_09.csv" \
+              --group_by_geoid
           else
             echo "❌ run_feature_analysis.py dosyası repo’da yok."
             exit 2
