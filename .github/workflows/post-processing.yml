@@ -181,13 +181,35 @@ jobs:
           python -u "$PY" || true
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
 
-      - name: FR 10) Build fr_crime_10.parquet
+      - name: Install parquet engine
+        run: |
+          python -m pip install -U pyarrow pandas
+      
+      - name: FR 10) Build fr_crime_10.parquet (script)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -e
+          echo "PWD=$(pwd)"
+          ls -lah
+          echo "---- scripts/ ----"
+          ls -lah scripts || true
+          echo "---- data dir ----"
+          ls -lah "${CRIME_DATA_DIR}" || true
+      
+          # script var mı?
+          test -f scripts/make_fr_crime_10.py || { echo "❌ scripts/make_fr_crime_10.py yok!"; exit 1; }
+      
+          # girdi var mı?
+          if [ ! -f "${CRIME_DATA_DIR}/fr_crime_09.parquet" ] && [ ! -f "${CRIME_DATA_DIR}/fr_crime_09.csv" ]; then
+            echo "❌ fr_crime_09.(parquet|csv) bulunamadı. FR 09 adımını doğrulayın."
+            exit 1
+          fi
+      
           python -u scripts/make_fr_crime_10.py
+          echo "---- output ----"
           ls -lh "${CRIME_DATA_DIR}/fr_crime_10.parquet"
+
 
       - name: FR 12) Convert outputs to Parquet & ZIP (separate CSV / Parquet)
         env:
