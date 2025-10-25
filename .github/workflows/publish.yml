@@ -1,0 +1,93 @@
+# .github/workflows/publish.yml
+name: Publish Artifacts to Release
+
+on:
+  workflow_run:
+    workflows: ["Post Processing (FR)"]
+    types: [completed]
+
+permissions:
+  contents: write     # release asset yüklemek için
+  actions: read       # diğer run'lardan artifact çekmek için
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- FR artifact: tetikleyen run_id'den indir ---
+      - name: Download FR artifact from triggering run
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          run_id: ${{ github.event.workflow_run.id }}
+          name: fr-crime-pipeline-output
+          path: dist/fr
+
+      # --- SF artifact(lar): Full SF Crime Pipeline'ın en son başarılı run'ından indir ---
+      - name: Download SF parquet artifact (latest successful)
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: full_pipeline.yml
+          workflow_conclusion: success
+          name: sf-crime-parquet
+          path: dist/sf
+
+      # Eğer SF tarafında metrik dosyası ayrı artifact ise, ayrı adımla indirin:
+      # (Eğer aynı artifact'in içindeyse bu adımı kaldırın.)
+      - name: Download SF metrics artifact (latest successful) # isteğe bağlı
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: full_pipeline.yml
+          workflow_conclusion: success
+          name: sf-crime-pipeline-output
+          path: dist/sf-extra
+
+      # --- Zip varsa aç, dosyaları seç, yayın klasörünü hazırla ---
+      - name: Prepare files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/publish
+
+          # İçeride .zip kalan bir şey varsa aç
+          find dist -type f -name "*.zip" -print -exec unzip -o {} -d dist/unpacked \;
+
+          # FR: fr_crime_09.parquet / paquet
+          FR_CANDIDATE=$(ls dist/fr dist/unpacked 2>/dev/null | sed 's/^/"/;s/$/"/' | xargs -I{} bash -lc 'ls -1d {}/* 2>/dev/null' | grep -Ei 'fr_crime_09\.(parquet|paquet)$' | head -n1 || true)
+          # SF: sf_crime_08.parquet / paquet
+          SF_CANDIDATE=$(ls dist/sf dist/unpacked dist/sf-extra 2>/dev/null | sed 's/^/"/;s/$/"/' | xargs -I{} bash -lc 'ls -1d {}/* 2>/dev/null' | grep -Ei 'sf_crime_08\.(parquet|paquet)$' | head -n1 || true)
+          # Metrikler: metrics_stacking_ohe.parquet / paquet
+          METRICS_CANDIDATE=$(ls dist/sf dist/unpacked dist/sf-extra 2>/dev/null | sed 's/^/"/;s/$/"/' | xargs -I{} bash -lc 'ls -1d {}/* 2>/dev/null' | grep -Ei 'metrics_stacking_ohe\.(parquet|paquet)$' | head -n1 || true)
+
+          echo "FR: $FR_CANDIDATE"
+          echo "SF: $SF_CANDIDATE"
+          echo "METRICS: $METRICS_CANDIDATE"
+
+          # Hepsini yayın klasörüne kopyala; isimleri standardize et (paquet/parquet farkını düzeltir)
+          cp "$FR_CANDIDATE"       dist/publish/fr_crime_09.parquet
+          cp "$SF_CANDIDATE"       dist/publish/sf_crime_08.parquet
+          cp "$METRICS_CANDIDATE"  dist/publish/metrics_stacking_ohe.parquet
+
+          ls -lh dist/publish
+
+      # --- Release (forecast-latest) oluştur / güncelle ve dosyaları asset olarak yükle ---
+      - name: Upload to Release (forecast-latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: forecast-latest
+          name: Latest Forecast Artifacts
+          draft: false
+          prerelease: false
+          files: |
+            dist/publish/fr_crime_09.parquet
+            dist/publish/sf_crime_08.parquet
+            dist/publish/metrics_stacking_ohe.parquet
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
