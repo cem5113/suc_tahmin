@@ -2,7 +2,7 @@ name: Post Processing (FR)
 
 on:
   workflow_run:
-    workflows: ["Full SF Crime Pipeline"]   # upstream workflow adı
+    workflows: ["Full SF Crime Pipeline"]
     types: [completed]
     branches: [main]
 
@@ -20,7 +20,6 @@ jobs:
       WX_UNIT: "metric"
       GEOID_LEN: "11"
 
-      # Artifact-first okuma/yazma için ENV
       ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
       ARTIFACT_DIR: artifact
       FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
@@ -42,15 +41,18 @@ jobs:
           python -m pip install -U pip wheel setuptools
           [ -f requirements.txt ] && pip install -r requirements.txt || true
 
-      # ⬇️ Upstream pipeline artifact'ını tetikleyen run'dan indir
+      # ⬅️ pyarrow/pandas kurulumu FR 10'dan ÖNCE olmalı
+      - name: Install parquet engine
+        run: |
+          python -m pip install -U pyarrow pandas
+
       - name: Download upstream artifact (triggering run)
         uses: dawidd6/action-download-artifact@v6
         with:
-          run_id: ${{ github.event.workflow_run.id }}   # 👈 tetikleyen run
+          run_id: ${{ github.event.workflow_run.id }}
           name: sf-crime-pipeline-output
           path: artifact
 
-      # (Opsiyonel) Eğer bazı adımlar ZIP bekliyorsa:
       - name: Unzip artifact if present (optional)
         run: |
           set -e
@@ -167,7 +169,6 @@ jobs:
           ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
         run: |
           set -e
-          # Betik yolunu bul
           if [ -f scripts/make_neighbors_fr.py ]; then
             PY=scripts/make_neighbors_fr.py
           elif [ -f make_neighbors_fr.py ]; then
@@ -176,18 +177,18 @@ jobs:
             echo "⚠️ make_neighbors_fr.py bulunamadı, adım atlanıyor."
             exit 0
           fi
-          # Girdiler kabaca mevcut mu? (opsiyonel uyarı)
           test -f "${CRIME_DATA_DIR}/fr_crime_08.csv" || echo "⚠️ fr_crime_08.csv yok (devam edilebilir)."
-
           python -u "$PY" || true
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
 
-      # Parquet motorunu kur
-      - name: Install parquet engine
+      - name: FR 10) Build fr_crime_10.parquet
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
-          python -m pip install -U pyarrow pandas
-      
-      # ✅ CSV'leri Parquet'e çevir, CSV ve Parquet'i ayrı ZIP'lere topla
+          set -e
+          python -u scripts/make_fr_crime_10.py
+          ls -lh "${CRIME_DATA_DIR}/fr_crime_10.parquet"
+
       - name: FR 12) Convert outputs to Parquet & ZIP (separate CSV / Parquet)
         env:
           ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
@@ -197,51 +198,38 @@ jobs:
           import os, glob, sys, zipfile
           from pathlib import Path
           import pandas as pd
-      
           base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
           extra = Path(os.environ.get("ARTIFACT_DIR","artifact"))
-      
           out_csv_zip = base / "fr_csv_outputs.zip"
           out_pq_zip  = base / "fr_parquet_outputs.zip"
-      
           def files_in(dirpath, pattern):
               p = Path(dirpath)
               if not p.exists() or not p.is_dir():
                   return []
-              # Alt klasörleri de tara
               return sorted(glob.glob(str(p / "**" / pattern), recursive=True))
-      
-          # 1) CSV -> Parquet dönüşümü
+          # CSV -> Parquet (ek dönüşümler)
           for folder in (base, extra):
               for fp in files_in(folder, "*.csv"):
                   pq_path = Path(fp).with_suffix(".parquet")
                   try:
                       df = pd.read_csv(fp, low_memory=False)
-                      df.to_parquet(pq_path, index=False)  # pyarrow backend
+                      df.to_parquet(pq_path, index=False)
                       print(f"→ parquet yazıldı: {pq_path}")
                   except Exception as e:
                       print(f"skip (csv->parquet) {fp}: {e}", file=sys.stderr)
-      
-          # 2) ZIP'lere ekleme: CSV'ler ayrı, Parquet'ler ayrı
           def arcname_for(fp: Path):
-              # Kök klasöre göre göreli yol; base altındakiler base'e göre, extra altındakiler extra'ya göre
               try:
                   if fp.resolve().is_relative_to(base.resolve()):
                       return fp.relative_to(base)
               except AttributeError:
-                  # Python 3.9 fallback
                   if str(fp.resolve()).startswith(str(base.resolve())):
                       return fp.relative_to(base)
-      
               try:
                   if fp.resolve().as_posix().startswith(extra.resolve().as_posix()):
-                      # extra içindekileri zip içinde 'artifact/' prefix'iyle koy
                       return Path("artifact") / fp.relative_to(extra)
               except Exception:
                   pass
               return Path(fp.name)
-      
-          # CSV ZIP
           with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
               count = 0
               for folder in (base, extra):
@@ -251,8 +239,6 @@ jobs:
                       count += 1
                       print(f"+ CSV ZIP'e eklendi: {arcname_for(p)}")
               print(f"✅ CSV ZIP hazır: {out_csv_zip} (toplam {count} dosya)")
-      
-          # Parquet ZIP
           with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
               count = 0
               for folder in (base, extra):
@@ -263,8 +249,7 @@ jobs:
                       print(f"+ Parquet ZIP'e eklendi: {arcname_for(p)}")
               print(f"✅ Parquet ZIP hazır: {out_pq_zip} (toplam {count} dosya)")
           PY
-      
-      # 📦 CSV ZIP'i yükle
+
       - name: Upload FR pipeline outputs (CSV ZIP)
         uses: actions/upload-artifact@v4
         with:
@@ -272,8 +257,7 @@ jobs:
           path: ${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip
           if-no-files-found: error
           retention-days: 14
-      
-      # 📦 Parquet ZIP'i yükle
+
       - name: Upload FR pipeline outputs (Parquet ZIP)
         uses: actions/upload-artifact@v4
         with:
