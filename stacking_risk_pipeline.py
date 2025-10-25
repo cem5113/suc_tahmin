@@ -17,7 +17,7 @@ Aşama 2 (TRAIN_PHASE=final):
 import os, re, json, warnings
 import numpy as np
 import pandas as pd
-
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from sklearn.base import clone
