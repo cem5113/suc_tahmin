@@ -57,6 +57,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 NEIGHBOR_FILE     = os.getenv("NEIGHBOR_FILE", "").strip()        # 'GEOID,neighbor' iki sütunlu csv (opsiyonel)
 TE_ALPHA          = float(os.getenv("TE_ALPHA", "50"))            # Laplace smoothing gücü (m)
 GEO_COL_NAME      = os.getenv("GEO_COL_NAME", "GEOID")            # GEOID kolon adı
+SF_TZ = ZoneInfo("America/Los_Angeles")
+HORIZON_DAYS = int(os.getenv("PATROL_HORIZON_DAYS", "3"))
 
 # Eğer kullanıcı ENABLE_SPATIAL_TE vermediyse ama NEIGHBOR_FILE verdiyse,
 # Spatial-TE'yi otomatik aç (kullanışlı varsayılan).
@@ -76,6 +78,14 @@ def phase_is_select() -> bool:
     return TRAIN_PHASE == "select"
 
 # -------------------- Helpers: date/hour --------------------
+def _hour_from_range(s: str) -> int:
+    # "00-03" → 0; "21-00" → 21
+    try:
+        h = int(str(s).split("-")[0])
+        return max(0, min(23, h))
+    except Exception:
+        return 0
+      
 def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
@@ -568,50 +578,72 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     risk = df[cols].copy()
     risk["risk_score"] = proba
 
-    # tarih boşsa bugünü bas (SF yerel tarihi)
+    # tarih boşsa bugünü bas (SF)
     if "date" not in risk.columns or pd.to_datetime(risk["date"], errors="coerce").isna().all():
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        risk["date"] = datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
-    
-    # hour_range formatını garanti altına al (00-03 gibi)
+        risk["date"] = datetime.now(SF_TZ).date().isoformat()
+
+    # hour_range'i normalize et ve hour üret
     if "hour_range" in risk.columns:
+        # "00-03" formatını garanti et
         hr = risk["hour_range"].astype(str).str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
         ok = hr.notna().all(axis=1)
         risk.loc[ok, "hour_range"] = (
             hr[0].astype(float).astype(int).map("{:02d}".format) + "-" +
             hr[1].astype(float).astype(int).map("{:02d}".format)
         )
-    
-    # tekilleştir (aynı GEOID-date-hour_range tekrarları varsa)
-    if set(["GEOID", "date", "hour_range"]).issubset(risk.columns):
-        risk = risk.drop_duplicates(["GEOID", "date", "hour_range"], keep="last")
+        risk["hour"] = risk["hour_range"].apply(_hour_from_range)
+    else:
+        # hour_range yoksa 'hour' varsa onu kullan, yoksa 0
+        if "hour" not in risk.columns:
+            risk["hour"] = 0
+        risk["hour"] = pd.to_numeric(risk["hour"], errors="coerce").fillna(0).astype(int)
 
-    # seviyeler
-    q80 = risk["risk_score"].quantile(0.8)
-    q90 = risk["risk_score"].quantile(0.9)
-    def level(x):
-        if x >= max(threshold, q90):
-            return "critical"
-        elif x >= max(threshold * 0.8, q80):
-            return "high"
-        elif x >= 0.5 * threshold:
-            return "medium"
-        else:
-            return "low"
+    # GEOID normalize (varsa)
+    if "GEOID" in risk.columns:
+        risk.rename(columns={"GEOID": "geoid"}, inplace=True)
+    risk["geoid"] = risk["geoid"].astype(str)
 
-    risk["risk_level"] = risk["risk_score"].apply(level)
-    risk["risk_decile"] = pd.qcut(risk["risk_score"].rank(method="first"), 10, labels=False) + 1
+    # -------------------------------
+    # (A) ŞABLON: eldeki EN SON günün (geoid,hour) riskleri
+    # -------------------------------
+    dmax = pd.to_datetime(risk["date"], errors="coerce").max()
+    tmpl = risk[pd.to_datetime(risk["date"], errors="coerce") == dmax][["geoid","hour","risk_score"]].copy()
+    tmpl = tmpl.drop_duplicates(["geoid","hour"], keep="last")
 
-    risk_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
-    risk.to_csv(risk_path, index=False)
+    # -------------------------------
+    # (B) UFUK GRID: yarından başlayarak HORIZON_DAYS gün × 24 saat
+    # -------------------------------
+    today_sf = datetime.now(SF_TZ).date()
+    start_day = today_sf + timedelta(days=1)
+    days = [(start_day + timedelta(days=i)).isoformat() for i in range(max(1, HORIZON_DAYS))]
+    hours = list(range(24))
+
+    # Tüm geoid'ler
+    geoids = sorted(tmpl["geoid"].unique().tolist())
+
+    # Çok-günlük grid: (date, hour, geoid)
+    grid = pd.MultiIndex.from_product([days, hours, geoids], names=["date","hour","geoid"]).to_frame(index=False)
+
+    # Şablondan saatlik skorları yeni günlere yansıt
+    risk_multi = grid.merge(tmpl, on=["geoid","hour"], how="left")
+
+    # Emniyet: risk_score NaN kalan (ör: bazı hour'lar yoksa) → 0
+    risk_multi["risk_score"] = pd.to_numeric(risk_multi["risk_score"], errors="coerce").fillna(0.0)
+
+    # Yaz: risk_hourly.csv (post_patrol.py bunu bekliyor)
+    risk_hourly_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
+    risk_multi.to_csv(risk_hourly_path, index=False)
+
+    # Seviyeleri hızlı etiketlemek istiyorsanız (opsiyonel):
+    # q80 = risk_multi["risk_score"].quantile(0.8)
+    # q90 = risk_multi["risk_score"].quantile(0.9)
+    # ... (gerekirse)
+
+    # ——— Eski tek-gün devriye özeti (rec_path) ———
     rec_path = None
-
-    # aynı gün için Top-K devriye önerileri
-    if "date" in risk.columns and "hour_range" in risk.columns:
-        latest_date = pd.to_datetime(risk["date"], errors="coerce").max()
-        if pd.notna(latest_date):
-            latest_date = latest_date.date()
+    if "hour_range" in df.columns:  # önceki davranışı koruyalım
+        latest_date = dmax.date() if pd.notna(dmax) else None
+        if latest_date is not None:
             day = risk[pd.to_datetime(risk["date"], errors="coerce").dt.date == latest_date].copy()
             rec_rows = []
             TOP_K = int(os.getenv("PATROL_TOP_K", "50"))
@@ -621,20 +653,20 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
                     rec_rows.append({
                         "date": latest_date,
                         "hour_range": hr,
-                        "GEOID": r.get("GEOID", ""),
+                        "geoid": r.get("geoid", ""),
                         "risk_score": float(r["risk_score"]),
-                        "risk_level": r["risk_level"],
                     })
-            recs = pd.DataFrame(rec_rows)
-            rec_path = os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.csv")
-            recs.to_csv(rec_path, index=False)
-            print(f"Patrol recs → {rec_path}")
+            if rec_rows:
+                recs = pd.DataFrame(rec_rows)
+                rec_path = os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.csv")
+                recs.to_csv(rec_path, index=False)
+                print(f"Patrol recs → {rec_path}")
         else:
-            print("ℹ️ Patrol önerisi atlandı (geçerli tarih bulunamadı).")
-    else:
-        print("ℹ️ Patrol önerisi atlandı (date/hour_range yok).")
+            print("ℹ️ Tek-gün patrol özeti atlandı (tarih yok).")
 
-    return risk_path, rec_path
+    # Raporla
+    print(f"✅ risk_hourly yazıldı → {risk_hourly_path}  (days={len(days)}, hours=24, geoids={len(geoids)})")
+    return risk_hourly_path, rec_path
   
 def optional_top_crime_types():
     raw_path = os.path.join(CRIME_DIR, "sf_crime.csv")
