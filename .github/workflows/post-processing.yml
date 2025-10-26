@@ -1,0 +1,384 @@
+name: Post Processing (FR)
+
+on:
+  workflow_run:
+    workflows: ["Full SF Crime Pipeline"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  run_fr:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      CRIME_DATA_DIR: crime_prediction_data
+      WX_LOCATION: "paris"
+      WX_UNIT: "metric"
+      GEOID_LEN: "11"
+
+      ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
+      ARTIFACT_DIR: artifact
+      FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
+      FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure data dir (FR)
+        run: mkdir -p "${CRIME_DATA_DIR}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps (quick)
+        run: |
+          python -m pip install -U pip wheel setuptools
+          [ -f requirements.txt ] && pip install -r requirements.txt || true
+
+      - name: Install parquet engine
+        run: |
+          python -m pip install -U pyarrow pandas
+
+      # 🔽 Tetikleyen run’ın en güncel artifact’ını indir
+      - name: Download upstream artifact (triggering run)
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          run_id: ${{ github.event.workflow_run.id }}
+          name: sf-crime-pipeline-output
+          path: artifact
+
+      - name: Unzip artifact if present (optional)
+        run: |
+          set -e
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y unzip >/dev/null
+          if [ -f "${{ env.ARTIFACT_ZIP }}" ]; then
+            unzip -o "${{ env.ARTIFACT_ZIP }}" -d "${{ env.ARTIFACT_DIR }}"
+          else
+            echo "No artifact ZIP file found (this is fine)."
+          fi
+
+      # ✅ GÜNCEL base verileri artifact'tan CRIME_DATA_DIR'e senkronla (SF güncellemeleri)
+      - name: Sync UPDATED base CSVs from upstream artifact
+        run: |
+          set -euo pipefail
+          mkdir -p "${CRIME_DATA_DIR}"
+          shopt -s nullglob
+          ARTDIR="${ARTIFACT_DIR}"
+          # Liste: update edilmiş veriler → hep artifact'tan kopyala
+          for pat in \
+            "sf_crime.csv" \
+            "sf_crime_y.csv" \
+            "sf_crime_0*.csv" \
+            "sf_crime_grid_full_labeled.csv" \
+            "sf_911_last_5_year*.csv" \
+            "sf_311_last_5_years*.csv" \
+            "sf_bus_stops_with_geoid.csv" \
+            "sf_train_stops_with_geoid.csv" \
+            "sf_pois_cleaned_with_geoid.csv" \
+            "sf_weather_5years*.csv" \
+            "*.geojson" \
+            "risk_hourly*.csv" \
+            "patrol_recs*.csv" \
+            "metrics_*.csv" \
+            "models/*.joblib"
+          do
+            for f in "${ARTDIR}"/${pat}; do
+              [ -f "$f" ] || continue
+              dest="${CRIME_DATA_DIR}/$(basename "$f")"
+              mkdir -p "$(dirname "$dest")"
+              cp -f "$f" "$dest" || true
+              echo "→ synced: $f → $dest"
+            done
+          done
+
+      # ---------------- FR hattı ----------------
+      - name: FR 00) Base grid / event label merge
+        env:
+          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+        run: |
+          set -e
+          python -u update_crime_fr.py
+          head -n 5 "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv" || true
+
+      - name: FR 01) 911
+        env:
+          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+        run: |
+          set -e
+          python -u update_911_fr.py || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_01.csv" || true
+
+      - name: FR 02) 311
+        env:
+          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+        run: |
+          set -e
+          python -u update_311_fr.py || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_02.csv" || true
+
+      - name: FR 03) Population
+        env:
+          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+        run: |
+          set -e
+          python -u update_population_fr.py || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_03.csv" || true
+
+      - name: FR 04) Bus
+        env:
+          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+        run: |
+          set -e
+          python -u update_bus_fr.py || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_04.csv" || true
+
+      - name: FR 05) Train
+        env:
+          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+        run: |
+          set -e
+          python -u update_train_fr.py || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_05.csv" || true
+
+      - name: FR 06) POI
+        env:
+          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+        run: |
+          set -e
+          python -u update_poi_fr.py || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_06.csv" || true
+
+      - name: FR 07) Police & Gov
+        env:
+          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+        run: |
+          set -e
+          python -u update_police_gov_fr.py || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_07.csv" || true
+
+      - name: FR 08) Weather
+        env:
+          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+        run: |
+          set -e
+          python -u update_weather_fr.py || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_08.csv" || true
+
+      - name: FR 09) Neighbors
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+        run: |
+          set -e
+          if [ -f scripts/make_neighbors_fr.py ]; then
+            PY=scripts/make_neighbors_fr.py
+          elif [ -f make_neighbors_fr.py ]; then
+            PY=make_neighbors_fr.py
+          else
+            echo "⚠️ make_neighbors_fr.py bulunamadı, adım atlanıyor."
+            exit 0
+          fi
+          test -f "${CRIME_DATA_DIR}/fr_crime_08.csv" || echo "⚠️ fr_crime_08.csv yok (devam edilebilir)."
+          python -u "$PY" || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
+
+      - name: Install parquet engine (again)
+        run: |
+          python -m pip install -U pyarrow pandas
+
+      - name: FR 10) Build fr_crime_10.parquet (script)
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -e
+          echo "PWD=$(pwd)"
+          ls -lah
+          echo "---- scripts/ ----"
+          ls -lah scripts || true
+          echo "---- data dir ----"
+          ls -lah "${CRIME_DATA_DIR}" || true
+
+          test -f scripts/make_fr_crime_10.py || { echo "❌ scripts/make_fr_crime_10.py yok!"; exit 1; }
+
+          if [ ! -f "${CRIME_DATA_DIR}/fr_crime_09.parquet" ] && [ ! -f "${CRIME_DATA_DIR}/fr_crime_09.csv" ]; then
+            echo "❌ fr_crime_09.(parquet|csv) bulunamadı. FR 09 adımını doğrulayın."
+            exit 1
+          fi
+
+          python -u scripts/make_fr_crime_10.py
+          echo "---- output ----"
+          ls -lh "${CRIME_DATA_DIR}/fr_crime_10.parquet"
+
+      # ---------- Toplu dönüşüm + ZIP'ler ----------
+      - name: FR 12) Convert outputs to Parquet & ZIP (CSV / Parquet)
+        env:
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+        run: |
+          set -e
+          python - <<'PY'
+          import os, glob, sys, zipfile
+          from pathlib import Path
+          import pandas as pd
+          base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
+          extra = Path(os.environ.get("ARTIFACT_DIR","artifact"))
+          out_csv_zip = base / "fr_csv_outputs.zip"
+          out_pq_zip  = base / "fr_parquet_outputs.zip"
+          def files_in(dirpath, pattern):
+              p = Path(dirpath)
+              if not p.exists() or not p.is_dir():
+                  return []
+              return sorted(glob.glob(str(p / "**" / pattern), recursive=True))
+          # CSV -> Parquet
+          for folder in (base, extra):
+              for fp in files_in(folder, "*.csv"):
+                  pq_path = Path(fp).with_suffix(".parquet")
+                  try:
+                      df = pd.read_csv(fp, low_memory=False)
+                      df.to_parquet(pq_path, index=False)
+                      print(f"→ parquet yazıldı: {pq_path}")
+                  except Exception as e:
+                      print(f"skip (csv->parquet) {fp}: {e}", file=sys.stderr)
+          def arcname_for(fp: Path):
+              try:
+                  if fp.resolve().is_relative_to(base.resolve()):
+                      return fp.relative_to(base)
+              except AttributeError:
+                  if str(fp.resolve()).startswith(str(base.resolve())):
+                      return fp.relative_to(base)
+              try:
+                  if fp.resolve().as_posix().startswith(extra.resolve().as_posix()):
+                      return Path("artifact") / fp.relative_to(extra)
+              except Exception:
+                  pass
+              return Path(fp.name)
+          with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              count = 0
+              for folder in (base, extra):
+                  for fp in files_in(folder, "*.csv"):
+                      p = Path(fp)
+                      z.write(p, arcname=str(arcname_for(p)))
+                      count += 1
+                      print(f"+ CSV ZIP'e eklendi: {arcname_for(p)}")
+              print(f"✅ CSV ZIP hazır: {out_csv_zip} (toplam {count} dosya)")
+          with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              count = 0
+              for folder in (base, extra):
+                  for fp in files_in(folder, "*.parquet"):
+                      p = Path(fp)
+                      z.write(p, arcname=str(arcname_for(p)))
+                      count += 1
+                      print(f"+ Parquet ZIP'e eklendi: {arcname_for(p)}")
+              print(f"✅ Parquet ZIP hazır: {out_pq_zip} (toplam {count} dosya)")
+          PY
+
+      # 🆕 3. ZIP: Uygulama paketi
+      - name: Build FR app bundle (3rd ZIP)
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+          cd "${CRIME_DATA_DIR}"
+
+          # risk_hourly.csv → risk_hourly.parquet (yoksa)
+          if [ -f "risk_hourly.csv" ] && [ ! -f "risk_hourly.parquet" ]; then
+            python - <<'PY'
+            import pandas as pd
+            df = pd.read_csv("risk_hourly.csv", low_memory=False)
+            df.to_parquet("risk_hourly.parquet", index=False)
+            PY
+          fi
+
+          # metrics_stacking_ohe.csv → metrics_stacking_ohe.parquet (yoksa)
+          if [ -f "metrics_stacking_ohe.csv" ] && [ ! -f "metrics_stacking_ohe.parquet" ]; then
+            python - <<'PY'
+            import pandas as pd
+            df = pd.read_csv("metrics_stacking_ohe.csv", low_memory=False)
+            df.to_parquet("metrics_stacking_ohe.parquet", index=False)
+            PY
+          fi
+
+          # fr_crime.parquet = fr_crime_10.parquet'in kopyası (uygulama uyumluluğu)
+          if [ -f "fr_crime_10.parquet" ]; then
+            cp -f "fr_crime_10.parquet" "fr_crime.parquet"
+          else
+            echo "❌ fr_crime_10.parquet yok; FR 10 adımı başarısız mı?"
+            exit 1
+          fi
+
+          # fr_crime_09.parquet yoksa fr_crime_09.csv'den üret
+          if [ ! -f "fr_crime_09.parquet" ] && [ -f "fr_crime_09.csv" ]; then
+            python - <<'PY'
+            import pandas as pd
+            df = pd.read_csv("fr_crime_09.csv", low_memory=False)
+            df.to_parquet("fr_crime_09.parquet", index=False)
+            PY
+          fi
+
+          # ZIP oluştur
+          zip -9 -q fr_app_bundle.zip \
+            fr_crime_09.parquet \
+            risk_hourly.parquet \
+            fr_crime.parquet \
+            metrics_stacking_ohe.parquet
+
+          echo "✅ fr_app_bundle.zip hazır"
+          ls -lh fr_app_bundle.zip
+
+      - name: Upload FR pipeline outputs (CSV ZIP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fr-crime-outputs-csv
+          path: ${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload FR pipeline outputs (Parquet ZIP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fr-crime-outputs-parquet
+          path: ${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      # 🆕 3. artifact: uygulama paketi
+      - name: Upload FR app bundle (3rd ZIP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fr-app-bundle
+          path: ${{ env.CRIME_DATA_DIR }}/fr_app_bundle.zip
+          if-no-files-found: error
+          retention-days: 14
