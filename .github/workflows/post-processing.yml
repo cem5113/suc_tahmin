@@ -4,7 +4,6 @@ on:
   workflow_run:
     workflows: ["Full SF Crime Pipeline"]
     types: [completed]
-    branches: [main]
 
 permissions:
   contents: read
@@ -12,18 +11,25 @@ permissions:
 
 jobs:
   run_fr:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    runs-on: ubuntu-latest
-    env:
-      CRIME_DATA_DIR: crime_prediction_data
-      WX_LOCATION: "paris"
-      WX_UNIT: "metric"
-      GEOID_LEN: "11"
-
-      ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
-      ARTIFACT_DIR: artifact
-      FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
-      FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
+    if: >
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        (github.event.workflow_run.event == 'schedule' ||
+         github.event.workflow_run.event == 'workflow_dispatch' ||
+         github.event.workflow_run.event == 'push')
+      }}
+      runs-on: ubuntu-latest
+      env:
+        CRIME_DATA_DIR: crime_prediction_data
+        WX_LOCATION: "paris"
+        WX_UNIT: "metric"
+        GEOID_LEN: "11"
+  
+        ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
+        ARTIFACT_DIR: artifact
+        FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
+        FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
 
     steps:
       - uses: actions/checkout@v4
