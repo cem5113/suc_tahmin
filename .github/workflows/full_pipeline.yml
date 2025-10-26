@@ -42,7 +42,7 @@ env:
 
   PATROL_TOP_K: ${{ github.event.inputs.top_k || '50' }}
 
-  PATROL_HORIZON_DAYS: "3"
+  PATROL_HORIZON_DAYS: "1"
   WX_LOCATION: "san francisco"
   WX_UNIT: "us"
 
