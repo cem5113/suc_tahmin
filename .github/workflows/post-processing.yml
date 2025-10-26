@@ -253,15 +253,18 @@ jobs:
           import os, glob, sys, zipfile
           from pathlib import Path
           import pandas as pd
+      
           base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
           extra = Path(os.environ.get("ARTIFACT_DIR","artifact"))
           out_csv_zip = base / "fr_csv_outputs.zip"
           out_pq_zip  = base / "fr_parquet_outputs.zip"
+      
           def files_in(dirpath, pattern):
               p = Path(dirpath)
               if not p.exists() or not p.is_dir():
                   return []
               return sorted(glob.glob(str(p / "**" / pattern), recursive=True))
+          
           # CSV -> Parquet
           for folder in (base, extra):
               for fp in files_in(folder, "*.csv"):
@@ -272,6 +275,7 @@ jobs:
                       print(f"→ parquet yazıldı: {pq_path}")
                   except Exception as e:
                       print(f"skip (csv->parquet) {fp}: {e}", file=sys.stderr)
+          
           def arcname_for(fp: Path):
               try:
                   if fp.resolve().is_relative_to(base.resolve()):
@@ -285,6 +289,7 @@ jobs:
               except Exception:
                   pass
               return Path(fp.name)
+          
           with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
               count = 0
               for folder in (base, extra):
@@ -294,6 +299,7 @@ jobs:
                       count += 1
                       print(f"+ CSV ZIP'e eklendi: {arcname_for(p)}")
               print(f"✅ CSV ZIP hazır: {out_csv_zip} (toplam {count} dosya)")
+          
           with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
               count = 0
               for folder in (base, extra):
@@ -312,67 +318,67 @@ jobs:
         run: |
           set -euo pipefail
           cd "${CRIME_DATA_DIR}"
-
+      
           # risk_hourly.csv → risk_hourly.parquet (yoksa)
           if [ -f "risk_hourly.csv" ] && [ ! -f "risk_hourly.parquet" ]; then
             python - <<'PY'
-            import pandas as pd
-            df = pd.read_csv("risk_hourly.csv", low_memory=False)
-            df.to_parquet("risk_hourly.parquet", index=False)
-            PY
-          fi
-
-          # metrics_stacking_ohe.csv → metrics_stacking_ohe.parquet (yoksa)
-          if [ -f "metrics_stacking_ohe.csv" ] && [ ! -f "metrics_stacking_ohe.parquet" ]; then
-            python - <<'PY'
-            import pandas as pd
-            df = pd.read_csv("metrics_stacking_ohe.csv", low_memory=False)
-            df.to_parquet("metrics_stacking_ohe.parquet", index=False)
-            PY
-          fi
-
-          # fr_crime.parquet = fr_crime_10.parquet'in kopyası (uygulama uyumluluğu)
-          if [ -f "fr_crime_10.parquet" ]; then
-            cp -f "fr_crime_10.parquet" "fr_crime.parquet"
-          else
-            echo "❌ fr_crime_10.parquet yok; FR 10 adımı başarısız mı?"
-            exit 1
-          fi
-
-          # fr_crime_09.parquet yoksa fr_crime_09.csv'den üret
-          if [ ! -f "fr_crime_09.parquet" ] && [ -f "fr_crime_09.csv" ]; then
-            python - <<'PY'
-            import pandas as pd
-            df = pd.read_csv("fr_crime_09.csv", low_memory=False)
-            df.to_parquet("fr_crime_09.parquet", index=False)
-            PY
-          fi
-
-          # ZIP oluştur
-          zip -9 -q fr_app_bundle.zip \
-            fr_crime_09.parquet \
-            risk_hourly.parquet \
-            fr_crime.parquet \
-            metrics_stacking_ohe.parquet
-
-          echo "✅ fr_app_bundle.zip hazır"
-          ls -lh fr_app_bundle.zip
-
-      - name: Upload FR pipeline outputs (CSV ZIP)
-        uses: actions/upload-artifact@v4
-        with:
-          name: fr-crime-outputs-csv
-          path: ${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload FR pipeline outputs (Parquet ZIP)
-        uses: actions/upload-artifact@v4
-        with:
-          name: fr-crime-outputs-parquet
-          path: ${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip
-          if-no-files-found: error
-          retention-days: 14
+          import pandas as pd
+          df = pd.read_csv("risk_hourly.csv", low_memory=False)
+          df.to_parquet("risk_hourly.parquet", index=False)
+          PY
+              fi
+          
+              # metrics_stacking_ohe.csv → metrics_stacking_ohe.parquet (yoksa)
+              if [ -f "metrics_stacking_ohe.csv" ] && [ ! -f "metrics_stacking_ohe.parquet" ]; then
+                python - <<'PY'
+          import pandas as pd
+          df = pd.read_csv("metrics_stacking_ohe.csv", low_memory=False)
+          df.to_parquet("metrics_stacking_ohe.parquet", index=False)
+          PY
+              fi
+          
+              # fr_crime.parquet = fr_crime_10.parquet'in kopyası
+              if [ -f "fr_crime_10.parquet" ]; then
+                cp -f "fr_crime_10.parquet" "fr_crime.parquet"
+              else
+                echo "❌ fr_crime_10.parquet yok; FR 10 adımı başarısız mı?"
+                exit 1
+              fi
+          
+              # fr_crime_09.parquet yoksa csv'den üret
+              if [ ! -f "fr_crime_09.parquet" ] && [ -f "fr_crime_09.csv" ]; then
+                python - <<'PY'
+          import pandas as pd
+          df = pd.read_csv("fr_crime_09.csv", low_memory=False)
+          df.to_parquet("fr_crime_09.parquet", index=False)
+          PY
+              fi
+          
+              zip -9 -q fr_app_bundle.zip \
+                fr_crime_09.parquet \
+                risk_hourly.parquet \
+                fr_crime.parquet \
+                metrics_stacking_ohe.parquet
+          
+              echo "✅ fr_app_bundle.zip hazır"
+              ls -lh fr_app_bundle.zip
+    
+    
+          - name: Upload FR pipeline outputs (CSV ZIP)
+            uses: actions/upload-artifact@v4
+            with:
+              name: fr-crime-outputs-csv
+              path: ${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip
+              if-no-files-found: error
+              retention-days: 14
+    
+          - name: Upload FR pipeline outputs (Parquet ZIP)
+            uses: actions/upload-artifact@v4
+            with:
+              name: fr-crime-outputs-parquet
+              path: ${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip
+              if-no-files-found: error
+              retention-days: 14
 
       # 🆕 3. artifact: uygulama paketi
       - name: Upload FR app bundle (3rd ZIP)
