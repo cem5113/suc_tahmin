@@ -58,7 +58,7 @@ NEIGHBOR_FILE     = os.getenv("NEIGHBOR_FILE", "").strip()        # 'GEOID,neigh
 TE_ALPHA          = float(os.getenv("TE_ALPHA", "50"))            # Laplace smoothing gücü (m)
 GEO_COL_NAME      = os.getenv("GEO_COL_NAME", "GEOID")            # GEOID kolon adı
 SF_TZ = ZoneInfo("America/Los_Angeles")
-HORIZON_DAYS = int(os.getenv("PATROL_HORIZON_DAYS", "3"))
+HORIZON_DAYS = int(os.getenv("PATROL_HORIZON_DAYS", "1"))
 
 # Eğer kullanıcı ENABLE_SPATIAL_TE vermediyse ama NEIGHBOR_FILE verdiyse,
 # Spatial-TE'yi otomatik aç (kullanışlı varsayılan).
