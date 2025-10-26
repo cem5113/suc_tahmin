@@ -26,7 +26,7 @@ OUT_PATH  = CRIME_DIR / "patrol_recs_multi.csv"
 
 # --- Parametreler (ENV) ---
 SF_TZ = ZoneInfo("America/Los_Angeles")
-HORIZON_DAYS = int(os.getenv("PATROL_HORIZON_DAYS", "3"))  # ufuk (gün)
+HORIZON_DAYS = int(os.getenv("PATROL_HORIZON_DAYS", "1"))  # ufuk (gün)
 TOP_K        = int(os.getenv("PATROL_TOP_K", "50"))        # saat başına öneri sayısı
 
 # --- Yardımcılar ---
