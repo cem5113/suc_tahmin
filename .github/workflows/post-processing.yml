@@ -247,122 +247,131 @@ jobs:
       - name: FR 12) Convert outputs to Parquet & ZIP (CSV / Parquet)
         env:
           ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+        shell: bash
         run: |
-          set -e
-          python - <<'PY'
-          import os, glob, sys, zipfile
-          from pathlib import Path
-          import pandas as pd
+          set -euo pipefail
+          python -V
+          # CRLF güvenliği: bu step’in içeriğinde CRLF olsa bile, yazdığımız dosyada LF olacak.
+          cat > /tmp/convert_and_zip.py <<'PY'
+      import os, glob, sys, zipfile
+      from pathlib import Path
+      import pandas as pd
       
-          base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
-          extra = Path(os.environ.get("ARTIFACT_DIR","artifact"))
-          out_csv_zip = base / "fr_csv_outputs.zip"
-          out_pq_zip  = base / "fr_parquet_outputs.zip"
+      base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
+      extra = Path(os.environ.get("ARTIFACT_DIR","artifact"))
+      out_csv_zip = base / "fr_csv_outputs.zip"
+      out_pq_zip  = base / "fr_parquet_outputs.zip"
       
-          def files_in(dirpath, pattern):
-              p = Path(dirpath)
-              if not p.exists() or not p.is_dir():
-                  return []
-              return sorted(glob.glob(str(p / "**" / pattern), recursive=True))
-          
-          # CSV -> Parquet
+      def files_in(dirpath, pattern):
+          p = Path(dirpath)
+          if not p.exists() or not p.is_dir():
+              return []
+          return sorted(glob.glob(str(p / "**" / pattern), recursive=True))
+      
+      # CSV -> Parquet
+      for folder in (base, extra):
+          for fp in files_in(folder, "*.csv"):
+              pq_path = Path(fp).with_suffix(".parquet")
+              try:
+                  df = pd.read_csv(fp, low_memory=False)
+                  df.to_parquet(pq_path, index=False)
+                  print(f"→ parquet yazıldı: {pq_path}")
+              except Exception as e:
+                  print(f"skip (csv->parquet) {fp}: {e}", file=sys.stderr)
+      
+      def arcname_for(fp: Path):
+          # base altındaki yolları göreli koy
+          try:
+              if fp.resolve().is_relative_to(base.resolve()):
+                  return fp.relative_to(base)
+          except AttributeError:
+              if str(fp.resolve()).startswith(str(base.resolve())):
+                  return fp.relative_to(base)
+          # artifact altındaysa "artifact/" köküyle koy
+          try:
+              if fp.resolve().as_posix().startswith(extra.resolve().as_posix()):
+                  return Path("artifact") / fp.relative_to(extra)
+          except Exception:
+              pass
+          return Path(fp.name)
+      
+      with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+          count = 0
           for folder in (base, extra):
               for fp in files_in(folder, "*.csv"):
-                  pq_path = Path(fp).with_suffix(".parquet")
-                  try:
-                      df = pd.read_csv(fp, low_memory=False)
-                      df.to_parquet(pq_path, index=False)
-                      print(f"→ parquet yazıldı: {pq_path}")
-                  except Exception as e:
-                      print(f"skip (csv->parquet) {fp}: {e}", file=sys.stderr)
-          
-          def arcname_for(fp: Path):
-              try:
-                  if fp.resolve().is_relative_to(base.resolve()):
-                      return fp.relative_to(base)
-              except AttributeError:
-                  if str(fp.resolve()).startswith(str(base.resolve())):
-                      return fp.relative_to(base)
-              try:
-                  if fp.resolve().as_posix().startswith(extra.resolve().as_posix()):
-                      return Path("artifact") / fp.relative_to(extra)
-              except Exception:
-                  pass
-              return Path(fp.name)
-          
-          with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-              count = 0
-              for folder in (base, extra):
-                  for fp in files_in(folder, "*.csv"):
-                      p = Path(fp)
-                      z.write(p, arcname=str(arcname_for(p)))
-                      count += 1
-                      print(f"+ CSV ZIP'e eklendi: {arcname_for(p)}")
-              print(f"✅ CSV ZIP hazır: {out_csv_zip} (toplam {count} dosya)")
-          
-          with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-              count = 0
-              for folder in (base, extra):
-                  for fp in files_in(folder, "*.parquet"):
-                      p = Path(fp)
-                      z.write(p, arcname=str(arcname_for(p)))
-                      count += 1
-                      print(f"+ Parquet ZIP'e eklendi: {arcname_for(p)}")
-              print(f"✅ Parquet ZIP hazır: {out_pq_zip} (toplam {count} dosya)")
-          PY
+                  p = Path(fp)
+                  z.write(p, arcname=str(arcname_for(p)))
+                  count += 1
+                  print(f"+ CSV ZIP'e eklendi: {arcname_for(p)}")
+          print(f"✅ CSV ZIP hazır: {out_csv_zip} (toplam {count} dosya)")
+      
+      with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+          count = 0
+          for folder in (base, extra):
+              for fp in files_in(folder, "*.parquet"):
+                  p = Path(fp)
+                  z.write(p, arcname=str(arcname_for(p)))
+                  count += 1
+                  print(f"+ Parquet ZIP'e eklendi: {arcname_for(p)}")
+          print(f"✅ Parquet ZIP hazır: {out_pq_zip} (toplam {count} dosya)")
+      PY
+          python /tmp/convert_and_zip.py
 
       # 🆕 3. ZIP: Uygulama paketi
       - name: Build FR app bundle (3rd ZIP)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        shell: bash
         run: |
           set -euo pipefail
           cd "${CRIME_DATA_DIR}"
       
-          # risk_hourly.csv → risk_hourly.parquet (yoksa)
           if [ -f "risk_hourly.csv" ] && [ ! -f "risk_hourly.parquet" ]; then
-            python - <<'PY'
-          import pandas as pd
-          df = pd.read_csv("risk_hourly.csv", low_memory=False)
-          df.to_parquet("risk_hourly.parquet", index=False)
-          PY
-              fi
-          
-              # metrics_stacking_ohe.csv → metrics_stacking_ohe.parquet (yoksa)
-              if [ -f "metrics_stacking_ohe.csv" ] && [ ! -f "metrics_stacking_ohe.parquet" ]; then
-                python - <<'PY'
-          import pandas as pd
-          df = pd.read_csv("metrics_stacking_ohe.csv", low_memory=False)
-          df.to_parquet("metrics_stacking_ohe.parquet", index=False)
-          PY
-              fi
-          
-              # fr_crime.parquet = fr_crime_10.parquet'in kopyası
-              if [ -f "fr_crime_10.parquet" ]; then
-                cp -f "fr_crime_10.parquet" "fr_crime.parquet"
-              else
-                echo "❌ fr_crime_10.parquet yok; FR 10 adımı başarısız mı?"
-                exit 1
-              fi
-          
-              # fr_crime_09.parquet yoksa csv'den üret
-              if [ ! -f "fr_crime_09.parquet" ] && [ -f "fr_crime_09.csv" ]; then
-                python - <<'PY'
-          import pandas as pd
-          df = pd.read_csv("fr_crime_09.csv", low_memory=False)
-          df.to_parquet("fr_crime_09.parquet", index=False)
-          PY
-              fi
-          
-              zip -9 -q fr_app_bundle.zip \
-                fr_crime_09.parquet \
-                risk_hourly.parquet \
-                fr_crime.parquet \
-                metrics_stacking_ohe.parquet
-          
-              echo "✅ fr_app_bundle.zip hazır"
-              ls -lh fr_app_bundle.zip
-    
+            cat > /tmp/csv2pq_risk.py <<'PY'
+      import pandas as pd
+      df = pd.read_csv("risk_hourly.csv", low_memory=False)
+      df.to_parquet("risk_hourly.parquet", index=False)
+      print("→ risk_hourly.parquet yazıldı")
+      PY
+            python /tmp/csv2pq_risk.py
+          fi
+      
+          if [ -f "metrics_stacking_ohe.csv" ] && [ ! -f "metrics_stacking_ohe.parquet" ]; then
+            cat > /tmp/csv2pq_metrics.py <<'PY'
+      import pandas as pd
+      df = pd.read_csv("metrics_stacking_ohe.csv", low_memory=False)
+      df.to_parquet("metrics_stacking_ohe.parquet", index=False)
+      print("→ metrics_stacking_ohe.parquet yazıldı")
+      PY
+            python /tmp/csv2pq_metrics.py
+          fi
+      
+          if [ -f "fr_crime_10.parquet" ]; then
+            cp -f "fr_crime_10.parquet" "fr_crime.parquet"
+          else
+            echo "❌ fr_crime_10.parquet yok; FR 10 adımı başarısız mı?"
+            exit 1
+          fi
+      
+          if [ ! -f "fr_crime_09.parquet" ] && [ -f "fr_crime_09.csv" ]; then
+            cat > /tmp/csv2pq_fr09.py <<'PY'
+      import pandas as pd
+      df = pd.read_csv("fr_crime_09.csv", low_memory=False)
+      df.to_parquet("fr_crime_09.parquet", index=False)
+      print("→ fr_crime_09.parquet yazıldı")
+      PY
+            python /tmp/csv2pq_fr09.py
+          fi
+      
+          zip -9 -q fr_app_bundle.zip \
+            fr_crime_09.parquet \
+            risk_hourly.parquet \
+            fr_crime.parquet \
+            metrics_stacking_ohe.parquet
+      
+          echo "✅ fr_app_bundle.zip hazır"
+          ls -lh fr_app_bundle.zip
+
     
           - name: Upload FR pipeline outputs (CSV ZIP)
             uses: actions/upload-artifact@v4
