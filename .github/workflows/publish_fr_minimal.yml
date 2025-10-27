@@ -1,0 +1,74 @@
+name: Publish Minimal FR Artifacts
+
+on:
+  workflow_run:
+    workflows: ["Post Processing (FR)"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  pick_minimal:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    env:
+      TARGETS: "fr_crime_09.parquet metrics_base_ohe.parquet risk_hourly.parquet"
+      UPSTREAM_DIR: artifact_upstream
+      OUT_DIR: minimal_parquet
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts from triggering run
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          run_id: ${{ github.event.workflow_run.id }}
+          path: ${{ env.UPSTREAM_DIR }}
+          # name verilmezse ilgili run'daki TÜM artifact'lar indirilir
+
+      - name: Expand any ZIPs (recursively)
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y unzip >/dev/null
+          for z in "${UPSTREAM_DIR}"/**/*.zip; do
+            echo "Unzipping: $z"
+            unzip -o "$z" -d "$(dirname "$z")" >/dev/null
+          done
+
+      - name: Collect only required parquet files
+        run: |
+          set -euo pipefail
+          mkdir -p "${OUT_DIR}"
+          missing=0
+          for f in ${TARGETS}; do
+            # En yakın eşleşmeyi bul (ilk bulduğunu al)
+            hit=$(find "${UPSTREAM_DIR}" . -type f -name "$f" | head -n 1 || true)
+            if [ -n "$hit" ]; then
+              echo "✔ Found: $hit"
+              cp -f "$hit" "${OUT_DIR}/$f"
+            else
+              echo "❌ Not found: $f"
+              missing=$((missing+1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "Required files missing: $missing"
+            exit 1
+          fi
+          echo "Collected files:"
+          ls -lh "${OUT_DIR}"
+
+      - name: Upload minimal parquet artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fr-minimal-parquet
+          path: ${{ env.OUT_DIR }}/**
+          if-no-files-found: error
+          retention-days: 14
