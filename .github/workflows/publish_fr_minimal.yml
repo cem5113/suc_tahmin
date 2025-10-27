@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      TARGETS: "fr_crime_09.parquet metrics_base_ohe.parquet risk_hourly.parquet"
+      TARGETS: "fr_crime.parquet fr_crime_09.parquet fr_crime_10.parquet metrics_base_ohe.parquet risk_hourly.parquet sf_crime.parquet"
       UPSTREAM_DIR: artifact_upstream
       OUT_DIR: minimal_parquet
 
