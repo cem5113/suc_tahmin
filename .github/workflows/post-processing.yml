@@ -1,3 +1,4 @@
+# .github/workflows/post-processing.yml
 name: Post Processing (FR)
 
 on:
@@ -20,239 +21,142 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CRIME_DATA_DIR: crime_prediction_data
+      GEOID_LEN: "11"
       WX_LOCATION: "paris"
       WX_UNIT: "metric"
-      GEOID_LEN: "11"
-
-      ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
-      ARTIFACT_DIR: artifact
-      FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
-      FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Ensure data dir (FR)
+      - name: Ensure data dir
         run: mkdir -p "${CRIME_DATA_DIR}"
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install deps (quick)
+      - name: Install deps (minimal)
         run: |
           python -m pip install -U pip wheel setuptools
-          [ -f requirements.txt ] && pip install -r requirements.txt || true
+          # Repo requirements varsa yükle, yoksa temel set
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install -U pandas pyarrow polars
 
-      # Tek kurulum yeterli
-      - name: Install parquet engine
-        run: |
-          python -m pip install -U pyarrow pandas
-
-      - name: Download upstream artifact (triggering run)
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          run_id: ${{ github.event.workflow_run.id }}
-          name: sf-crime-pipeline-output
-          path: artifact
-
-      - name: Unzip artifact if present (optional)
+      # --- FR ÇIKTILARI ÜRET ---
+      # Burada "update_forecast_crime.py" sizin FR tahmin/post-process scriptinizdir.
+      # Eğer farklı isim/yol kullanıyorsanız, aşağıdaki blokta onunla değiştirin.
+      - name: FR) Build forecast & metrics (CSV/Parquet üret)
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          WX_LOCATION: ${{ env.WX_LOCATION }}
+          WX_UNIT: ${{ env.WX_UNIT }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f "${{ env.ARTIFACT_ZIP }}" ]; then
-            command -v unzip >/dev/null 2>&1 || { sudo apt-get update -y >/dev/null && sudo apt-get install -y unzip >/dev/null; }
-            unzip -o "${{ env.ARTIFACT_ZIP }}" -d "${{ env.ARTIFACT_DIR }}"
+
+          echo "→ FR forecast & post-processing başlıyor..."
+          # Script yolunu akıllı bul:
+          if [ -f update_forecast_crime.py ]; then
+            PY=update_forecast_crime.py
+          elif [ -f scripts/update_forecast_crime.py ]; then
+            PY=scripts/update_forecast_crime.py
           else
-            echo "No artifact ZIP file found (this is fine)."
+            echo "❌ update_forecast_crime.py bulunamadı. Lütfen repo kökünde veya scripts/ altında bulundurun."
+            exit 1
           fi
 
-      - name: FR 00) Base grid / event label merge
-        env:
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-        run: |
-          set -euo pipefail
-          python -u update_crime_fr.py
-          head -n 5 "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv" || true
+          # Scriptinizi parametreliyorsanız burada örn:
+          # python -u "$PY" --city paris --unit metric --outdir "${CRIME_DATA_DIR}"
+          # Parametresiz çalışıyorsa:
+          python -u "$PY"
 
-      - name: FR 01) 911
-        env:
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-        run: |
-          set -euo pipefail
-          python -u update_911_fr.py || true
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_01.csv" || true
-
-      - name: FR 02) 311
-        env:
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-        run: |
-          set -euo pipefail
-          python -u update_311_fr.py || true
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_02.csv" || true
-
-      - name: FR 03) Population
-        env:
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-        run: |
-          set -euo pipefail
-          python -u update_population_fr.py || true
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_03.csv" || true
-
-      - name: FR 04) Bus
-        env:
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-        run: |
-          set -euo pipefail
-          python -u update_bus_fr.py || true
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_04.csv" || true
-
-      - name: FR 05) Train
-        env:
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-        run: |
-          set -euo pipefail
-          python -u update_train_fr.py || true
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_05.csv" || true
-
-      - name: FR 06) POI
-        env:
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-        run: |
-          set -euo pipefail
-          python -u update_poi_fr.py || true
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_06.csv" || true
-
-      - name: FR 07) Police & Gov
-        env:
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-        run: |
-          set -euo pipefail
-          python -u update_police_gov_fr.py || true
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_07.csv" || true
-
-      - name: FR 08) Weather
-        env:
-          ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-        run: |
-          set -euo pipefail
-          python -u update_weather_fr.py || true
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_08.csv" || true
-
-      - name: FR 09) Neighbors
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-        run: |
-          set -euo pipefail
-          if [ -f scripts/make_neighbors_fr.py ]; then
-            PY=scripts/make_neighbors_fr.py
-          elif [ -f make_neighbors_fr.py ]; then
-            PY=make_neighbors_fr.py
-          else
-            echo "⚠️ make_neighbors_fr.py bulunamadı, adım atlanıyor."
-            exit 0
-          fi
-          test -f "${CRIME_DATA_DIR}/fr_crime_08.csv" || echo "⚠️ fr_crime_08.csv yok (devam edilebilir)."
-          python -u "$PY" || true
-          head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
-
-      - name: FR 10) Build fr_crime_10.parquet (script)
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-        run: |
-          set -euo pipefail
-          echo "PWD=$(pwd)"
-          ls -lah || true
-          echo "---- scripts/ ----"
-          ls -lah scripts || true
-          echo "---- data dir ----"
+          echo "→ Script tamamlandı. Üretilen dosyalar:"
           ls -lah "${CRIME_DATA_DIR}" || true
 
-          test -f scripts/make_fr_crime_10.py || { echo "❌ scripts/make_fr_crime_10.py yok!"; exit 1; }
-
-          if [ ! -f "${CRIME_DATA_DIR}/fr_crime_09.parquet" ] && [ ! -f "${CRIME_DATA_DIR}/fr_crime_09.csv" ]; then
-            echo "❌ fr_crime_09.(parquet|csv) bulunamadı. FR 09 adımını doğrulayın."
-            exit 1
-          fi
-
-          python -u scripts/make_fr_crime_10.py
-          echo "---- output ----"
-          ls -lh "${CRIME_DATA_DIR}/fr_crime_10.parquet"
-
-      # --- SADELEŞTİRİLMİŞ ARTEFAKT YÜKLEME: SADECE 3 DOSYA ---
-      - name: FR 12) Collect ONLY the 3 required outputs
+      # --- CSV VARSA PARQUET'E ÇEVİR (eksikleri tamamla) ---
+      - name: Ensure Parquet variants for 3 targets
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "Searching for target files..."
+          py() { python - "$@"; }
 
-          WANT1="fr_crime_09.parquet"
-          WANT2="metrics_base_ohe.parquet"
-          WANT3="risk_hourly.parquet"
-
-          find_file () {
-            local name="$1"
-            local f
-            f="$(find "${CRIME_DATA_DIR}" -type f -name "${name}" -print -quit || true)"
-            if [ -z "${f}" ]; then
-              f="$(find "${ARTIFACT_DIR}" -type f -name "${name}" -print -quit || true)"
+          ensure_parquet () {
+            local stem="$1"  # örn: fr_crime_09, metrics_base_ohe, risk_hourly
+            local base="${CRIME_DATA_DIR}/${stem}"
+            local csv="${base}.csv"
+            local pq="${base}.parquet"
+            if [ -f "${pq}" ]; then
+              echo "✅ ${pq} zaten mevcut."
+              return 0
             fi
-            echo "${f}"
+            if [ -f "${csv}" ]; then
+              echo "→ ${csv} → ${pq} dönüştürülüyor..."
+              py <<PY
+import pandas as pd, os
+src = os.environ["CSV"]
+dst = os.environ["PQ"]
+df = pd.read_csv(src)
+df.to_parquet(dst, index=False)
+print("Wrote:", dst)
+PY
+            else
+              echo "ℹ️ ${stem}.(csv|parquet) bulunamadı (atlandı)."
+            fi
           }
 
-          F1="$(find_file "${WANT1}")"
-          F2="$(find_file "${WANT2}")"
-          F3="$(find_file "${WANT3}")"
+          export CSV PQ
+          CSV=""; PQ=""
+          for stem in fr_crime_09 metrics_base_ohe risk_hourly; do
+            CSV="${CRIME_DATA_DIR}/${stem}.csv"
+            PQ="${CRIME_DATA_DIR}/${stem}.parquet"
+            ensure_parquet "${stem}"
+          done
 
-          echo "→ ${WANT1}: ${F1:-NOT FOUND}"
-          echo "→ ${WANT2}: ${F2:-NOT FOUND}"
-          echo "→ ${WANT3}: ${F3:-NOT FOUND}"
+      # --- SADECE 3 DOSYAYI TOPLA ---
+      - name: Collect 3 outputs (don't fail if some missing)
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p selected_outputs
 
-          if [ -z "${F1}" ] && [ -z "${F2}" ] && [ -z "${F3}" ]; then
-            echo "❌ None of the required outputs were found."
+          copy_if_exist () {
+            local p="$1"
+            if [ -f "$p" ]; then
+              cp -v "$p" selected_outputs/
+              return 0
+            fi
+            return 1
+          }
+
+          FOUND=0
+          for p in \
+            "${CRIME_DATA_DIR}/fr_crime_09.parquet" \
+            "${CRIME_DATA_DIR}/metrics_base_ohe.parquet" \
+            "${CRIME_DATA_DIR}/risk_hourly.parquet"
+          do
+            if copy_if_exist "$p"; then FOUND=1; fi
+          done
+
+          echo "→ Seçilen dosyalar:"
+          ls -lh selected_outputs || true
+
+          if [ $FOUND -eq 0 ]; then
+            echo "❌ Beklenen 3 çıktıdan hiçbiri bulunamadı."
+            echo "İpucu: update_forecast_crime.py çıktı yollarını ${CRIME_DATA_DIR} altına yazmalı."
             exit 1
           fi
 
-          mkdir -p selected_outputs
-          [ -n "${F1}" ] && cp -v "${F1}" selected_outputs/ || true
-          [ -n "${F2}" ] && cp -v "${F2}" selected_outputs/ || true
-          [ -n "${F3}" ] && cp -v "${F3}" selected_outputs/ || true
-
-          echo "✅ Selected files:"
-          ls -lh selected_outputs || true
-
+      # --- ARTEFAKT UPLOAD: VAR OLANI YÜKLE ---
       - name: Upload fr_crime_09.parquet (if present)
         uses: actions/upload-artifact@v4
         with:
@@ -276,3 +180,15 @@ jobs:
           path: selected_outputs/risk_hourly.parquet
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Post Processing (FR)"
+            echo ""
+            echo "- Çalışma zamanı: **$(date)**"
+            echo "- Çıktılar: fr_crime_09.parquet, metrics_base_ohe.parquet, risk_hourly.parquet (mevcut olanlar yüklendi)"
+            echo "- Dizin: \`${{ env.CRIME_DATA_DIR }}\`"
+          } >> $GITHUB_STEP_SUMMARY
