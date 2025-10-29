@@ -26,25 +26,37 @@ jobs:
       FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Ensure data dir (FR)
         run: mkdir -p "${CRIME_DATA_DIR}"
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install deps (quick)
+      - name: Install core deps (pip + project requirements if present)
         run: |
+          set -e
           python -m pip install -U pip wheel setuptools
-          [ -f requirements.txt ] && pip install -r requirements.txt || true
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
 
-      # ⬅️ pyarrow/pandas kurulumu FR 10'dan ÖNCE olmalı
+      # pyarrow/pandas FR 10'dan önce kurulmalı
       - name: Install parquet engine
         run: |
+          set -e
           python -m pip install -U pyarrow pandas
+
+      - name: Install OS tools (zip/unzip/find)
+        run: |
+          set -e
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y unzip zip >/dev/null
 
       - name: Download upstream artifact (triggering run)
         uses: dawidd6/action-download-artifact@v6
@@ -57,12 +69,12 @@ jobs:
         run: |
           set -e
           if [ -f "${{ env.ARTIFACT_ZIP }}" ]; then
-            sudo apt-get update -y >/dev/null
-            sudo apt-get install -y unzip >/dev/null
             unzip -o "${{ env.ARTIFACT_ZIP }}" -d "${{ env.ARTIFACT_DIR }}"
           else
             echo "No artifact ZIP file found (this is fine)."
           fi
+          echo "---- artifact dir tree ----"
+          (cd "${{ env.ARTIFACT_DIR }}" && /usr/bin/find . -maxdepth 3 -type f -printf "%p\t%k KB\n" || true)
 
       - name: FR 00) Base grid / event label merge
         env:
@@ -73,6 +85,7 @@ jobs:
         run: |
           set -e
           python -u update_crime_fr.py
+          echo "---- head(sf_crime_grid_full_labeled.csv) ----"
           head -n 5 "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv" || true
 
       - name: FR 01) 911
@@ -84,6 +97,7 @@ jobs:
         run: |
           set -e
           python -u update_911_fr.py || true
+          echo "---- head(fr_crime_01.csv) ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_01.csv" || true
 
       - name: FR 02) 311
@@ -95,6 +109,7 @@ jobs:
         run: |
           set -e
           python -u update_311_fr.py || true
+          echo "---- head(fr_crime_02.csv) ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_02.csv" || true
 
       - name: FR 03) Population
@@ -106,6 +121,7 @@ jobs:
         run: |
           set -e
           python -u update_population_fr.py || true
+          echo "---- head(fr_crime_03.csv) ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_03.csv" || true
 
       - name: FR 04) Bus
@@ -117,6 +133,7 @@ jobs:
         run: |
           set -e
           python -u update_bus_fr.py || true
+          echo "---- head(fr_crime_04.csv) ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_04.csv" || true
 
       - name: FR 05) Train
@@ -128,6 +145,7 @@ jobs:
         run: |
           set -e
           python -u update_train_fr.py || true
+          echo "---- head(fr_crime_05.csv) ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_05.csv" || true
 
       - name: FR 06) POI
@@ -139,6 +157,7 @@ jobs:
         run: |
           set -e
           python -u update_poi_fr.py || true
+          echo "---- head(fr_crime_06.csv) ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_06.csv" || true
 
       - name: FR 07) Police & Gov
@@ -150,6 +169,7 @@ jobs:
         run: |
           set -e
           python -u update_police_gov_fr.py || true
+          echo "---- head(fr_crime_07.csv) ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_07.csv" || true
 
       - name: FR 08) Weather
@@ -161,6 +181,7 @@ jobs:
         run: |
           set -e
           python -u update_weather_fr.py || true
+          echo "---- head(fr_crime_08.csv) ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_08.csv" || true
 
       - name: FR 09) Neighbors
@@ -177,14 +198,16 @@ jobs:
             echo "⚠️ make_neighbors_fr.py bulunamadı, adım atlanıyor."
             exit 0
           fi
-          test -f "${CRIME_DATA_DIR}/fr_crime_08.csv" || echo "⚠️ fr_crime_08.csv yok (devam edilebilir)."
+
+          if [ ! -f "${CRIME_DATA_DIR}/fr_crime_08.csv" ]; then
+            echo "⚠️ fr_crime_08.csv bulunamadı, neighbors adımı atlanıyor."
+            exit 0
+          fi
+
           python -u "$PY" || true
+          echo "---- head(fr_crime_09.csv) ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
 
-      - name: Install parquet engine
-        run: |
-          python -m pip install -U pyarrow pandas
-      
       - name: FR 10) Build fr_crime_10.parquet (script)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -196,19 +219,108 @@ jobs:
           ls -lah scripts || true
           echo "---- data dir ----"
           ls -lah "${CRIME_DATA_DIR}" || true
-      
+
           # script var mı?
           test -f scripts/make_fr_crime_10.py || { echo "❌ scripts/make_fr_crime_10.py yok!"; exit 1; }
-      
+
           # girdi var mı?
           if [ ! -f "${CRIME_DATA_DIR}/fr_crime_09.parquet" ] && [ ! -f "${CRIME_DATA_DIR}/fr_crime_09.csv" ]; then
             echo "❌ fr_crime_09.(parquet|csv) bulunamadı. FR 09 adımını doğrulayın."
             exit 1
           fi
-      
+
           python -u scripts/make_fr_crime_10.py
           echo "---- output ----"
           ls -lh "${CRIME_DATA_DIR}/fr_crime_10.parquet"
+
+      - name: FR 11) Package minimal outputs (CSV & Parquet)
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+        run: |
+          set -euo pipefail
+
+          echo "🔎 Aranacak dosyalar:"
+          PARQ_LIST=("fr_crime_09.parquet" "fr_crime_10.parquet" "metrics_base_ohe.parquet" "risk_hourly.parquet")
+          CSV_LIST=("fr_crime_09.csv" "fr_crime_10.csv")
+
+          # Arama dizinleri (öncelik sırası)
+          IFS=',' read -r -a EXTRA_DIRS <<< "${FALLBACK_DIRS}"
+          SEARCH_DIRS=("${CRIME_DATA_DIR}" "${ARTIFACT_DIR}" "${ARTIFACT_DIR}/artifact" "${FR_OUTPUT_DIR}")
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
+            SEARCH_DIRS+=("${GITHUB_WORKSPACE}")
+          fi
+          for d in "${EXTRA_DIRS[@]}"; do
+            if [ -n "$d" ] && [ -d "$d" ]; then SEARCH_DIRS+=("$d"); fi
+          done
+
+          mkdir -p "${CRIME_DATA_DIR}/_pkg_parquet" "${CRIME_DATA_DIR}/_pkg_csv"
+
+          find_and_copy() {
+            local fname="$1"; shift
+            local outdir="$1"; shift
+            for dir in "${SEARCH_DIRS[@]}"; do
+              if [ -f "${dir}/${fname}" ]; then
+                echo "✅ bulundu: ${dir}/${fname}"
+                cp -f "${dir}/${fname}" "${outdir}/"
+                return 0
+              fi
+              if [ -d "${dir}" ]; then
+                hit="$(/usr/bin/find "${dir}" -type f -name "${fname}" -print -quit || true)"
+                if [ -n "${hit}" ]; then
+                  echo "✅ bulundu (derin): ${hit}"
+                  cp -f "${hit}" "${outdir}/"
+                  return 0
+                fi
+              fi
+            done
+            echo "⚠️ bulunamadı: ${fname}"
+            return 1
+          }
+
+          echo "📦 Parquet dosyaları toplanıyor..."
+          PARQ_FOUND=0
+          for f in "${PARQ_LIST[@]}"; do
+            if find_and_copy "${f}" "${CRIME_DATA_DIR}/_pkg_parquet"; then PARQ_FOUND=1; fi
+          done
+          # En az bir dosya olsun diye boş ise README ekleyelim
+          if [ "${PARQ_FOUND}" -eq 0 ]; then
+            echo "No parquet outputs were found in this run." > "${CRIME_DATA_DIR}/_pkg_parquet/README.txt"
+          fi
+
+          echo "🗂 CSV dosyaları toplanıyor (varsa)..."
+          CSV_FOUND=0
+          for f in "${CSV_LIST[@]}"; do
+            if find_and_copy "${f}" "${CRIME_DATA_DIR}/_pkg_csv"; then CSV_FOUND=1; fi
+          done
+          if [ "${CSV_FOUND}" -eq 0 ]; then
+            echo "No CSV outputs were found in this run." > "${CRIME_DATA_DIR}/_pkg_csv/README.txt"
+          fi
+
+          echo "🧩 Zip oluşturuluyor..."
+          rm -f "${CRIME_DATA_DIR}/fr_parquet_outputs.zip" "${CRIME_DATA_DIR}/fr_csv_outputs.zip" || true
+          (cd "${CRIME_DATA_DIR}/_pkg_parquet" && zip -r ../fr_parquet_outputs.zip . >/dev/null)
+          (cd "${CRIME_DATA_DIR}/_pkg_csv"     && zip -r ../fr_csv_outputs.zip     . >/dev/null)
+
+          echo "✅ Paketler hazır:"
+          ls -lh "${CRIME_DATA_DIR}/fr_parquet_outputs.zip" || true
+          ls -lh "${CRIME_DATA_DIR}/fr_csv_outputs.zip" || true
+
+          # (İsteğe bağlı) Zorunlu üçlü kontrolü: eksikse job fail et
+          mandatory=0
+          for f in fr_crime_09.parquet metrics_base_ohe.parquet risk_hourly.parquet; do
+            if [ ! -f "${CRIME_DATA_DIR}/_pkg_parquet/$f" ]; then
+              echo "❌ Zorunlu parquet eksik: $f"
+              mandatory=1
+            fi
+          done
+          if [ $mandatory -eq 1 ]; then
+            echo "❌ Zorunlu parquetlerden en az biri yok. Paket üretildi ancak eksik."
+            # İstersen exit 1 yaparak tüm job'u düşürebilirsin:
+            # exit 1
+          fi
 
       - name: Upload FR pipeline outputs (CSV ZIP)
         uses: actions/upload-artifact@v4
