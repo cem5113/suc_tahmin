@@ -25,6 +25,9 @@ jobs:
       FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
       FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
 
+      # Release fallback’ta indirilmesini istediğin varlık adları (gerekirse değiştir)
+      RELEASE_ASSETS: "fr_parquet_outputs.zip,fr_csv_outputs.zip,sf-crime-pipeline-output.zip"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -46,7 +49,6 @@ jobs:
             pip install -r requirements.txt
           fi
 
-      # pyarrow/pandas FR 10'dan önce kurulmalı
       - name: Install parquet engine
         run: |
           set -e
@@ -58,12 +60,16 @@ jobs:
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y unzip zip >/dev/null
 
+      # ─────────────────────────────────────────────────────────────────────
+      # 1) Tetikleyen run'dan artifact indir
+      # ─────────────────────────────────────────────────────────────────────
       - name: Download upstream artifact (triggering run)
         uses: dawidd6/action-download-artifact@v6
         with:
           run_id: ${{ github.event.workflow_run.id }}
           name: sf-crime-pipeline-output
           path: artifact
+        continue-on-error: true
 
       - name: Unzip artifact if present (optional)
         run: |
@@ -71,11 +77,33 @@ jobs:
           if [ -f "${{ env.ARTIFACT_ZIP }}" ]; then
             unzip -o "${{ env.ARTIFACT_ZIP }}" -d "${{ env.ARTIFACT_DIR }}"
           else
-            echo "No artifact ZIP file found (this is fine)."
+            echo "ℹ️ No upstream artifact ZIP file found here."
           fi
-          echo "---- artifact dir tree ----"
+          echo "---- artifact dir tree (after upstream) ----"
           (cd "${{ env.ARTIFACT_DIR }}" && /usr/bin/find . -maxdepth 3 -type f -printf "%p\t%k KB\n" || true)
 
+      # ─────────────────────────────────────────────────────────────────────
+      # 2) Release Fallback (latest release'tan varlık indir)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Fallback — Download from latest Release (optional)
+        uses: robinraju/release-downloader@v1.10
+        with:
+          repository: ${{ github.repository }}
+          latest: true
+          fileName: ${{ env.RELEASE_ASSETS }}
+          out-file-path: artifact/release
+          extract: true
+        continue-on-error: true
+
+      - name: Show artifact/release trees
+        run: |
+          set -e
+          echo "---- artifact dir tree (after release fallback) ----"
+          /usr/bin/find artifact -maxdepth 3 -type f -printf "%p\t%k KB\n" | sort || true
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 3) FR adımları (csv üretim zinciri)
+      # ─────────────────────────────────────────────────────────────────────
       - name: FR 00) Base grid / event label merge
         env:
           ARTIFACT_ZIP: ${{ env.ARTIFACT_ZIP }}
@@ -233,6 +261,40 @@ jobs:
           echo "---- output ----"
           ls -lh "${CRIME_DATA_DIR}/fr_crime_10.parquet"
 
+      # ─────────────────────────────────────────────────────────────────────
+      # 4) Parquet -> CSV mirror (metrics_base_ohe, risk_hourly, fr_09, fr_10)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: FR 10.5) Create CSV mirrors for key Parquet files
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+import os, sys, pandas as pd
+base = os.environ["CRIME_DATA_DIR"]
+candidates = [
+  "metrics_base_ohe.parquet",
+  "risk_hourly.parquet",
+  "fr_crime_09.parquet",
+  "fr_crime_10.parquet",
+]
+for fname in candidates:
+    p = os.path.join(base, fname)
+    if os.path.exists(p):
+        try:
+            print(f"Converting to CSV: {p}")
+            df = pd.read_parquet(p)
+            out = os.path.join(base, os.path.splitext(fname)[0] + ".csv")
+            # Çok büyük dosyalar için index=False; float biçimleri default
+            df.to_csv(out, index=False)
+            print("✅ Wrote", out, "rows=", len(df))
+        except Exception as e:
+            print("⚠️ CSV mirror failed for", p, "->", e, file=sys.stderr)
+PY
+
+      # ─────────────────────────────────────────────────────────────────────
+      # 5) Paketleme (parquet + csv)
+      # ─────────────────────────────────────────────────────────────────────
       - name: FR 11) Package minimal outputs (CSV & Parquet)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -244,7 +306,7 @@ jobs:
 
           echo "🔎 Aranacak dosyalar:"
           PARQ_LIST=("fr_crime_09.parquet" "fr_crime_10.parquet" "metrics_base_ohe.parquet" "risk_hourly.parquet")
-          CSV_LIST=("fr_crime_09.csv" "fr_crime_10.csv")
+          CSV_LIST=("fr_crime_09.csv" "fr_crime_10.csv" "metrics_base_ohe.csv" "risk_hourly.csv")
 
           # Arama dizinleri (öncelik sırası)
           IFS=',' read -r -a EXTRA_DIRS <<< "${FALLBACK_DIRS}"
@@ -285,7 +347,6 @@ jobs:
           for f in "${PARQ_LIST[@]}"; do
             if find_and_copy "${f}" "${CRIME_DATA_DIR}/_pkg_parquet"; then PARQ_FOUND=1; fi
           done
-          # En az bir dosya olsun diye boş ise README ekleyelim
           if [ "${PARQ_FOUND}" -eq 0 ]; then
             echo "No parquet outputs were found in this run." > "${CRIME_DATA_DIR}/_pkg_parquet/README.txt"
           fi
@@ -308,7 +369,7 @@ jobs:
           ls -lh "${CRIME_DATA_DIR}/fr_parquet_outputs.zip" || true
           ls -lh "${CRIME_DATA_DIR}/fr_csv_outputs.zip" || true
 
-          # (İsteğe bağlı) Zorunlu üçlü kontrolü: eksikse job fail et
+          # Zorunlu üçlü kontrolü (parquet tarafı)
           mandatory=0
           for f in fr_crime_09.parquet metrics_base_ohe.parquet risk_hourly.parquet; do
             if [ ! -f "${CRIME_DATA_DIR}/_pkg_parquet/$f" ]; then
@@ -318,7 +379,7 @@ jobs:
           done
           if [ $mandatory -eq 1 ]; then
             echo "❌ Zorunlu parquetlerden en az biri yok. Paket üretildi ancak eksik."
-            # Eksikte job'u düşürmek istersen aşağıdaki satırı aç:
+            # Eksikte işi fail etmek istersen aç:
             # exit 1
           fi
 
@@ -381,7 +442,7 @@ jobs:
             CSV_ZIP_SIZE="$(du -h "${CRIME_DATA_DIR}/fr_csv_outputs.zip" | awk '{print $1}')"
           fi
 
-          # Zorunlu üçlü kontrol sonucu (FR 11'deki çıktıdan tekrar bak)
+          # Zorunlu üçlü kontrolü (parquet)
           MISSING=()
           for f in fr_crime_09.parquet metrics_base_ohe.parquet risk_hourly.parquet; do
             if [ ! -f "${CRIME_DATA_DIR}/_pkg_parquet/$f" ]; then
@@ -427,4 +488,4 @@ jobs:
           fi
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "> Not: Bu iş akışı, **Full SF Crime Pipeline** tamamlandığında tetiklenir ve minimal FR çıktıları paketleyip artifact olarak yükler." >> "$GITHUB_STEP_SUMMARY"
+          echo "> Not: Bu iş akışı, **Full SF Crime Pipeline** tamamlandığında tetiklenir. Upstream artifact’tan okur; gerekirse **latest release** fallback’ı dener; ardından FR minimal çıktıları (parquet+csv) paketler ve artifact olarak yükler." >> "$GITHUB_STEP_SUMMARY"
