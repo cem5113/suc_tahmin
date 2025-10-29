@@ -318,9 +318,36 @@ jobs:
           done
           if [ $mandatory -eq 1 ]; then
             echo "❌ Zorunlu parquetlerden en az biri yok. Paket üretildi ancak eksik."
-            # İstersen exit 1 yaparak tüm job'u düşürebilirsin:
+            # Eksikte job'u düşürmek istersen aşağıdaki satırı aç:
             # exit 1
           fi
+
+      - name: Inspect packaged ZIP contents (debug)
+        run: |
+          set -e
+          echo "---- unzip -l (parquet) ----"
+          if [ -f "${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip" ]; then
+            unzip -l "${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip" || true
+          else
+            echo "⚠️ fr_parquet_outputs.zip yok!"
+          fi
+          echo "---- unzip -l (csv) ----"
+          if [ -f "${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip" ]; then
+            unzip -l "${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip" || true
+          else
+            echo "⚠️ fr_csv_outputs.zip yok!"
+          fi
+
+      - name: Tree (workspace & data) for diagnostics
+        run: |
+          set -e
+          echo "---- PWD & workspace ----"
+          echo "PWD=$(pwd)"
+          /usr/bin/find . -maxdepth 2 -type d -printf "%p\n" | sort
+          echo "---- crime_prediction_data ----"
+          /usr/bin/find "${{ env.CRIME_DATA_DIR }}" -maxdepth 3 -type f -printf "%p\t%k KB\n" | sort || true
+          echo "---- artifact ----"
+          /usr/bin/find artifact -maxdepth 3 -type f -printf "%p\t%k KB\n" | sort || true
 
       - name: Upload FR pipeline outputs (CSV ZIP)
         uses: actions/upload-artifact@v4
@@ -337,3 +364,67 @@ jobs:
           path: ${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish job summary
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+
+          # Boyut bilgileri
+          PARQ_ZIP_SIZE="-"
+          CSV_ZIP_SIZE="-"
+          if [ -f "${CRIME_DATA_DIR}/fr_parquet_outputs.zip" ]; then
+            PARQ_ZIP_SIZE="$(du -h "${CRIME_DATA_DIR}/fr_parquet_outputs.zip" | awk '{print $1}')"
+          fi
+          if [ -f "${CRIME_DATA_DIR}/fr_csv_outputs.zip" ]; then
+            CSV_ZIP_SIZE="$(du -h "${CRIME_DATA_DIR}/fr_csv_outputs.zip" | awk '{print $1}')"
+          fi
+
+          # Zorunlu üçlü kontrol sonucu (FR 11'deki çıktıdan tekrar bak)
+          MISSING=()
+          for f in fr_crime_09.parquet metrics_base_ohe.parquet risk_hourly.parquet; do
+            if [ ! -f "${CRIME_DATA_DIR}/_pkg_parquet/$f" ]; then
+              MISSING+=("$f")
+            fi
+          done
+
+          echo "## Post Processing (FR) — Özet" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Çalışma zamanı:** \`$(date -u +"%Y-%m-%d %H:%M:%S") UTC\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Üretilen Paketler" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **fr_parquet_outputs.zip**: ${PARQ_ZIP_SIZE}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **fr_csv_outputs.zip**: ${CSV_ZIP_SIZE}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "### Uyarı: Zorunlu Parquet Eksikleri" >> "$GITHUB_STEP_SUMMARY"
+            for f in "${MISSING[@]}"; do
+              echo "- ❌ ${f}" >> "$GITHUB_STEP_SUMMARY"
+            done
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Zorunlu Parquet Kontrolü" >> "$GITHUB_STEP_SUMMARY"
+            echo "- ✅ \`fr_crime_09.parquet\`, \`metrics_base_ohe.parquet\`, \`risk_hourly.parquet\` bulundu." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "### İçerik Listeleri" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "${CRIME_DATA_DIR}/fr_parquet_outputs.zip" ]; then
+            echo "<details><summary>fr_parquet_outputs.zip içeriği</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            unzip -l "${CRIME_DATA_DIR}/fr_parquet_outputs.zip" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "${CRIME_DATA_DIR}/fr_csv_outputs.zip" ]; then
+            echo "<details><summary>fr_csv_outputs.zip içeriği</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            unzip -l "${CRIME_DATA_DIR}/fr_csv_outputs.zip" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> Not: Bu iş akışı, **Full SF Crime Pipeline** tamamlandığında tetiklenir ve minimal FR çıktıları paketleyip artifact olarak yükler." >> "$GITHUB_STEP_SUMMARY"
