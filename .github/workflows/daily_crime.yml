@@ -1,59 +1,204 @@
-if raw_new is not None and not raw_new.empty:
-    df_new = raw_new.copy()
-    # incident_datetime yoksa üret
-    if "incident_datetime" not in df_new.columns:
-        if "incident_date" in df_new.columns and "incident_time" in df_new.columns:
-            df_new["incident_datetime"] = pd.to_datetime(
-                df_new["incident_date"].astype(str) + " " + df_new["incident_time"].astype(str), errors="coerce"
-            )
-        elif "incident_date" in df_new.columns:
-            df_new["incident_datetime"] = pd.to_datetime(df_new["incident_date"], errors="coerce")
-        elif "datetime" in df_new.columns:
-            df_new["incident_datetime"] = pd.to_datetime(df_new["datetime"], errors="coerce")
-    # UTC→SF
-    df_new["datetime"] = pd.to_datetime(df_new["incident_datetime"], utc=True, errors="coerce").dt.tz_convert(SF_TZ)
-    # yerel tarih/saat
-    df_new["date"] = df_new["datetime"].dt.date
-    df_new["time"] = df_new["datetime"].dt.strftime("%H:%M:%S")
-    df_new["event_hour"] = df_new["datetime"].dt.hour
-    # id
-    id_cols = [c for c in ["row_id","incident_id","incident_number","cad_number"] if c in df_new.columns]
-    if id_cols:
-        s = df_new[id_cols[0]].astype(str)
-        for c in id_cols[1:]:
-            s = s.where(s.notna() & (s.astype(str) != "nan"), df_new[c].astype(str))
-        df_new["id"] = s
-    else:
-        df_new["id"] = np.nan
-    mask = df_new["id"].isna() | (df_new["id"].astype(str) == "nan")
-    if mask.any():
-        df_new.loc[mask, "id"] = (
-            df_new.loc[mask, "datetime"].astype(str) + "_" +
-            df_new.loc[mask, "latitude"].round(6).astype(str) + "_" +
-            df_new.loc[mask, "longitude"].round(6).astype(str)
-        )
-    df_new["id"] = df_new["id"].astype(str)
-    # kolon seçimi & bbox
-    df_new = df_new.rename(columns={"incident_category":"category","incident_subcategory":"subcategory"})
-    keep_cols = [c for c in ["id","date","time","event_hour","latitude","longitude","category","subcategory"] if c in df_new.columns]
-    df_new = df_new[keep_cols]
-    df_new = df_new.dropna(subset=["latitude","longitude","id","date"])
-    min_lon, min_lat, max_lon, max_lat = SF_BBOX
-    df_new = df_new[df_new["latitude"].between(min_lat, max_lat)]
-    df_new = df_new[df_new["longitude"].between(min_lon, max_lon)]
-    # GEOID eşlemesi
-    if gdf_blocks is not None:
-        gdf_blocks = (gdf_blocks.set_crs("EPSG:4326") if gdf_blocks.crs is None else gdf_blocks.to_crs("EPSG:4326"))
-        gdfp = gpd.GeoDataFrame(df_new, geometry=gpd.points_from_xy(df_new["longitude"], df_new["latitude"]), crs="EPSG:4326")
-        gdfp = gpd.sjoin(gdfp, gdf_blocks[["GEOID","geometry"]], how="left", predicate="within")
-        gdfp = gdfp.drop(columns=["geometry","index_right"], errors="ignore")
-        gdfp["GEOID"] = gdfp["GEOID"].astype(str).str.extract(r"(\d+)")[0].str[:DEFAULT_GEOID_LEN]
-        df_new = pd.DataFrame(gdfp)
-    else:
-        df_new["GEOID"] = df_new.get("GEOID", np.nan)
-        df_new["GEOID"] = df_new["GEOID"].astype(str).str.extract(r"(\d+)")[0].str[:DEFAULT_GEOID_LEN]
-else:
-    df_new = pd.DataFrame()
+name: Daily Crime (1→9) — robust
 
-log_shape(df_new, "CRIME yeni (indirilen)")
-log_date_range(df_new, "date", "Suç (yeni)")
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 04 * * *"   # her gün 07:30 (Europe/Istanbul) ≈ 04:30 UTC
+  workflow_run:
+    workflows: ["Post Processing (FR)"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: daily-1-9-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Europe/Istanbul
+  CRIME_DATA_DIR: crime_prediction_data
+  GEOID_LEN: "11"
+
+jobs:
+  daily_pipeline:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install -U pip wheel setuptools
+          pip install -U pandas numpy pyarrow requests scipy meteostat
+          # geo bağımlılıkları (centroid fallback için)
+          sudo apt-get update && sudo apt-get install -y libspatialindex-dev
+          pip install -U "geopandas==1.0.1" "shapely==2.0.4" "pyproj==3.6.1" "rtree==1.3.0"
+
+      - name: Create data dir if missing
+        run: mkdir -p "${CRIME_DATA_DIR}"
+
+      - name: Sanity: DO NOT use legacy update_crime.py
+        run: |
+          test ! -f update_crime.py || (echo "⚠️ Bu hat eski akış içindir: update_crime.py bulunuyor ama ÇAĞRILMAYACAK." && true)
+
+      # ─────────────────────────────────────────────
+      # 1) daily_crime_01.csv
+      - name: (1) update_crime_daily.py
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -e
+          python -u update_crime_daily.py
+          echo "---- HEAD daily_crime_01.csv ----"
+          head -n 3 "${CRIME_DATA_DIR}/daily_crime_01.csv" || true
+          python - <<'PY'
+          import os,pandas as pd
+          p=os.path.join(os.environ["CRIME_DATA_DIR"],"daily_crime_01.csv")
+          df=pd.read_csv(p,nrows=1); print("cols[01]:", sorted(df.columns.tolist()))
+          PY
+
+      # 2) daily_crime_02.csv
+      - name: (2) update_911_daily.py
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -e
+          python -u update_911_daily.py
+          echo "---- HEAD daily_crime_02.csv ----"
+          head -n 3 "${CRIME_DATA_DIR}/daily_crime_02.csv" || true
+
+      # 3) daily_crime_03.csv
+      - name: (3) update_311_daily.py
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -e
+          python -u update_311_daily.py
+          echo "---- HEAD daily_crime_03.csv ----"
+          head -n 3 "${CRIME_DATA_DIR}/daily_crime_03.csv" || true
+
+      # 4) daily_crime_04.csv
+      - name: (4) update_bus_daily.py
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
+        run: |
+          set -e
+          python -u update_bus_daily.py
+          echo "---- HEAD daily_crime_04.csv ----"
+          head -n 3 "${CRIME_DATA_DIR}/daily_crime_04.csv" || true
+
+      # 5) daily_crime_05.csv
+      - name: (5) update_train_daily.py
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
+        run: |
+          set -e
+          python -u update_train_daily.py
+          echo "---- HEAD daily_crime_05.csv ----"
+          head -n 3 "${CRIME_DATA_DIR}/daily_crime_05.csv" || true
+
+      # 6) daily_crime_06.csv
+      - name: (6) update_poi_daily.py
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
+        run: |
+          set -e
+          python -u update_poi_daily.py
+          echo "---- HEAD daily_crime_06.csv ----"
+          head -n 3 "${CRIME_DATA_DIR}/daily_crime_06.csv" || true
+
+      # 7) daily_crime_07.csv  (polis+gov — centroid fallback)
+      - name: (7) update_police_gov_daily.py
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
+        run: |
+          set -e
+          python -u update_police_gov_daily.py
+          echo "---- HEAD daily_crime_07.csv ----"
+          head -n 3 "${CRIME_DATA_DIR}/daily_crime_07.csv" || true
+          python - <<'PY'
+          import os,pandas as pd
+          p=os.path.join(os.environ["CRIME_DATA_DIR"],"daily_crime_07.csv")
+          df=pd.read_csv(p,nrows=1)
+          need={"GEOID","distance_to_police","distance_to_government_building"}
+          print("ok[07]:", need.issubset(set(df.columns)))
+          PY
+
+      # 8) daily_crime_08.csv  (07 + weather)
+      - name: (8) update_crime_weather_daily.py
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -e
+          python -u update_crime_weather_daily.py
+          echo "---- HEAD daily_crime_08.csv ----"
+          head -n 3 "${CRIME_DATA_DIR}/daily_crime_08.csv" || true
+          python - <<'PY'
+          import os,pandas as pd
+          p=os.path.join(os.environ["CRIME_DATA_DIR"],"daily_crime_08.csv")
+          df=pd.read_csv(p,nrows=1)
+          need={"GEOID","event_date","tmin","tmax","prcp"}
+          print("ok[08]:", need.issubset(set(df.columns)))
+          PY
+
+      # neighbors.csv hazırla (varsa kullan; yoksa uyarı)
+      - name: Ensure neighbors.csv presence
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
+        run: |
+          set -e
+          DEST="${CRIME_DATA_DIR}/neighbors.csv"
+          if [ -f "$DEST" ]; then
+            echo "neighbors.csv already present."
+          else
+            echo "⚠️ neighbors.csv bulunamadı; mevcutsa repo kökünden kopyalanacak."
+            for p in "neighbors.csv" "data/neighbors.csv" "inputs/neighbors.csv"; do
+              if [ -f "$p" ]; then cp -f "$p" "$DEST"; echo "copied $p → $DEST"; break; fi
+            done
+          fi
+          if [ -f "$DEST" ]; then head -n 5 "$DEST" || true; else echo "⚠️ neighbors.csv hâlâ yok (make_neighbors_daily.py non-fatal uyaracak)."; fi
+
+      # 9) daily_crime_09.csv  (08 + neighbors)
+      - name: (9) make_neighbors_daily.py
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
+          NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+        run: |
+          set -e
+          python -u make_neighbors_daily.py || (echo "⚠️ make_neighbors_daily.py uyarıyla bitti." && true)
+          echo "---- HEAD daily_crime_09.csv ----"
+          head -n 3 "${CRIME_DATA_DIR}/daily_crime_09.csv" || true
+
+      - name: List outputs
+        run: |
+          ls -lh "${CRIME_DATA_DIR}" | sed -n '1,200p'
+          echo "---- tail daily outputs ----"
+          for f in "${CRIME_DATA_DIR}"/daily_crime_0{1..9}.csv; do
+            [ -f "$f" ] && echo "::group::$f" && head -n 3 "$f" && echo "::endgroup::";
+          done
+
+      - name: Upload artifact (daily_crime_01→09)
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-crime-outputs
+          path: |
+            ${{ env.CRIME_DATA_DIR }}/daily_crime_0*.csv
+          if-no-files-found: warn
+          retention-days: 7
