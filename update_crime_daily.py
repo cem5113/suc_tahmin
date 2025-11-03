@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# update_crime_day.py — Günlük özet (GEOID × tarih) + eksik günleri 0 ile doldurma
-
+# update_crime_daily.py — Günlük özet (GEOID × tarih) + eksik günleri 0 ile doldurma
 from __future__ import annotations
 import os
 from pathlib import Path
@@ -9,22 +8,25 @@ from datetime import datetime, date
 import pandas as pd
 
 # ========= Ayarlar (ENV ile değiştirilebilir) =========
-IN_PATH   = Path(os.getenv("FR_DAILY_IN",  "fr_crime.csv"))          # olay bazlı giriş
-OUT_PATH  = Path(os.getenv("FR_DAILY_OUT", "fr_crime_daily.csv"))    # günlük çıktı
-LOCAL_TZ  = os.getenv("FR_DAILY_TZ", "UTC")                           # örn: Europe/Paris
+IN_PATH   = Path(os.getenv("SF_DAILY_IN",  os.getenv("FR_DAILY_IN",  "sf_crime_y.csv")))     # olay bazlı giriş
+OUT_PATH  = Path(os.getenv("SF_DAILY_OUT", os.getenv("FR_DAILY_OUT", "sf_crime_daily.csv"))) # günlük çıktı
+LOCAL_TZ  = os.getenv("SF_DAILY_TZ", os.getenv("FR_DAILY_TZ", "America/Los_Angeles"))
 
-# İsteğe bağlı: tarih penceresi zorlaması (YYYY-MM-DD)
-FORCE_START = os.getenv("FR_DAILY_START", "").strip()  # boş ise otomatik min
-FORCE_END   = os.getenv("FR_DAILY_END", "").strip()    # boş ise otomatik max
+# Opsiyonel: tarih penceresi (YYYY-MM-DD)
+FORCE_START = os.getenv("SF_DAILY_START", os.getenv("FR_DAILY_START", "")).strip()
+FORCE_END   = os.getenv("SF_DAILY_END",   os.getenv("FR_DAILY_END",   "")).strip()
 
-# Zaman kolonu adayları (ilk bulunan kullanılır)
-DT_CANDS = ["dt", "datetime", "timestamp", "occurred_at", "event_time", "t0", "t"]
+# Zaman kolonu adayları (ilk bulunan kullanılır); ayrıca date+time fallback'ı var
+DT_CANDS = ["datetime", "incident_datetime", "occurred_at", "timestamp", "event_time", "t0", "t", "dt", "date"]
 
 # Adet sayımı için aday kolon (varsa sum, yoksa satır sayısı)
 COUNT_CANDS = ["crime_count", "count", "n"]
 
-# Label kolonu (olay bazlı)
-YCOL = os.getenv("FR_YCOL", "Y_label")
+# Label kolonu (varsa kullanılır ama zorunlu değil)
+YCOL = os.getenv("SF_YCOL", os.getenv("FR_YCOL", "Y_label"))
+
+# GEOID uzunluğu (normalize için)
+GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
 
 
 # ========= Yardımcılar =========
@@ -51,21 +53,35 @@ def _ensure_geoid(df: pd.DataFrame) -> pd.DataFrame:
         raise SystemExit("❌ 'GEOID' kolonu zorunlu ve bulunamadı.")
     out = df.copy()
     out["GEOID"] = (
-        out["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(11)
+        out["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str[:GEOID_LEN].str.zfill(GEOID_LEN)
     )
     return out
 
-def _to_local_date(s: pd.Series, tz: str) -> pd.Series:
+def _to_local_date_from_any(df: pd.DataFrame, dcol: str, tz: str) -> pd.Series:
     """
-    s UTC-aware da olabilir; naive de olabilir. Güvenli şekilde yerel TZ'ye çevirip sadece tarihi döndürür.
+    df[dcol] bir datetime, tarih stringi veya sadece 'date' (yyyy-mm-dd) olabilir.
+    Eğer sadece 'date' varsa TZ dönüşümü yapmadan tarihi döndürür.
+    Eğer 'date' + 'time' kolonları varsa ikisini birleştirir.
     """
-    # Önce UTC varsayımı ile dene
-    dt = pd.to_datetime(s, errors="coerce", utc=True)
+    if dcol == "date" and "time" in df.columns:
+        # date+time → datetime
+        dt = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str), errors="coerce", utc=True)
+        try:
+            dt = dt.dt.tz_convert(tz)
+        except Exception:
+            dt = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str), errors="coerce").dt.tz_localize("UTC").dt.tz_convert(tz)
+        return dt.dt.date.astype("string")
+
+    if dcol == "date":
+        # sadece date → zaten gün düzeyi
+        return pd.to_datetime(df["date"], errors="coerce").dt.date.astype("string")
+
+    # datetime benzeri kolon
+    dt = pd.to_datetime(df[dcol], errors="coerce", utc=True)
     try:
         dt = dt.dt.tz_convert(tz)
     except Exception:
-        # Eğer yukarıdaki başarısızsa: önce naive → UTC kabul et → tz convert
-        dt = pd.to_datetime(s, errors="coerce").dt.tz_localize("UTC").dt.tz_convert(tz)
+        dt = pd.to_datetime(df[dcol], errors="coerce").dt.tz_localize("UTC").dt.tz_convert(tz)
     return dt.dt.date.astype("string")
 
 def _parse_date(s: str) -> date | None:
@@ -90,34 +106,34 @@ def build_daily(df_src: pd.DataFrame) -> pd.DataFrame:
 
     ccol = _detect_col(COUNT_CANDS, df.columns)  # opsiyonel
 
-    # Y yoksa 0 kabul (var/yok üretimi için)
-    if YCOL not in df.columns:
-        print(f"ℹ️ Uyarı: '{YCOL}' yok. Y_day hesaplanırken 0 kabul edilecek.")
-        df = df.copy()
-        df[YCOL] = 0
-
-    # Yerel tarihe indir
+    # Yerel tarihe indir (event_date)
     df = df.copy()
-    df["event_date"] = _to_local_date(df[dcol], LOCAL_TZ)
+    df["event_date"] = _to_local_date_from_any(df, dcol, LOCAL_TZ)
 
     # Günlük agregasyon (yalnızca mevcut satırlar)
     grp_keys = ["GEOID", "event_date"]
     if ccol:
         daily = (
             df.groupby(grp_keys, as_index=False)
-              .agg(
-                  daily_count=(ccol, "sum"),
-                  Y_day=(YCOL, lambda s: int((s.fillna(0) > 0).any())),
-              )
+              .agg(daily_count=(ccol, "sum"))
         )
     else:
         daily = (
             df.groupby(grp_keys, as_index=False)
-              .agg(
-                  daily_count=("GEOID", "size"),
-                  Y_day=(YCOL, lambda s: int((s.fillna(0) > 0).any())),
-              )
+              .agg(daily_count=("GEOID", "size"))
         )
+
+    # Y_day üretimi (Y_label varsa "any>0", yoksa daily_count>0)
+    if YCOL in df.columns:
+        y_any = (
+            df.groupby(grp_keys, as_index=False)
+              .agg(_y_any=(YCOL, lambda s: int((pd.to_numeric(s, errors="coerce").fillna(0) > 0).any())))
+        )
+        daily = daily.merge(y_any, on=grp_keys, how="left")
+        daily.rename(columns={"_y_any": "Y_day"}, inplace=True)
+        daily["Y_day"] = daily["Y_day"].fillna((daily["daily_count"] > 0).astype("int8")).astype("int8")
+    else:
+        daily["Y_day"] = (pd.to_numeric(daily["daily_count"], errors="coerce").fillna(0) > 0).astype("int8")
 
     # --------- Eksik günleri 0'la doldurmak için tam ızgara ---------
     # Tüm GEOID’ler
@@ -136,10 +152,7 @@ def build_daily(df_src: pd.DataFrame) -> pd.DataFrame:
     all_dates = pd.date_range(start=d_start, end=d_end, freq="D").date.astype("string")
 
     # Tam ızgara
-    full = (
-        pd.MultiIndex.from_product([all_geoids, all_dates], names=["GEOID", "event_date"])
-          .to_frame(index=False)
-    )
+    full = pd.MultiIndex.from_product([all_geoids, all_dates], names=["GEOID", "event_date"]).to_frame(index=False)
 
     # Left join & boşları doldur
     daily_full = (
@@ -150,8 +163,8 @@ def build_daily(df_src: pd.DataFrame) -> pd.DataFrame:
     # Tipler + meta
     daily_full["daily_count"] = pd.to_numeric(daily_full["daily_count"], errors="coerce").fillna(0).astype("int32")
     daily_full["Y_day"] = pd.to_numeric(daily_full["Y_day"], errors="coerce").fillna(0).astype("int8")
-    daily_full["fr_daily_snapshot_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    daily_full["fr_daily_tz"] = LOCAL_TZ
+    daily_full["sf_daily_snapshot_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    daily_full["sf_daily_tz"] = LOCAL_TZ
 
     # Güvenlik: kopya kolon isimleri olmasın
     daily_full = daily_full.loc[:, ~daily_full.columns.duplicated()].copy()
@@ -172,9 +185,9 @@ def _save_csv(df: pd.DataFrame, p: Path) -> None:
 # ========= CLI =========
 def main() -> int:
     print("📂 CWD:", Path.cwd())
-    print("🔧 FR_DAILY_IN :", _abs(IN_PATH))
-    print("🔧 FR_DAILY_OUT:", _abs(OUT_PATH))
-    print("🔧 FR_DAILY_TZ :", LOCAL_TZ)
+    print("🔧 SF_DAILY_IN :", _abs(IN_PATH))
+    print("🔧 SF_DAILY_OUT:", _abs(OUT_PATH))
+    print("🔧 SF_DAILY_TZ :", LOCAL_TZ)
     if FORCE_START or FORCE_END:
         print(f"🔧 FORCE window: start={FORCE_START or 'auto'} end={FORCE_END or 'auto'}")
 
