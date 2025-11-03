@@ -8,7 +8,7 @@ from datetime import datetime, date
 import pandas as pd
 
 # ========= Ayarlar (ENV ile değiştirilebilir) =========
-IN_PATH   = Path(os.getenv("SF_DAILY_IN",  os.getenv("FR_DAILY_IN",  "sf_crime_y.csv")))     # olay bazlı giriş
+IN_PATH   = Path(os.getenv("SF_DAILY_IN",  os.getenv("FR_DAILY_IN",  "sf_crime.csv")))     # olay bazlı giriş
 OUT_PATH  = Path(os.getenv("SF_DAILY_OUT", os.getenv("FR_DAILY_OUT", "sf_crime_daily.csv"))) # günlük çıktı
 LOCAL_TZ  = os.getenv("SF_DAILY_TZ", os.getenv("FR_DAILY_TZ", "America/Los_Angeles"))
 
