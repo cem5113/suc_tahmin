@@ -58,10 +58,11 @@ jobs:
       - name: Create data dir if missing
         run: mkdir -p "${CRIME_DATA_DIR}"
 
-      - name: "Sanity — DO NOT use legacy update_crime.py"
+      - name: Sanity — DO NOT use legacy update_crime.py
         run: |
-          test ! -f update_crime.py || (echo "⚠️ Bu hat eski akış içindir: update_crime.py bulunuyor ama ÇAĞRILMAYACAK." && true)
+          test ! -f update_crime.py || (echo "⚠️ Eski akış dosyası var ama çağrılmayacak: update_crime.py" && true)
 
+      # (1) sf_crime.csv → daily_crime_01.csv
       - name: (1) update_crime_daily.py → daily_crime_01.csv
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -72,9 +73,12 @@ jobs:
         run: |
           set -e
           python -u update_crime_daily.py
+          echo "---- HEAD daily_crime_01.csv ----"
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_01.csv" || true
+          echo "---- COLUMNS daily_crime_01.csv ----"
+          head -n 1 "${CRIME_DATA_DIR}/daily_crime_01.csv" | sed 's/,/\n/g'
 
-      # 2a) 911 kaynağını hazırla (bul → kopyala → yoksa stub yarat)
+      # 911 kaynağını hazırla (bul → kopyala → yoksa stub yarat)
       - name: Prepare 911 source file
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -82,7 +86,6 @@ jobs:
           set -e
           P_YEAR="${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
           P_YEARS="${CRIME_DATA_DIR}/sf_911_last_5_years.csv"
-      
           if [ -f "$P_YEAR" ]; then
             echo "✅ Found: $P_YEAR"
           elif [ -f "$P_YEARS" ]; then
@@ -92,32 +95,43 @@ jobs:
             echo "⚠️ 911 source not found; creating empty stub → $P_YEAR"
             echo "GEOID,datetime" > "$P_YEAR"
           fi
-      
           echo "---- HEAD 911 source ----"
           head -n 5 "$P_YEAR" || true
 
-      # 2) 911: daily_crime_01.csv → daily_crime_02.csv
+      # 911 ensure_date_col hotfix (event_date/dt/day/... desteği)
+      - name: Hotfix 911 ensure_date_col
+        run: |
+          set -e
+          for p in "update_911_daily.py" "crime_prediction_data/update_911_daily.py"; do
+            if [ -f "$p" ]; then
+              sed -i 's/\["datetime", "incident_datetime", "created_datetime"\]/\["event_date","dt","day","datetime","timestamp","incident_date","incident_datetime","created_datetime"\]/' "$p" || true
+            fi
+          done
+
+      # (2) daily_crime_01.csv + 911 → daily_crime_02.csv
       - name: (2) update_911_daily.py → daily_crime_02.csv
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN:      ${{ env.GEOID_LEN }}
-          DAILY_IN:       "daily_crime_01.csv"        # önceki adımın çıktısı
+          DAILY_IN:       "daily_crime_01.csv"
           DAILY_OUT:      "daily_crime_02.csv"
-          N911_IN:        "sf_911_last_5_year.csv"    # sadece dosya adı
-          FR_DAILY_TZ:    "UTC"                       # 911 tarafında kullanılıyor
+          N911_IN:        "sf_911_last_5_year.csv"
+          FR_DAILY_TZ:    "UTC"
           VERBOSE:        "1"
         run: |
           set -e
           python -u update_911_daily.py
           echo "---- HEAD daily_crime_02.csv ----"
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_02.csv" || true
+          echo "---- COLUMNS daily_crime_02.csv ----"
+          head -n 1 "${CRIME_DATA_DIR}/daily_crime_02.csv" | sed 's/,/\n/g'
 
-      # 3) 311: daily_crime_02.csv → daily_crime_03.csv
+      # (3) daily_crime_02.csv + 311 → daily_crime_03.csv
       - name: (3) update_311_daily.py → daily_crime_03.csv
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN:      ${{ env.GEOID_LEN }}
-          DAILY_IN:       "daily_crime_02.csv"        # 911 adımının çıktısı
+          DAILY_IN:       "daily_crime_02.csv"
           DAILY_OUT:      "daily_crime_03.csv"
           # FR_311_DAILY_IN: "sf_311_daily.csv"       # opsiyonel: doğrudan günlük 311 varsa
           AGG_311_NAME:   "sf_311_last_5_years.csv"   # yoksa buradan günlük türet
@@ -126,8 +140,10 @@ jobs:
           python -u update_311_daily.py
           echo "---- HEAD daily_crime_03.csv ----"
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_03.csv" || true
+          echo "---- COLUMNS daily_crime_03.csv ----"
+          head -n 1 "${CRIME_DATA_DIR}/daily_crime_03.csv" | sed 's/,/\n/g'
 
-      # 4) daily_crime_04.csv
+      # (4) daily_crime_04.csv
       - name: (4) update_bus_daily.py
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -137,7 +153,7 @@ jobs:
           python -u update_bus_daily.py
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_04.csv" || true
 
-      # 5) daily_crime_05.csv
+      # (5) daily_crime_05.csv
       - name: (5) update_train_daily.py
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -147,7 +163,7 @@ jobs:
           python -u update_train_daily.py
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_05.csv" || true
 
-      # 6) daily_crime_06.csv
+      # (6) daily_crime_06.csv
       - name: (6) update_poi_daily.py
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -157,7 +173,7 @@ jobs:
           python -u update_poi_daily.py
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_06.csv" || true
 
-      # 7) daily_crime_07.csv
+      # (7) daily_crime_07.csv
       - name: (7) update_police_gov_daily.py
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -167,7 +183,7 @@ jobs:
           python -u update_police_gov_daily.py
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_07.csv" || true
 
-      # 8) daily_crime_08.csv
+      # (8) daily_crime_08.csv
       - name: (8) update_crime_weather_daily.py
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -194,7 +210,7 @@ jobs:
           fi
           [ -f "$DEST" ] && head -n 5 "$DEST" || echo "⚠️ neighbors.csv hâlâ yok (make_neighbors_daily.py non-fatal uyaracak)."
 
-      # 9) daily_crime_09.csv
+      # (9) daily_crime_09.csv
       - name: (9) make_neighbors_daily.py
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
