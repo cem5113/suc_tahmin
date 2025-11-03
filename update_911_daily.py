@@ -11,8 +11,10 @@ from typing import Optional
 import pandas as pd
 
 # ========= IO =========
-IN_PATH   = Path(os.getenv("FR_911_IN",  "artifact_unzipped/fr_crime_01.csv"))
-OUT_PATH  = Path(os.getenv("FR_911_OUT", "daily_crime_01.csv"))  
+SAVE_DIR        = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
+DAILY_IN        = Path(os.getenv("DAILY_IN",  str(SAVE_DIR / "daily_crime_00.csv")))
+DAILY_OUT       = Path(os.getenv("DAILY_OUT", str(SAVE_DIR / "daily_crime_01.csv")))
+
 LOCAL_TZ  = os.getenv("FR_DAILY_TZ", "UTC")  # gerekirse raporlama için
 
 # Saat aralığı formatı (00-03 gibi)
