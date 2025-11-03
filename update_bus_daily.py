@@ -10,7 +10,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-from scipy.spatial import cKDTree
+
+# KD-Tree: SciPy varsa onu, yoksa NumPy fallback
+try:
+    from scipy.spatial import cKDTree
+    _TREE_IMPL = "scipy"
+except Exception:
+    cKDTree = None
+    _TREE_IMPL = "numpy"
 
 pd.options.mode.copy_on_write = True
 
@@ -60,7 +67,7 @@ BLOCKS_CANDIDATES = [
 ]
 
 # ========= 1) crime oku =========
-if not DAILY_IN.exists():
+if not DAILY_IN.exists() or not DAILY_IN.is_file():
     raise FileNotFoundError(f"❌ Girdi yok: {DAILY_IN}")
 crime = pd.read_csv(DAILY_IN, low_memory=False)
 if "GEOID" not in crime.columns:
@@ -70,13 +77,14 @@ crime_geoids = pd.Series(crime["GEOID"].unique(), name="GEOID")
 log(f"📥 daily_crime_03.csv okundu — satır={len(crime):,}, uniq GEOID={crime_geoids.size:,}")
 
 # ========= 2) bus cache oku (indirimsiz) =========
-if not BUS_CANON.exists():
+if not BUS_CANON.exists() or not BUS_CANON.is_file():
     raise FileNotFoundError(f"❌ BUS cache yok: {BUS_CANON}\n"
                             f"Bu dosya aylık işte üretilmeli: sf_bus_stops_with_geoid.csv")
 bus = pd.read_csv(BUS_CANON, low_memory=False)
+
 # beklenen: en azından stop_lat/stop_lon ya da lat/lon ve GEOID (tercihen)
 lat_col = next((c for c in ["stop_lat","latitude","lat","y"] if c in bus.columns), None)
-lon_col = next((c for c in ["stop_lon","longitude","long","x"] if c in bus.columns), None)
+lon_col = next((c for c in ["stop_lon","longitude","long","lon","x"] if c in bus.columns), None)
 if lat_col is None or lon_col is None:
     raise KeyError("❌ BUS cache içinde lat/lon benzeri kolonlar yok (stop_lat/stop_lon vb.).")
 
@@ -90,7 +98,7 @@ if "GEOID" in bus.columns:
 log(f"🚌 BUS cache okundu — satır={len(bus):,}, GEOID kolonlu={ 'GEOID' in bus.columns }")
 
 # ========= 3) Blocks GeoJSON bul =========
-blocks_path = next((p for p in BLOCKS_CANDIDATES if p and p.exists()), None)
+blocks_path = next((p for p in BLOCKS_CANDIDATES if p and p.exists() and p.is_file()), None)
 if blocks_path is None:
     raise FileNotFoundError("❌ Blocks GeoJSON bulunamadı (sf_census_blocks_with_population.geojson).")
 
@@ -101,6 +109,8 @@ gcol = "GEOID" if "GEOID" in gdf_blocks.columns else next(
 if not gcol:
     raise KeyError("❌ Blocks GeoJSON içinde GEOID benzeri kolon yok.")
 gdf_blocks["GEOID"] = normalize_geoid(gdf_blocks[gcol], DEFAULT_GEOID_LEN)
+
+# CRS → WGS84
 if gdf_blocks.crs is None:
     gdf_blocks.set_crs("EPSG:4326", inplace=True)
 elif str(gdf_blocks.crs).lower() not in ("epsg:4326","wgs84","wgs 84"):
@@ -115,9 +125,15 @@ if "GEOID" not in bus.columns or bus["GEOID"].isna().all():
         crs="EPSG:4326"
     )
     try:
+        # En doğrusu: durak poligon içinde mi?
         gdf_bus = gpd.sjoin(gdf_bus, gdf_blocks[["GEOID","geometry"]], how="left", predicate="within")
     except Exception:
-        gdf_bus = gpd.sjoin_nearest(gdf_bus, gdf_blocks[["GEOID","geometry"]], how="left", max_distance=5)
+        # WGS84'te 'max_distance' derece olur → metrik CRS'e geçip metre kullan
+        gdf_bus_m = gdf_bus.to_crs(3857)
+        gdf_blocks_m = gdf_blocks.to_crs(3857)[["GEOID","geometry"]]
+        # 1000 m eşik (yakın poligon seçimi için mantıklı)
+        gdf_bus = gpd.sjoin_nearest(gdf_bus_m, gdf_blocks_m, how="left", max_distance=1000).to_crs(4326)
+
     gdf_bus = gdf_bus.drop(columns=["index_right"], errors="ignore")
     bus_geo = pd.DataFrame(gdf_bus.drop(columns=["geometry"], errors="ignore"))
 else:
@@ -131,14 +147,16 @@ bus_count = (
 )
 
 # ========= 5) distance_to_bus (m) =========
+# Block centroid’lerini METRİK CRS’te al (EPSG:3857)
 gdf_blocks_xy = gdf_blocks[["GEOID","geometry"]].copy().to_crs(3857)
 gdf_blocks_xy["cx"] = gdf_blocks_xy.geometry.centroid.x
 gdf_blocks_xy["cy"] = gdf_blocks_xy.geometry.centroid.y
 
+# Durakları METRİK CRS’e geçir
+_bus_pts = bus_geo.dropna(subset=["stop_lat","stop_lon"]).copy()
 gdf_bus_xy = gpd.GeoDataFrame(
-    bus_geo.dropna(subset=["stop_lat","stop_lon"])[["stop_lat","stop_lon"]].copy(),
-    geometry=gpd.points_from_xy(bus_geo.dropna(subset=["stop_lat","stop_lon"])["stop_lon"],
-                                bus_geo.dropna(subset=["stop_lat","stop_lon"])["stop_lat"]),
+    _bus_pts[["stop_lat","stop_lon"]],
+    geometry=gpd.points_from_xy(_bus_pts["stop_lon"], _bus_pts["stop_lat"]),
     crs="EPSG:4326"
 ).to_crs(3857)
 
@@ -146,10 +164,15 @@ if len(gdf_bus_xy) == 0:
     bus_dist = gdf_blocks_xy[["GEOID"]].copy()
     bus_dist["distance_to_bus"] = np.nan
 else:
-    bus_coords = np.vstack([gdf_bus_xy.geometry.x.values, gdf_bus_xy.geometry.y.values]).T
-    tree = cKDTree(bus_coords)
     centroids = np.vstack([gdf_blocks_xy["cx"].values, gdf_blocks_xy["cy"].values]).T
-    distances, _ = tree.query(centroids, k=1)
+    bus_coords = np.vstack([gdf_bus_xy.geometry.x.values, gdf_bus_xy.geometry.y.values]).T
+    if cKDTree is not None:
+        tree = cKDTree(bus_coords)
+        distances, _ = tree.query(centroids, k=1)
+    else:
+        # NumPy fallback — O(N×M) ama SF için makul
+        diff = centroids[:, None, :] - bus_coords[None, :, :]
+        distances = np.sqrt((diff ** 2).sum(axis=2)).min(axis=1)
     bus_dist = gdf_blocks_xy[["GEOID"]].copy()
     bus_dist["distance_to_bus"] = distances.astype(float)
 
@@ -165,21 +188,22 @@ bus_feat = bus_feat.merge(crime_geoids.to_frame(), on="GEOID", how="right")
 d = bus_feat["distance_to_bus"].replace([np.inf,-np.inf], np.nan).dropna()
 if len(d) >= 2 and d.max() > d.min():
     n_bins = freedman_diaconis_bin_count(d.to_numpy(), max_bins=10)
+    # qcut ile kantil bazlı kenarlar; uygun değilse duplicates drop
     _, edges = pd.qcut(d, q=n_bins, retbins=True, duplicates="drop")
-    labels = [f"{int(edges[i])}–{int(edges[i+1])}m" for i in range(len(edges)-1)]
+    labels = [f"{int(round(edges[i]))}–{int(round(edges[i+1]))}m" for i in range(len(edges)-1)]
     bus_feat["distance_to_bus_range"] = pd.cut(bus_feat["distance_to_bus"], bins=edges,
                                                labels=labels, include_lowest=True)
 else:
-    bus_feat["distance_to_bus_range"] = pd.Series(["0–0m"] * len(bus_feat))
+    bus_feat["distance_to_bus_range"] = pd.Series(["0–0m"] * len(bus_feat), index=bus_feat.index)
 
 cnt = bus_feat["bus_stop_count"].fillna(0)
 if cnt.nunique() > 1:
     n_c_bins = freedman_diaconis_bin_count(cnt.to_numpy(), max_bins=8)
     _, c_edges = pd.qcut(cnt, q=n_c_bins, retbins=True, duplicates="drop")
-    c_labels = [f"{int(c_edges[i])}–{int(c_edges[i+1])}" for i in range(len(c_edges)-1)]
+    c_labels = [f"{int(round(c_edges[i]))}–{int(round(c_edges[i+1]))}" for i in range(len(c_edges)-1)]
     bus_feat["bus_stop_count_range"] = pd.cut(cnt, bins=c_edges, labels=c_labels, include_lowest=True)
 else:
-    bus_feat["bus_stop_count_range"] = pd.Series([f"{int(cnt.min())}–{int(cnt.max())}"] * len(cnt))
+    bus_feat["bus_stop_count_range"] = pd.Series([f"{int(cnt.min())}–{int(cnt.max())}"] * len(cnt), index=cnt.index)
 
 bus_feat = bus_feat.sort_values("GEOID").drop_duplicates("GEOID", keep="first")
 assert bus_feat["GEOID"].is_unique, "BUS: GEOID unique olmalı"
@@ -188,7 +212,7 @@ assert bus_feat["GEOID"].is_unique, "BUS: GEOID unique olmalı"
 before = crime.shape
 crime = crime.merge(bus_feat, on="GEOID", how="left", validate="many_to_one")
 crime["bus_stop_count"] = crime["bus_stop_count"].fillna(0).astype(int)
-log(f"🔗 CRIME ⨯ BUS: {before} → {crime.shape}")
+log(f"🔗 CRIME ⨯ BUS: {before} → {crime.shape} (KDTree={_TREE_IMPL})")
 
 # ========= 8) yaz =========
 safe_save_csv(crime, str(DAILY_OUT))
