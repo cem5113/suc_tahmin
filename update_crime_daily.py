@@ -162,7 +162,6 @@ def build_daily(df_src: pd.DataFrame) -> pd.DataFrame:
     if d_start is None or d_end is None:
         raise SystemExit("❌ Tarih aralığı tespit edilemedi (veride hiç geçerli tarih yok).")
 
-    # >>> HATA NEDENİ OLAN KISIMIN DÜZELTİLMİŞ HALİ <<<
     # pandas Index[str] olarak YYYY-MM-DD üret
     all_dates = pd.date_range(start=d_start, end=d_end, freq="D").strftime("%Y-%m-%d")
 
