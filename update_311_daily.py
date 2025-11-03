@@ -13,8 +13,8 @@ DAILY_IN        = Path(os.getenv("DAILY_IN",  str(SAVE_DIR / "daily_crime_01.csv
 DAILY_OUT       = Path(os.getenv("DAILY_OUT", str(SAVE_DIR / "daily_crime_02.csv")))
 
 # 311 giriş adayları
-FR_311_DAILY_IN = Path(os.getenv("FR_311_DAILY_IN", ""))  # varsa doğrudan günlük (GEOID×date)
-AGG_311_NAME    = os.getenv("AGG_311_NAME", "sf_311_last_5_years.csv")  # 3-saatlik özet (GEOID×date×hour_range)
+FR_311_DAILY_IN = os.getenv("FR_311_DAILY_IN", "").strip()  # DİKKAT: string tut
+AGG_311_NAME    = os.getenv("AGG_311_NAME", "sf_311_last_5_years.csv")
 AGG_311_CANDIDATES = [
     SAVE_DIR / AGG_311_NAME,
     Path("./") / AGG_311_NAME,
@@ -26,7 +26,7 @@ def _abs(p: Path) -> Path: return p.expanduser().resolve()
 
 def _read_csv(path: Path) -> pd.DataFrame:
     p = _abs(path)
-    if not p.exists():
+    if not p.exists() or not p.is_file():
         raise FileNotFoundError(f"❌ Dosya yok: {p}")
     df = pd.read_csv(p, low_memory=False)
     log(f"📖 Okundu: {p}  ({len(df):,}×{df.shape[1]})")
@@ -49,37 +49,37 @@ def _norm_geoid(s: pd.Series, L: int = 11) -> pd.Series:
 
 def _find_existing(paths: list[Path]) -> Path | None:
     for p in paths:
-        if p and p.exists():
+        if p and p.exists() and p.is_file():
             return p
     return None
 
 def load_311_daily() -> pd.DataFrame:
     """
-    1) FR_311_DAILY_IN varsa doğrudan oku (GEOID×date, içerikte 311 günlük sayı olmalı)
-    2) Yoksa 3-saatlik özet dosyasını bul → GEOID×date bazında SUM → daily üret
+    1) FR_311_DAILY_IN (dosya yolu) varsa doğrudan oku (GEOID×date)
+    2) Yoksa 3-saatlik özetten GEOID×date SUM → daily üret
     """
-    # 1) Doğrudan günlük varsa
-    if FR_311_DAILY_IN and _abs(FR_311_DAILY_IN).exists():
-        df = _read_csv(FR_311_DAILY_IN)
-        # kolon adı uyumları
-        if "311_request_count_daily" not in df.columns:
-            # farklı bir ad kullanılmış olabilir → mantıklı adaylar
-            cand = [c for c in df.columns if "daily" in c and "311" in c]
-            if cand:
-                df = df.rename(columns={cand[0]: "311_request_count_daily"})
-        # tarih kolonunu normalize et
-        if "date" not in df.columns:
-            for c in ("event_date", "dt", "day"):
-                if c in df.columns:
-                    df["date"] = df[c]
-                    break
-        df["date"] = _to_date(df["date"])
-        if "GEOID" in df.columns:
-            df["GEOID"] = _norm_geoid(df["GEOID"])
-        # eksik sayaç → 0
-        if "311_request_count_daily" not in df.columns:
-            df["311_request_count_daily"] = 0
-        return df[["GEOID","date","311_request_count_daily"]].copy()
+    # 1) Doğrudan günlük dosya verildiyse
+    if FR_311_DAILY_IN:
+        p = _abs(Path(FR_311_DAILY_IN))
+        if p.exists() and p.is_file():
+            df = _read_csv(p)
+            # kolon adı uyumları
+            if "311_request_count_daily" not in df.columns:
+                cand = [c for c in df.columns if "daily" in c and "311" in c]
+                if cand:
+                    df = df.rename(columns={cand[0]: "311_request_count_daily"})
+            # tarih kolonunu normalize et
+            if "date" not in df.columns:
+                for c in ("event_date", "dt", "day", "datetime", "timestamp"):
+                    if c in df.columns:
+                        df["date"] = df[c]
+                        break
+            df["date"] = _to_date(df["date"])
+            if "GEOID" in df.columns:
+                df["GEOID"] = _norm_geoid(df["GEOID"])
+            if "311_request_count_daily" not in df.columns:
+                df["311_request_count_daily"] = 0
+            return df[["GEOID","date","311_request_count_daily"]].copy()
 
     # 2) 3-saatlik özetten günlük üret
     src = _find_existing(AGG_311_CANDIDATES)
@@ -88,14 +88,11 @@ def load_311_daily() -> pd.DataFrame:
         return pd.DataFrame(columns=["GEOID","date","311_request_count_daily"])
 
     df = _read_csv(src)
-    # beklenen kolonlar: GEOID, date, hour_range, 311_request_count
     if "date" not in df.columns:
         raise SystemExit("❌ 311 özetinde 'date' yok.")
     if "311_request_count" not in df.columns:
-        # bazı pipeline'larda isimlenme farklı olabilir
         cand = [c for c in df.columns if c.lower() in ("count","requests","n")]
         if not cand:
-            # saatlik satır adedinden kur
             df["311_request_count"] = 1
         else:
             df = df.rename(columns={cand[0]: "311_request_count"})
@@ -107,6 +104,16 @@ def load_311_daily() -> pd.DataFrame:
                .reset_index(name="311_request_count_daily"))
     return daily
 
+def _ensure_date_column(crime: pd.DataFrame) -> pd.DataFrame:
+    if "date" in crime.columns:
+        crime["date"] = _to_date(crime["date"])
+        return crime
+    for c in ("event_date","dt","day","datetime","timestamp"):
+        if c in crime.columns:
+            crime["date"] = _to_date(crime[c])
+            return crime
+    raise SystemExit("❌ daily_crime_01.csv içinde tarih kolonu bulunamadı (date/event_date/dt/day/datetime/timestamp).")
+
 def main() -> int:
     log("🚀 update_311_daily.py")
     log(f"🔧 DAILY_IN : {_abs(DAILY_IN)}")
@@ -114,13 +121,7 @@ def main() -> int:
 
     # 1) daily_crime_01.csv
     crime = _read_csv(DAILY_IN)
-    # tarih kolon adı: date / event_date → date'e indir
-    if "date" not in crime.columns:
-        for c in ("event_date","dt","day"):
-            if c in crime.columns:
-                crime["date"] = crime[c]
-                break
-    crime["date"] = _to_date(crime["date"])
+    crime = _ensure_date_column(crime)
     if "GEOID" in crime.columns:
         crime["GEOID"] = _norm_geoid(crime["GEOID"])
 
@@ -131,7 +132,9 @@ def main() -> int:
     keys = ["GEOID","date"]
     before = crime.shape
     out = crime.merge(d311, on=keys, how="left")
-    out["311_request_count_daily"] = pd.to_numeric(out["311_request_count_daily"], errors="coerce").fillna(0).astype("int32")
+    out["311_request_count_daily"] = pd.to_numeric(
+        out["311_request_count_daily"], errors="coerce"
+    ).fillna(0).astype("int32")
     log(f"🔗 Join: {before} → {out.shape}")
 
     # 4) İz bilgisi
