@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# update_911_daily.py — Input: update_911_fr.py çıktısı (örn. fr_crime_01.csv)
-#                       Output: daily_crime_01.csv (GEOID × date günlük 911 özet)
+# update_911_daily.py — Input: update_911_fr.py çıktısı (örn. daily_crime_00.csv)
+#                       Output: daily_crime_02.csv (GEOID × date günlük 911 özet + rolling)
 
 from __future__ import annotations
 import os, re
@@ -11,11 +11,12 @@ from typing import Optional
 import pandas as pd
 
 # ========= IO =========
-SAVE_DIR        = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
-DAILY_IN        = Path(os.getenv("DAILY_IN",  str(SAVE_DIR / "daily_crime_00.csv")))
-DAILY_OUT       = Path(os.getenv("DAILY_OUT", str(SAVE_DIR / "daily_crime_01.csv")))
+SAVE_DIR  = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
+# Bu adım 00 → 02'e dönüştürüyor; workflow sonunda head -n 3 daily_crime_02.csv deniyor.
+DAILY_IN  = Path(os.getenv("DAILY_IN",  str(SAVE_DIR / "daily_crime_00.csv")))
+DAILY_OUT = Path(os.getenv("DAILY_OUT", str(SAVE_DIR / "daily_crime_02.csv")))
 
-LOCAL_TZ  = os.getenv("FR_DAILY_TZ", "UTC")  # gerekirse raporlama için
+LOCAL_TZ  = os.getenv("FR_DAILY_TZ", "UTC")  # raporlama/iz bilgisi için
 
 # Saat aralığı formatı (00-03 gibi)
 HR_PAT = re.compile(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
@@ -58,17 +59,23 @@ def detect_datetime_col(df: pd.DataFrame) -> Optional[str]:
 
 def main() -> int:
     log("🚀 update_911_daily.py")
-    log(f"🔧 FR_911_IN  : {_abs(IN_PATH)}")
-    log(f"🔧 FR_911_OUT : {_abs(OUT_PATH)}")
+    log(f"🔧 DAILY_IN  : {_abs(DAILY_IN)}")
+    log(f"🔧 DAILY_OUT : {_abs(DAILY_OUT)}")
     log(f"🔧 FR_DAILY_TZ: {LOCAL_TZ}")
 
-    src = safe_read_csv(IN_PATH)
+    src = safe_read_csv(DAILY_IN)
 
     # GEOID zorunlu
     if "GEOID" not in src.columns:
         raise SystemExit("❌ Girdi dosyasında 'GEOID' kolonu yok.")
     src = src.copy()
-    src["GEOID"] = src["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(11)
+    src["GEOID"] = (
+        src["GEOID"]
+        .astype(str)
+        .str.extract(r"(\d+)", expand=False)
+        .fillna("")
+        .str.zfill(int(os.getenv("GEOID_LEN", "11")))
+    )
 
     # Tarih türetme
     if "date" in src.columns:
@@ -100,17 +107,25 @@ def main() -> int:
     if "hour_range" in src.columns:
         if hr_cnt_col is None:
             # Saatlik sayaç yok → saatlik satır adedinden günlük
-            hr_agg = (src.groupby(["GEOID","date","hour_range"], dropna=False)
-                        .size().reset_index(name="hr_cnt"))
+            hr_agg = (
+                src.groupby(["GEOID","date","hour_range"], dropna=False)
+                   .size().reset_index(name="hr_cnt")
+            )
         else:
-            hr_agg = (src.groupby(["GEOID","date","hour_range"], dropna=False)[hr_cnt_col]
-                        .sum().reset_index(name="hr_cnt"))
-        daily = (hr_agg.groupby(["GEOID","date"], dropna=False)["hr_cnt"]
-                       .sum().reset_index(name="911_request_count_daily(before_24_hours)"))
+            hr_agg = (
+                src.groupby(["GEOID","date","hour_range"], dropna=False)[hr_cnt_col]
+                   .sum().reset_index(name="hr_cnt")
+            )
+        daily = (
+            hr_agg.groupby(["GEOID","date"], dropna=False)["hr_cnt"]
+                  .sum().reset_index(name="911_request_count_daily(before_24_hours)")
+        )
     else:
         # hour_range hiç yok → doğrudan günlük satır adedi
-        daily = (src.groupby(["GEOID","date"], dropna=False)
-                    .size().reset_index(name="911_request_count_daily(before_24_hours)"))
+        daily = (
+            src.groupby(["GEOID","date"], dropna=False)
+               .size().reset_index(name="911_request_count_daily(before_24_hours)")
+        )
 
     # Sızıntısız rolling (last3d/last7d) — 1 gün geriden
     daily = daily.sort_values(["GEOID","date"]).reset_index(drop=True)
@@ -120,7 +135,7 @@ def main() -> int:
                  .transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
         ).astype("float32")
 
-    # Kalender etiketleri (opsiyonel ama faydalı)
+    # Kalender etiketleri (opsiyonel)
     dts = pd.to_datetime(daily["date"])
     daily["day_of_week"] = dts.dt.weekday.astype("int8")
     daily["month"] = dts.dt.month.astype("int8")
@@ -133,7 +148,7 @@ def main() -> int:
     daily["fr_daily_tz"] = LOCAL_TZ
 
     # Kaydet
-    safe_save_csv(daily, OUT_PATH)
+    safe_save_csv(daily, DAILY_OUT)
 
     # Kısa özet
     try:
