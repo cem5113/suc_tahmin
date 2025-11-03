@@ -9,7 +9,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-from scipy.spatial import cKDTree
+
+# KD-Tree: SciPy varsa onu, yoksa NumPy fallback
+try:
+    from scipy.spatial import cKDTree
+    _TREE_IMPL = "scipy"
+except Exception:
+    cKDTree = None
+    _TREE_IMPL = "numpy"
 
 pd.options.mode.copy_on_write = True
 
@@ -60,7 +67,7 @@ BLOCKS_CANDIDATES = [
 ]
 
 # ---------- 1) crime oku ----------
-if not DAILY_IN.exists():
+if not DAILY_IN.exists() or not DAILY_IN.is_file():
     raise FileNotFoundError(f"❌ Girdi yok: {DAILY_IN}")
 crime = pd.read_csv(DAILY_IN, low_memory=False)
 if "GEOID" not in crime.columns:
@@ -70,8 +77,8 @@ crime_geoids = pd.Series(crime["GEOID"].unique(), name="GEOID")
 log(f"📥 daily_crime_04.csv okundu — satır={len(crime):,}, uniq GEOID={crime_geoids.size:,}")
 
 # ---------- 2) GTFS durak cache (indirimsiz) ----------
-stops_path = TRAIN_STOPS_WITH_GEOID if TRAIN_STOPS_WITH_GEOID.exists() else (
-    TRAIN_LEGACY_RAW_Y if TRAIN_LEGACY_RAW_Y.exists() else None
+stops_path = TRAIN_STOPS_WITH_GEOID if (TRAIN_STOPS_WITH_GEOID.exists() and TRAIN_STOPS_WITH_GEOID.is_file()) else (
+    TRAIN_LEGACY_RAW_Y if (TRAIN_LEGACY_RAW_Y.exists() and TRAIN_LEGACY_RAW_Y.is_file()) else None
 )
 if stops_path is None:
     raise FileNotFoundError("❌ GTFS durak cache'i bulunamadı (sf_train_stops_with_geoid.csv veya train_y.csv).")
@@ -91,7 +98,7 @@ if "GEOID" in stops.columns:
 log(f"🚉 Train stops cache: {stops_path} — satır={len(stops):,}, GEOID kolonlu={ 'GEOID' in stops.columns }")
 
 # ---------- 3) Blocks GeoJSON ----------
-blocks_path = next((p for p in BLOCKS_CANDIDATES if p and p.exists()), None)
+blocks_path = next((p for p in BLOCKS_CANDIDATES if p and p.exists() and p.is_file()), None)
 if blocks_path is None:
     raise FileNotFoundError("❌ Blocks GeoJSON yok: sf_census_blocks_with_population.geojson")
 gdf_blocks = gpd.read_file(blocks_path)
@@ -108,9 +115,13 @@ elif str(gdf_blocks.crs).lower() not in ("epsg:4326","wgs84","wgs 84"):
 if "GEOID" not in stops.columns or stops["GEOID"].isna().all():
     gdf_stops = gpd.GeoDataFrame(stops, geometry=gpd.points_from_xy(stops["stop_lon"], stops["stop_lat"]), crs="EPSG:4326")
     try:
+        # Poligon içinde mi?
         gdf_stops = gpd.sjoin(gdf_stops, gdf_blocks[["geometry","GEOID"]], how="left", predicate="within")
     except Exception:
-        gdf_stops = gpd.sjoin_nearest(gdf_stops, gdf_blocks[["geometry","GEOID"]], how="left", max_distance=5)
+        # WGS84'te max_distance derece olur → metrik CRS'e geç
+        gdf_stops_m = gdf_stops.to_crs(3857)
+        gdf_blocks_m = gdf_blocks.to_crs(3857)[["geometry","GEOID"]]
+        gdf_stops = gpd.sjoin_nearest(gdf_stops_m, gdf_blocks_m, how="left", max_distance=1000).to_crs(4326)
     gdf_stops = gdf_stops.drop(columns=["index_right"], errors="ignore")
     stops_geo = pd.DataFrame(gdf_stops.drop(columns=["geometry"], errors="ignore"))
 else:
@@ -128,12 +139,10 @@ gdf_blocks_3857 = gdf_blocks[["GEOID","geometry"]].copy().to_crs(epsg=3857)
 gdf_blocks_3857["cx"] = gdf_blocks_3857.geometry.centroid.x
 gdf_blocks_3857["cy"] = gdf_blocks_3857.geometry.centroid.y
 
+_stops_pts = stops_geo.dropna(subset=["stop_lat","stop_lon"]).copy()
 gdf_train_xy = gpd.GeoDataFrame(
-    stops_geo.dropna(subset=["stop_lat","stop_lon"])[["stop_lat","stop_lon"]].copy(),
-    geometry=gpd.points_from_xy(
-        stops_geo.dropna(subset=["stop_lat","stop_lon"])["stop_lon"],
-        stops_geo.dropna(subset=["stop_lat","stop_lon"])["stop_lat"]
-    ),
+    _stops_pts[["stop_lat","stop_lon"]],
+    geometry=gpd.points_from_xy(_stops_pts["stop_lon"], _stops_pts["stop_lat"]),
     crs="EPSG:4326"
 ).to_crs(epsg=3857)
 
@@ -143,8 +152,13 @@ if len(gdf_train_xy) == 0:
 else:
     train_xy = np.vstack([gdf_train_xy.geometry.x.values, gdf_train_xy.geometry.y.values]).T
     centroids = np.vstack([gdf_blocks_3857["cx"].values, gdf_blocks_3857["cy"].values]).T
-    tree = cKDTree(train_xy)
-    d, _ = tree.query(centroids, k=1)
+    if cKDTree is not None:
+        tree = cKDTree(train_xy)
+        d, _ = tree.query(centroids, k=1)
+    else:
+        # NumPy fallback — O(N×M)
+        diff = centroids[:, None, :] - train_xy[None, :, :]
+        d = np.sqrt((diff ** 2).sum(axis=2)).min(axis=1)
     dist_tbl = gdf_blocks_3857[["GEOID"]].copy()
     dist_tbl["distance_to_train"] = d.astype(float)
 
@@ -177,6 +191,7 @@ else:
 
 # GEOID tekilleştir
 geo_metrics = geo_metrics.sort_values("GEOID").drop_duplicates("GEOID", keep="first")
+assert geo_metrics["GEOID"].is_unique, "TRAIN: GEOID unique olmalı"
 
 # ---------- 7) GEOID-level özeti yaz (train.csv) ----------
 safe_save_csv(geo_metrics, str(TRAIN_SUMMARY_NAME))
@@ -185,7 +200,7 @@ print(f"✅ TRAIN özet (GEOID-level) yazıldı → {TRAIN_SUMMARY_NAME}")
 # ---------- 8) crime ile merge ----------
 _before = crime.shape
 crime_enriched = crime.merge(geo_metrics, on="GEOID", how="left", validate="many_to_one")
-log(f"🔗 CRIME ⨯ TRAIN: {_before} → {crime_enriched.shape}")
+log(f"🔗 CRIME ⨯ TRAIN: {_before} → {crime_enriched.shape} (KDTree={_TREE_IMPL})")
 
 # ---------- 9) yaz ----------
 safe_save_csv(crime_enriched, str(DAILY_OUT))
