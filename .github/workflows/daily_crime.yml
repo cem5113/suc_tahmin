@@ -57,7 +57,7 @@ jobs:
       - name: Create data dir if missing
         run: mkdir -p "${CRIME_DATA_DIR}"
 
-      - name: Sanity: DO NOT use legacy update_crime.py
+      - name: "Sanity — DO NOT use legacy update_crime.py"
         run: |
           test ! -f update_crime.py || (echo "⚠️ Bu hat eski akış içindir: update_crime.py bulunuyor ama ÇAĞRILMAYACAK." && true)
 
