@@ -48,6 +48,7 @@ jobs:
 
       - name: Install Python deps
         run: |
+          set -e
           python -m pip install -U pip wheel setuptools
           pip install -U pandas numpy pyarrow requests scipy meteostat
           sudo apt-get update -y
@@ -61,26 +62,51 @@ jobs:
         run: |
           test ! -f update_crime.py || (echo "⚠️ Bu hat eski akış içindir: update_crime.py bulunuyor ama ÇAĞRILMAYACAK." && true)
 
+      - name: Show update_crime_daily.py excerpt (for sanity)
+        run: |
+          echo "---- update_crime_daily.py (lines 120-200) ----"
+          sed -n '120,200p' update_crime_daily.py || true
+          if [ -f "crime_prediction_data/update_crime_daily.py" ]; then
+            echo "---- crime_prediction_data/update_crime_daily.py (lines 120-200) ----"
+            sed -n '120,200p' crime_prediction_data/update_crime_daily.py || true
+          fi
+
+      - name: Hotfix date casting (if any stale copy exists)
+        run: |
+          set -e
+          for p in "update_crime_daily.py" "crime_prediction_data/update_crime_daily.py" "crime_prediction_data/crime_prediction_data/update_crime_daily.py"; do
+            [ -f "$p" ] && sed -i 's/\.date\.astype("string")/.strftime("%Y-%m-%d")/g' "$p" || true
+          done
+
       # ─────────────────────────────────────────────
       # 1) daily_crime_01.csv
       - name: (1) update_crime_daily.py
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          SF_DAILY_IN:  ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
+          SF_DAILY_OUT: ${{ env.CRIME_DATA_DIR }}/daily_crime_01.csv   # ← uyumlu çıktı
+          SF_DAILY_TZ:  America/Los_Angeles
+          GEOID_LEN:    ${{ env.GEOID_LEN }}
         run: |
           set -e
           python -u update_crime_daily.py
           echo "---- HEAD daily_crime_01.csv ----"
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_01.csv" || true
           python - <<'PY'
-          import os,pandas as pd
-          p=os.path.join(os.environ["CRIME_DATA_DIR"],"daily_crime_01.csv")
-          df=pd.read_csv(p,nrows=1); print("cols[01]:", sorted(df.columns.tolist()))
+          import os, pandas as pd
+          out = os.environ.get("SF_DAILY_OUT")
+          if not out or not os.path.exists(out):
+              raise FileNotFoundError(f"SF_DAILY_OUT yok veya bulunamadı: {out}")
+          df = pd.read_csv(out, nrows=1)
+          print("using:", out)
+          print("cols[01]:", sorted(df.columns.tolist()))
           PY
 
       # 2) daily_crime_02.csv
       - name: (2) update_911_daily.py
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
         run: |
           set -e
           python -u update_911_daily.py
@@ -91,6 +117,7 @@ jobs:
       - name: (3) update_311_daily.py
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
         run: |
           set -e
           python -u update_311_daily.py
@@ -141,10 +168,10 @@ jobs:
           echo "---- HEAD daily_crime_07.csv ----"
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_07.csv" || true
           python - <<'PY'
-          import os,pandas as pd
-          p=os.path.join(os.environ["CRIME_DATA_DIR"],"daily_crime_07.csv")
-          df=pd.read_csv(p,nrows=1)
-          need={"GEOID","distance_to_police","distance_to_government_building"}
+          import os, pandas as pd
+          p = os.path.join(os.environ["CRIME_DATA_DIR"], "daily_crime_07.csv")
+          df = pd.read_csv(p, nrows=1)
+          need = {"GEOID","distance_to_police","distance_to_government_building"}
           print("ok[07]:", need.issubset(set(df.columns)))
           PY
 
@@ -158,10 +185,10 @@ jobs:
           echo "---- HEAD daily_crime_08.csv ----"
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_08.csv" || true
           python - <<'PY'
-          import os,pandas as pd
-          p=os.path.join(os.environ["CRIME_DATA_DIR"],"daily_crime_08.csv")
-          df=pd.read_csv(p,nrows=1)
-          need={"GEOID","event_date","tmin","tmax","prcp"}
+          import os, pandas as pd
+          p = os.path.join(os.environ["CRIME_DATA_DIR"], "daily_crime_08.csv")
+          df = pd.read_csv(p, nrows=1)
+          need = {"GEOID","event_date","tmin","tmax","prcp"}
           print("ok[08]:", need.issubset(set(df.columns)))
           PY
 
