@@ -9,7 +9,7 @@ import pandas as pd
 
 # ========= Ayarlar (ENV ile değiştirilebilir) =========
 IN_PATH   = Path(os.getenv("SF_DAILY_IN",  os.getenv("FR_DAILY_IN",  "sf_crime.csv")))     # olay bazlı giriş
-OUT_PATH  = Path(os.getenv("SF_DAILY_OUT", os.getenv("FR_DAILY_OUT", "sf_crime_daily.csv"))) # günlük çıktı
+OUT_PATH  = Path(os.getenv("SF_DAILY_OUT", os.getenv("FR_DAILY_OUT", "daily_crime_00.csv"))) # günlük çıktı
 LOCAL_TZ  = os.getenv("SF_DAILY_TZ", os.getenv("FR_DAILY_TZ", "America/Los_Angeles"))
 
 # Opsiyonel: tarih penceresi (YYYY-MM-DD)
