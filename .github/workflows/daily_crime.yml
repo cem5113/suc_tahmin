@@ -74,6 +74,28 @@ jobs:
           python -u update_crime_daily.py
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_01.csv" || true
 
+      # 2a) 911 kaynağını hazırla (bul → kopyala → yoksa stub yarat)
+      - name: Prepare 911 source file
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -e
+          P_YEAR="${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+          P_YEARS="${CRIME_DATA_DIR}/sf_911_last_5_years.csv"
+      
+          if [ -f "$P_YEAR" ]; then
+            echo "✅ Found: $P_YEAR"
+          elif [ -f "$P_YEARS" ]; then
+            echo "ℹ️ Found plural: $P_YEARS → copying to $P_YEAR"
+            cp -f "$P_YEARS" "$P_YEAR"
+          else
+            echo "⚠️ 911 source not found; creating empty stub → $P_YEAR"
+            echo "GEOID,datetime" > "$P_YEAR"
+          fi
+      
+          echo "---- HEAD 911 source ----"
+          head -n 5 "$P_YEAR" || true
+
       # 2) 911: daily_crime_01.csv → daily_crime_02.csv
       - name: (2) update_911_daily.py → daily_crime_02.csv
         env:
