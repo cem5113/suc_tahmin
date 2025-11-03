@@ -1,4 +1,4 @@
-name: Daily Crime (1→9) — robust
+name: daily_crime — robust
 
 on:
   workflow_dispatch: {}
