@@ -79,46 +79,73 @@ jobs:
           done
 
       # ─────────────────────────────────────────────
-      # 1) daily_crime_01.csv
-      - name: (1) update_crime_daily.py
+      # 1) daily_crime_01.csv — DEBUG’li, kurşun geçirmez
+      - name: (1) update_crime_daily.py — DEBUG
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN:      ${{ env.GEOID_LEN }}
           SF_DAILY_IN:    ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
-          SF_DAILY_OUT:   ${{ env.CRIME_DATA_DIR }}/daily_crime_01.csv  # hedef
+          SF_DAILY_OUT:   ${{ env.CRIME_DATA_DIR }}/daily_crime_01.csv   # hedef: 01
           SF_DAILY_TZ:    America/Los_Angeles
         run: |
           set -e
-          echo "== ENV preview =="
-          env | grep -E 'CRIME_DATA_DIR|SF_DAILY_(IN|OUT|TZ)|GEOID_LEN' | sort || true
-
-          # Inline export ile python çağrısı (ENV inheritance sorunlarını atlatır)
+      
+          echo "== BEFORE python =="
+          echo "CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+          echo "SF_DAILY_IN=${SF_DAILY_IN}"
+          echo "SF_DAILY_OUT=${SF_DAILY_OUT}"
+          echo "SF_DAILY_TZ=${SF_DAILY_TZ}"
+          echo "GEOID_LEN=${GEOID_LEN}"
+          echo "ls -l ${CRIME_DATA_DIR} (pre):"
+          ls -l "${CRIME_DATA_DIR}" || true
+      
+          # Inline ENV ile çağır (ENV kalıtım sorunlarını by-pass eder)
           SF_DAILY_IN="${SF_DAILY_IN}" \
           SF_DAILY_OUT="${SF_DAILY_OUT}" \
           SF_DAILY_TZ="${SF_DAILY_TZ}" \
           GEOID_LEN="${GEOID_LEN}" \
-          python -u update_crime_daily.py
-
+          python - <<'PY'
+      import os
+      from pathlib import Path
+      import update_crime_daily as u
+      
+      print("== INSIDE python (env echo) ==")
+      print("PWD:", Path.cwd())
+      print("SF_DAILY_IN :", Path(os.getenv("SF_DAILY_IN","?")).resolve())
+      print("SF_DAILY_OUT:", Path(os.getenv("SF_DAILY_OUT","?")).resolve())
+      print("SF_DAILY_TZ :", os.getenv("SF_DAILY_TZ"))
+      print("GEOID_LEN   :", os.getenv("GEOID_LEN"))
+      
+      # Script'i main gibi çalıştır
+      raise SystemExit(u.main())
+      PY
+      
+          echo "== AFTER python =="
+          echo "ls -l ${CRIME_DATA_DIR} (post):"
+          ls -l "${CRIME_DATA_DIR}" || true
+      
+          # Eğer hâlâ 01 yok ama 00 yazıldıysa, geçici olarak kopyala (logda görelim)
+          if [ ! -f "${SF_DAILY_OUT}" ] && [ -f "${CRIME_DATA_DIR}/daily_crime_00.csv" ]; then
+            echo "⚠️ ${SF_DAILY_OUT} yok; daily_crime_00.csv bulundu → kopyalanıyor..."
+            cp -f "${CRIME_DATA_DIR}/daily_crime_00.csv" "${SF_DAILY_OUT}"
+          fi
+      
           echo "---- HEAD (SF_DAILY_OUT) ----"
           echo "OUT=${SF_DAILY_OUT}"
           head -n 3 "${SF_DAILY_OUT}" || true
-
-          # Fallback: 01 yoksa ama 00 varsa kopyala (geçici emniyet)
-          if [ ! -f "${SF_DAILY_OUT}" ] && [ -f "${CRIME_DATA_DIR}/daily_crime_00.csv" ]; then
-            echo "⚠️ ${SF_DAILY_OUT} yok, 00'dan kopyalanıyor..."
-            cp -f "${CRIME_DATA_DIR}/daily_crime_00.csv" "${SF_DAILY_OUT}"
-          fi
-
-          # Python ile kesin doğrulama
+      
+          # Ek doğrulama: Python ile dosyayı aç
           python - <<'PY'
-          import os, pandas as pd
-          out = os.environ["SF_DAILY_OUT"]
-          if not os.path.exists(out):
-              raise FileNotFoundError(f"Beklenen çıktı yok: {out}")
-          df = pd.read_csv(out, nrows=1)
-          print("using:", out)
-          print("cols[01]:", sorted(df.columns.tolist()))
-          PY
+      import os, pandas as pd
+      out = os.environ["SF_DAILY_OUT"]
+      print("final check using:", out)
+      import os as _os
+      if not _os.path.exists(out):
+          raise FileNotFoundError(f"Beklenen çıktı yok: {out}")
+      df = pd.read_csv(out, nrows=1)
+      print("cols:", sorted(df.columns.tolist()))
+      PY
+
 
       # 2) daily_crime_02.csv
       - name: (2) update_911_daily.py
