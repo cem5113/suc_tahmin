@@ -67,7 +67,7 @@ jobs:
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN:      ${{ env.GEOID_LEN }}
-          SF_DAILY_IN:    "sf_crime.csv"        # sadece dosya adı
+          SF_DAILY_IN:    "sf_crime_y.csv"        # sadece dosya adı
           SF_DAILY_OUT:   "daily_crime_01.csv"  # sadece dosya adı
           SF_DAILY_TZ:    America/Los_Angeles
         run: |
