@@ -181,7 +181,11 @@ def enrich_one(df: pd.DataFrame, train_agg: pd.DataFrame, is_grid: bool) -> pd.D
         out = _ensure_date(out)
 
     # hedef GEOID → resmi tek GEOID (string, 11 hane)
-    out.insert(0, "GEOID", _key_11(out[c_geoid]).astype("string"))
+    out["GEOID"] = _key_11(out[c_geoid]).astype("string")
+    # ve GEOID’i öne almak istiyorsan:
+    cols = ["GEOID"] + [c for c in out.columns if c != "GEOID"]
+    out = out[cols]
+
     drop_candidates = [c for c in out.columns if c != "GEOID" and "geoid" in c.lower()]
     out.drop(columns=drop_candidates, inplace=True, errors="ignore")
 
