@@ -144,87 +144,64 @@ jobs:
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
+          FR_911_DATE_COL:  "${{ env.FR_911_DATE_COL }}"
+          FR_911_GEOID_COL: "${{ env.FR_911_GEOID_COL }}"
+          FR_911_WINSOR_Q:  "${{ env.FR_911_WINSOR_Q }}"
+          FR_CAT_TOPK:      "${{ env.FR_CAT_TOPK }}"
         run: |
           set -euo pipefail
-      
+
           GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
           EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
             echo "⚠️ daily grid/events yok → 911 enrich atlanıyor."
             exit 0
           fi
-      
+
           echo "🔎 911 dosyası aranıyor..."
-          # 1) CRIME_DATA_DIR altında, 4 seviye derine kadar ara (Y öncelikli isim)
           mapfile -t FOUND_A < <(find "${CRIME_DATA_DIR}" -maxdepth 4 -type f \
             \( -iname "sf_911_last_5_year_y.csv" -o -iname "sf_911_last_5_year.csv" \) 2>/dev/null | sort)
-      
-          # 2) FR_OUTPUT_DIR varsa onun altında da ara (çoğu zaman nested oluyor)
           if [ -n "${FR_OUTPUT_DIR:-}" ] && [ -d "${FR_OUTPUT_DIR}" ]; then
             mapfile -t FOUND_B < <(find "${FR_OUTPUT_DIR}" -maxdepth 4 -type f \
               \( -iname "sf_911_last_5_year_y.csv" -o -iname "sf_911_last_5_year.csv" \) 2>/dev/null | sort)
           else
             FOUND_B=()
           fi
-      
-          # 3) artifact klasöründe olma ihtimaline karşı ekstra tarama
           mapfile -t FOUND_C < <(find "${CRIME_DATA_DIR}/artifact" -maxdepth 6 -type f \
             \( -iname "sf_911_last_5_year_y.csv" -o -iname "sf_911_last_5_year.csv" \) 2>/dev/null | sort || true)
-      
-          # Hepsini birleştir (sırayı koru, uniq)
+
           ALL=("${FOUND_A[@]}" "${FOUND_B[@]}" "${FOUND_C[@]}")
-          # uniq
           PICK=""
           declare -A seen
           for p in "${ALL[@]}"; do
             [ -z "${p}" ] && continue
             if [ -f "$p" ] && [ -z "${seen[$p]+x}" ]; then
               seen[$p]=1
-              # Y versiyonuna ağırlık: önce Y olanı seç, değilse ilk bulunan
               base="$(basename "$p")"
-              if [[ "$base" == "sf_911_last_5_year_y.csv" ]]; then
-                PICK="$p"
-                break
-              fi
-              # Y bulunmadıysa yine de ilk bulduğumuzu aday olarak tut
-              if [ -z "$PICK" ]; then
-                PICK="$p"
-              fi
+              if [[ "$base" == "sf_911_last_5_year_y.csv" ]]; then PICK="$p"; break; fi
+              if [ -z "$PICK" ]; then PICK="$p"; fi
             fi
           done
-      
+
           if [ -z "$PICK" ]; then
-            echo "ℹ️ 911 verisi bulunamadı. Taradığım bazı yollar:"
-            echo "   - CRIME_DATA_DIR=${CRIME_DATA_DIR}"
-            echo "   - FR_OUTPUT_DIR =${FR_OUTPUT_DIR:-<yok>}"
-            echo "📁 CRIME_DATA_DIR/ altında olası ağaç (ilk 120 satır):"
-            find "${CRIME_DATA_DIR}" -maxdepth 4 -type f -name "sf_911_last_5_year*.csv" | sed -n '1,120p' || true
-            echo "📁 artifact/ altında olası ağaç (ilk 120 satır):"
-            find "${CRIME_DATA_DIR}/artifact" -maxdepth 6 -type f -name "sf_911_last_5_year*.csv" | sed -n '1,120p' || true
-            echo "→ Adım atlanıyor."
-            exit 0
+            echo "ℹ️ 911 verisi bulunamadı → adım atlanıyor."; exit 0
           fi
-      
           echo "✅ 911 kaynağı: $PICK"
+
           export FR_911_PATH="$PICK"
-          export FR_911_DATE_COL="incident_datetime"
-          export FR_911_GEOID_COL="GEOID"
-      
-          # Script yol çözümleme
+          # (Date/GeoID/Winsor/TopK env'leri yukarıdan geliyor)
+
           if [ -f "./update_911_daily.py" ]; then
             PYFILE="./update_911_daily.py"
           elif [ -f "./scripts/update_911_daily.py" ]; then
             PYFILE="./scripts/update_911_daily.py"
           else
-            echo "❌ update_911_daily.py bulunamadı."
-            echo "Repo kök içeriği:"; ls -la .
-            echo "scripts/ içeriği:";  ls -la ./scripts || true
-            exit 66
+            echo "❌ update_911_daily.py yok."; exit 66
           fi
-      
+
           python -u "$PYFILE"
-      
-          # Kısa kontrol
+
+          # hızlı kontrol
           head -n 5 "$GRID" || true
       
       - name: (2) 311 → enrich GRID & EVENTS (robust path + robust script)
@@ -233,60 +210,61 @@ jobs:
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
+          FR_311_DATE_COL:  "${{ env.FR_311_DATE_COL }}"
+          FR_311_GEOID_COL: "${{ env.FR_311_GEOID_COL }}"
+          FR_311_WINSOR_Q:  "${{ env.FR_311_WINSOR_Q }}"
+          FR_311_EMA_ALPHAS: "${{ env.FR_311_EMA_ALPHAS }}"
         run: |
           set -euo pipefail
-      
+
           GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
           EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
             echo "⚠️ daily grid/events yok → 311 enrich atlanıyor."
             exit 0
           fi
-      
+
+          # Günlük 311 arama (öncelikli)
           CANDIDATES=(
             "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
             "${CRIME_DATA_DIR}/crime_prediction_data/sf_311_last_5_years.csv"
             "${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_311_last_5_years.csv"
-      
             "${FR_OUTPUT_DIR}/sf_311_last_5_years.csv"
             "${FR_OUTPUT_DIR}/crime_prediction_data/sf_311_last_5_years.csv"
-      
             "${CRIME_DATA_DIR}/artifact/sf_311_last_5_years.csv"
           )
-      
+
           PICK=""
           TRIED=()
           for p in "${CANDIDATES[@]}"; do
             TRIED+=("$p")
-            if [ -f "$p" ]; then
-              PICK="$p"
-              break
-            fi
+            if [ -f "$p" ]; then PICK="$p"; break; fi
           done
-      
+
           if [ -z "$PICK" ]; then
-            echo "ℹ️ 311 verisi yok (aradım: ${TRIED[*]}) → adım atlanıyor."
+            echo "ℹ️ 311 günlük bulunamadı (aradım: ${TRIED[*]}) → adım atlanıyor."
             exit 0
           fi
-      
+
           echo "✅ 311 kaynağı: $PICK"
-          export FR_311_DAILY_IN="$PICK"
-      
-          # --- script yol çözümlemesi
+          export FR_311_DAILY_IN="$PICK"   # ↩️ enrich_with_311.py bunu okur
+          # (winsor/ema/date/geoid env'leri yukarıdan geliyor)
+
+          # script çözümle
           if [ -f "./update_311_daily.py" ]; then
             PYFILE="./update_311_daily.py"
+          elif [ -f "./enrich_with_311.py" ]; then
+            PYFILE="./enrich_with_311.py"
           elif [ -f "./scripts/update_311_daily.py" ]; then
             PYFILE="./scripts/update_311_daily.py"
+          elif [ -f "./scripts/enrich_with_311.py" ]; then
+            PYFILE="./scripts/enrich_with_311.py"
           else
-            echo "❌ update_311_daily.py bulunamadı. Repo kökünü listeliyorum:"
-            ls -la .
-            echo "📁 scripts/ dizini:"
-            ls -la ./scripts || true
-            exit 67
+            echo "❌ 311 script'i bulunamadı."; exit 67
           fi
-      
+
           python -u "$PYFILE"
-      
+
           # kolon listesi
           python - <<'PY'
           import os, pandas as pd
