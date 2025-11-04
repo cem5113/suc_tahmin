@@ -287,12 +287,13 @@ jobs:
 
       - name: (6) Police & Government -> enrich GRID & EVENTS
         env:
-          POLICE_FILE: "sf_police_stations.csv"
-          GOV_FILE: "sf_government_buildings.csv"
+          POLICE_FILE:               "sf_police_stations.csv"
+          GOV_FILE:                  "sf_government_buildings.csv"
+          BLOCKS_CSV:                "sf_blocks_centroids.csv"   # ← BUNU EKLİYORSUN
         run: |
           set -euo pipefail
           python -u update_police_gov_daily.py
-
+          
       - name: (7) Weather (date-merge) -> enrich GRID & EVENTS
         env:
           WEATHER_FILE: "sf_weather_5years.csv"
