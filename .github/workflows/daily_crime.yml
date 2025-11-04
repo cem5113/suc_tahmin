@@ -43,7 +43,7 @@ env:
   FR_CAT_TOPK: "8"
 
   # 311 varsayılanları (boş kalmasın)
-  FR_311_DATE_COL: "created_date"
+  FR_311_DATE_COL: "date"
   FR_311_GEOID_COL: "GEOID"
   FR_311_WINSOR_Q: "0"      # boş gelirse 0 (kapalı) → kod içinde 0.999'a çekmek isterseniz ENV'de değiştirin
   FR_311_EMA_ALPHAS: "0.3,0.6"
