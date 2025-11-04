@@ -6,7 +6,7 @@ on:
     - cron: "30 04 * * *"  # 07:30 Europe/Istanbul
   workflow_run:
     workflows:
-      - "Full FR Crime Pipeline"   # upstream workflow 'name:' ile birebir aynı olmalı
+      - "Full SF Crime Pipeline"   # upstream workflow 'name:' ile birebir aynı olmalı
     types: [completed]
     branches: [main]
 
