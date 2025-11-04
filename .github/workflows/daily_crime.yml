@@ -36,6 +36,18 @@ env:
 
   NEIGH_FILE: neighbors.csv
 
+  # 911 varsayılanları (boş kalmasın)
+  FR_911_DATE_COL: "incident_datetime"
+  FR_911_GEOID_COL: "GEOID"
+  FR_911_WINSOR_Q: "0"
+  FR_CAT_TOPK: "8"
+
+  # 311 varsayılanları
+  FR_311_DATE_COL: "created_date"
+  FR_311_GEOID_COL: "GEOID"
+  FR_311_WINSOR_Q: "0.999"
+  FR_311_EMA_ALPHAS: "0.3,0.6"
+
 jobs:
   run_fr:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
@@ -99,6 +111,12 @@ jobs:
           else
             echo "No artifact ZIP file found (this is fine)."
           fi
+
+      - name: List artifact tree (sanity)
+        run: |
+          set -euo pipefail
+          echo "== artifact contents =="
+          find artifact -maxdepth 6 -type f | sed -n '1,200p' || true
 
       # --- (0) Build FR daily: sf_crime.csv konumunu otomatik bul ---
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
@@ -188,8 +206,13 @@ jobs:
           fi
           echo "✅ 911 kaynağı: $PICK"
 
+          # İkinci emniyet: boş gelirse default
+          export FR_911_DATE_COL="${FR_911_DATE_COL:-incident_datetime}"
+          export FR_911_GEOID_COL="${FR_911_GEOID_COL:-GEOID}"
+          export FR_911_WINSOR_Q="${FR_911_WINSOR_Q:-0}"
+          export FR_CAT_TOPK="${FR_CAT_TOPK:-8}"
+
           export FR_911_PATH="$PICK"
-          # (Date/GeoID/Winsor/TopK env'leri yukarıdan geliyor)
 
           if [ -f "./update_911_daily.py" ]; then
             PYFILE="./update_911_daily.py"
@@ -203,7 +226,7 @@ jobs:
 
           # hızlı kontrol
           head -n 5 "$GRID" || true
-      
+
       - name: (2) 311 → enrich GRID & EVENTS (robust path + robust script)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
@@ -224,7 +247,6 @@ jobs:
             exit 0
           fi
 
-          # Günlük 311 arama (öncelikli)
           CANDIDATES=(
             "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
             "${CRIME_DATA_DIR}/crime_prediction_data/sf_311_last_5_years.csv"
@@ -247,10 +269,14 @@ jobs:
           fi
 
           echo "✅ 311 kaynağı: $PICK"
-          export FR_311_DAILY_IN="$PICK"   # ↩️ enrich_with_311.py bunu okur
-          # (winsor/ema/date/geoid env'leri yukarıdan geliyor)
+          export FR_311_DAILY_IN="$PICK"
 
-          # script çözümle
+          # İkinci emniyet: boş gelirse default
+          export FR_311_DATE_COL="${FR_311_DATE_COL:-created_date}"
+          export FR_311_GEOID_COL="${FR_311_GEOID_COL:-GEOID}"
+          export FR_311_WINSOR_Q="${FR_311_WINSOR_Q:-0.999}"
+          export FR_311_EMA_ALPHAS="${FR_311_EMA_ALPHAS:-0.3,0.6}"
+
           if [ -f "./update_311_daily.py" ]; then
             PYFILE="./update_311_daily.py"
           elif [ -f "./enrich_with_311.py" ]; then
@@ -265,7 +291,6 @@ jobs:
 
           python -u "$PYFILE"
 
-          # kolon listesi
           python - <<'PY'
           import os, pandas as pd
           p=os.path.join(os.getenv("CRIME_DATA_DIR"), os.getenv("FR_GRID_DAILY_OUT","crime_prediction_data/fr_crime_grid_daily.csv"))
