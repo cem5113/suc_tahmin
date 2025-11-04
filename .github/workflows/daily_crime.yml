@@ -62,13 +62,22 @@ jobs:
         run: |
           test ! -f update_crime.py || (echo "⚠️ Eski akış dosyası var ama çağrılmayacak: update_crime.py" && true)
 
-      # (1) sf_crime.csv → daily_crime_00.csv
+      - name: Show CWD and locate sf_crime_y.csv
+        run: |
+          set -e
+          echo "📂 CWD: $(pwd)"
+          echo "🔎 Search for sf_crime_y.csv (maxdepth 3):"
+          find . -maxdepth 3 -type f -name "sf_crime_y.csv" -print || true
+          echo "🗂 ls crime_prediction_data:"
+          ls -lah crime_prediction_data || true
+
+      # (1) sf_crime_y.csv → daily_crime_00.csv
       - name: (1) update_crime_daily.py → daily_crime_00.csv
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN:      ${{ env.GEOID_LEN }}
-          SF_DAILY_IN:    "sf_crime_y.csv"        # sadece dosya adı
-          SF_DAILY_OUT:   "daily_crime_00.csv"  # sadece dosya adı
+          SF_DAILY_IN:    "crime_prediction_data/sf_crime_y.csv"  # << REVİZE
+          SF_DAILY_OUT:   "daily_crime_00.csv"                     # sadece dosya adı
           SF_DAILY_TZ:    America/Los_Angeles
         run: |
           set -e
@@ -133,7 +142,6 @@ jobs:
           GEOID_LEN:      ${{ env.GEOID_LEN }}
           DAILY_IN:       "daily_crime_01.csv"
           DAILY_OUT:      "daily_crime_02.csv"
-          # FR_311_DAILY_IN: "sf_311_daily.csv"       # opsiyonel: doğrudan günlük 311 varsa
           AGG_311_NAME:   "sf_311_last_5_years.csv"   # yoksa buradan günlük türet
         run: |
           set -e
