@@ -138,8 +138,7 @@ jobs:
           echo "---- GRID head ----";   head -n 5 "${FR_OUT_GRID}"   || true
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
-      # --- (1) 911: akıllı arama + yoksa zarifçe atla ---
-      - name: (1) 911 -> enrich GRID & EVENTS
+      - name: (1) 911 → enrich GRID & EVENTS (robust path + robust script)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
@@ -148,6 +147,7 @@ jobs:
         run: |
           set -euo pipefail
       
+          # --- grid & events var mı?
           GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
           EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
@@ -155,7 +155,7 @@ jobs:
             exit 0
           fi
       
-          # Tüm makul 911 konumlarını sırayla dene (Y versiyonu öncelikli)
+          # --- 911 kaynak adayları (Y öncelikli)
           CANDIDATES=(
             "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
             "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
@@ -165,6 +165,12 @@ jobs:
       
             "${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_911_last_5_year_y.csv"
             "${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_911_last_5_year.csv"
+      
+            "${FR_OUTPUT_DIR}/sf_911_last_5_year_y.csv"
+            "${FR_OUTPUT_DIR}/sf_911_last_5_year.csv"
+      
+            "${FR_OUTPUT_DIR}/crime_prediction_data/sf_911_last_5_year_y.csv"
+            "${FR_OUTPUT_DIR}/crime_prediction_data/sf_911_last_5_year.csv"
       
             "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year_y.csv"
             "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year.csv"
@@ -190,14 +196,25 @@ jobs:
           export FR_911_DATE_COL="incident_datetime"
           export FR_911_GEOID_COL="GEOID"
       
-          python -u update_911_daily.py
+          # --- script yol çözümlemesi
+          if [ -f "./update_911_daily.py" ]; then
+            PYFILE="./update_911_daily.py"
+          elif [ -f "./scripts/update_911_daily.py" ]; then
+            PYFILE="./scripts/update_911_daily.py"
+          else
+            echo "❌ update_911_daily.py bulunamadı. Repo kökünü listeliyorum:"
+            ls -la .
+            echo "📁 scripts/ dizini:"
+            ls -la ./scripts || true
+            exit 66
+          fi
       
-          # Kısa kontrol
+          python -u "$PYFILE"
+      
+          # kısa kontrol
           head -n 5 "$GRID" || true
       
-      
-      # --- (2) 311: akıllı arama + yoksa zarifçe atla ---
-      - name: (2) 311 -> enrich GRID & EVENTS
+      - name: (2) 311 → enrich GRID & EVENTS (robust path + robust script)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
@@ -213,11 +230,14 @@ jobs:
             exit 0
           fi
       
-          # Tüm makul 311 konumlarını sırayla dene
           CANDIDATES=(
             "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
             "${CRIME_DATA_DIR}/crime_prediction_data/sf_311_last_5_years.csv"
             "${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_311_last_5_years.csv"
+      
+            "${FR_OUTPUT_DIR}/sf_311_last_5_years.csv"
+            "${FR_OUTPUT_DIR}/crime_prediction_data/sf_311_last_5_years.csv"
+      
             "${CRIME_DATA_DIR}/artifact/sf_311_last_5_years.csv"
           )
       
@@ -237,12 +257,24 @@ jobs:
           fi
       
           echo "✅ 311 kaynağı: $PICK"
-          # enrich_with_311.py ya günlük ya ham dosya bekler; biz günlük olarak geçiyoruz
           export FR_311_DAILY_IN="$PICK"
       
-          python -u enrich_with_311.py
+          # --- script yol çözümlemesi
+          if [ -f "./enrich_with_311.py" ]; then
+            PYFILE="./enrich_with_311.py"
+          elif [ -f "./scripts/enrich_with_311.py" ]; then
+            PYFILE="./scripts/enrich_with_311.py"
+          else
+            echo "❌ enrich_with_311.py bulunamadı. Repo kökünü listeliyorum:"
+            ls -la .
+            echo "📁 scripts/ dizini:"
+            ls -la ./scripts || true
+            exit 67
+          fi
       
-          # Kolon listesi kontrolü
+          python -u "$PYFILE"
+      
+          # kolon listesi
           python - <<'PY'
           import os, pandas as pd
           p=os.path.join(os.getenv("CRIME_DATA_DIR"), os.getenv("FR_GRID_DAILY_OUT","crime_prediction_data/fr_crime_grid_daily.csv"))
