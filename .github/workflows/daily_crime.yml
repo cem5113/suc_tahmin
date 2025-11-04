@@ -86,7 +86,6 @@ jobs:
       # (0) GRID & EVENTS üretimi + Y_label — mutlak path kullan
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
         env:
-          # Elinizde hangi dosya varsa onu kullanın (çoğu kurulumda sf_crime.csv).
           FR_EVENTS_PATH:  ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
           FR_OUT_EVENTS:   ${{ env.CRIME_DATA_DIR }}/fr_crime_events_daily.csv
           FR_OUT_GRID:     ${{ env.CRIME_DATA_DIR }}/fr_crime_grid_daily.csv
@@ -247,6 +246,20 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
+
+      # 🔑 Daily dosyalarını önceki job'dan indir
+      - name: Download daily grid/events from previous job
+        uses: actions/download-artifact@v4
+        with:
+          name: fr-daily-grid-events
+          path: ${{ env.CRIME_DATA_DIR }}
+
+      - name: Verify transferred files
+        run: |
+          echo "📦 CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+          ls -la "${CRIME_DATA_DIR}" || true
+          head -n 3 "${CRIME_DATA_DIR}/fr_crime_grid_daily.csv" || true
+          head -n 3 "${CRIME_DATA_DIR}/fr_crime_events_daily.csv" || true
 
       - name: Install deps (runtime only)
         run: |
