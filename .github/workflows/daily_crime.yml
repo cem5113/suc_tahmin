@@ -94,7 +94,7 @@ jobs:
           FR_ID_COL:       "id"
         run: |
           set -e
-          python -u update_crime_fr_daily.py
+          python -u update_crime_daily.py
           echo "---- GRID head ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_grid_daily.csv" || true
           echo "---- EVENTS head ----"
