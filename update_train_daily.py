@@ -1,211 +1,248 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# update_train_daily.py — daily_crime_04.csv + (sf_train_stops_with_geoid.csv, blocks GeoJSON)
-#                         → daily_crime_05.csv  (distance_to_train, train_stop_count, *_range)
+"""
+enrich_with_train_daily.py
+- Tren durağı verisini (GEOID eşleşmeli) hem GRID (GEOID×date) hem EVENTS'e ekler.
+- Günlük akış: saatlik yok. Tren özellikleri GEOID bazında sabittir.
+- GEOID normalize (11 hane), akıllı agregasyon (count/sum/min), downcast ve hızlı önizleme.
+
+ENV (varsayılanlar):
+  CRIME_DATA_DIR         (crime_prediction_data)
+
+  FR_GRID_DAILY_IN       (fr_crime_grid_daily.csv)
+  FR_GRID_DAILY_OUT      (fr_crime_grid_daily.csv)
+
+  FR_EVENTS_DAILY_IN     (fr_crime_events_daily.csv)
+  FR_EVENTS_DAILY_OUT    (fr_crime_events_daily.csv)
+
+  TRAIN_PATH             (sf_train_stops_with_geoid.csv)
+  ARTIFACT_ZIP           (artifact/sf-crime-pipeline-output.zip)   # varsa açar
+  ARTIFACT_DIR           (artifact_unzipped)
+"""
 
 from __future__ import annotations
-import os
+import os, re, zipfile
 from pathlib import Path
-import numpy as np
 import pandas as pd
-import geopandas as gpd
-
-# KD-Tree: SciPy varsa onu, yoksa NumPy fallback
-try:
-    from scipy.spatial import cKDTree
-    _TREE_IMPL = "scipy"
-except Exception:
-    cKDTree = None
-    _TREE_IMPL = "numpy"
+import numpy as np
 
 pd.options.mode.copy_on_write = True
 
-# ---------- helpers ----------
+# ============================== Utils ==============================
 def log(msg: str): print(msg, flush=True)
-def ensure_parent(path: str): Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
-def normalize_geoid(s: pd.Series, L: int = DEFAULT_GEOID_LEN) -> pd.Series:
-    x = s.astype(str).str.extract(r"(\d+)", expand=False)
-    return x.str[:L].str.zfill(L)
+def safe_unzip(zip_path: Path, dest_dir: Path):
+    if not zip_path.exists():
+        return
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    log(f"📦 ZIP açılıyor: {zip_path} → {dest_dir}")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for m in zf.infolist():
+            out = dest_dir / m.filename
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if m.is_dir():
+                out.mkdir(parents=True, exist_ok=True); continue
+            with zf.open(m, "r") as src, open(out, "wb") as dst:
+                dst.write(src.read())
+    log("✅ ZIP çıkarma tamam.")
 
-def freedman_diaconis_bin_count(data: np.ndarray, max_bins: int = 10) -> int:
-    data = np.asarray(data)
-    data = data[np.isfinite(data)]
-    if data.size < 2 or np.allclose(data.min(), data.max()):
-        return 1
-    q75, q25 = np.percentile(data, [75, 25])
-    iqr = q75 - q25
-    if iqr <= 0:
-        return min(max_bins, max(2, int(np.sqrt(len(data)))))
-    bw = 2 * iqr / (len(data) ** (1 / 3))
-    if bw <= 0:
-        return min(max_bins, max(2, int(np.sqrt(len(data)))))
-    return max(2, min(max_bins, int(np.ceil((data.max() - data.min()) / bw))))
+def _digits_only(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.extract(r"(\d+)", expand=False).fillna("")
 
-def safe_save_csv(df: pd.DataFrame, path: str):
-    ensure_parent(path)
-    tmp = path + ".tmp"
+def _key_11(series: pd.Series) -> pd.Series:
+    return _digits_only(series).str.replace(" ", "", regex=False).str.zfill(11).str[:11]
+
+def _find_geoid_col(df: pd.DataFrame) -> str | None:
+    cands = ["GEOID","geoid","geo_id","GEOID10","geoid10","GeoID",
+             "tract","TRACT","tract_geoid","TRACT_GEOID","geography_id","GEOID2"]
+    low = {c.lower(): c for c in df.columns}
+    for n in cands:
+        if n.lower() in low: return low[n.lower()]
+    for c in df.columns:
+        if "geoid" in c.lower(): return c
+    return None
+
+def _read_csv(p: Path) -> pd.DataFrame:
+    if not p.exists():
+        log(f"ℹ️ Dosya yok: {p}")
+        return pd.DataFrame()
+    df = pd.read_csv(p, low_memory=False)
+    log(f"📖 Okundu: {p}  ({len(df):,}×{df.shape[1]})")
+    return df
+
+def _safe_write_csv(df: pd.DataFrame, p: Path):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # downcast
+    for c in df.select_dtypes(include=["float64"]).columns:
+        df[c] = pd.to_numeric(df[c], downcast="float")
+    for c in df.select_dtypes(include=["int64","Int64"]).columns:
+        df[c] = pd.to_numeric(df[c], downcast="integer")
+    tmp = p.with_suffix(p.suffix + ".tmp")
     df.to_csv(tmp, index=False)
-    os.replace(tmp, path)
-    log(f"💾 Kaydedildi: {path} (satır={len(df):,}, sütun={df.shape[1]})")
+    tmp.replace(p)
+    log(f"💾 Yazıldı: {p}  ({len(df):,}×{df.shape[1]})")
 
-# ---------- config (no network) ----------
-BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")); BASE_DIR.mkdir(parents=True, exist_ok=True)
+def _ensure_date(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+        return out
+    for c in ("event_date","dt","day","incident_datetime","datetime","timestamp","created_datetime"):
+        if c in out.columns:
+            out["date"] = pd.to_datetime(out[c], errors="coerce").dt.date
+            return out
+    return out
 
-DAILY_IN  = Path(os.getenv("DAILY_IN",  str(BASE_DIR / "daily_crime_04.csv")))
-DAILY_OUT = Path(os.getenv("DAILY_OUT", str(BASE_DIR / "daily_crime_05.csv")))
+# ============================== Config ==============================
+BASE_DIR     = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
+ARTIFACT_ZIP = Path(os.getenv("ARTIFACT_ZIP", "artifact/sf-crime-pipeline-output.zip"))
+ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifact_unzipped"))
 
-# Hazır cache: GTFS durakları GEOID’e eşlenmiş
-TRAIN_STOPS_WITH_GEOID = Path(os.getenv("TRAIN_STOPS_WITH_GEOID", str(BASE_DIR / "sf_train_stops_with_geoid.csv")))
-TRAIN_LEGACY_RAW_Y     = Path(os.getenv("TRAIN_LEGACY_RAW_Y",     str(BASE_DIR / "train_y.csv")))  # alternatif cache
-TRAIN_SUMMARY_NAME     = Path(os.getenv("TRAIN_SUMMARY_NAME",     str(BASE_DIR / "train.csv")))    # GEOID-level özet
+GRID_IN   = Path(os.getenv("FR_GRID_DAILY_IN",  "fr_crime_grid_daily.csv"))
+GRID_OUT  = Path(os.getenv("FR_GRID_DAILY_OUT", "fr_crime_grid_daily.csv"))
+EV_IN     = Path(os.getenv("FR_EVENTS_DAILY_IN","fr_crime_events_daily.csv"))
+EV_OUT    = Path(os.getenv("FR_EVENTS_DAILY_OUT","fr_crime_events_daily.csv"))
 
-BLOCKS_CANDIDATES = [
-    Path(os.getenv("SF_BLOCKS_GEOJSON", str(BASE_DIR / "sf_census_blocks_with_population.geojson"))),
-    Path("sf_census_blocks_with_population.geojson"),
+TRAIN_PATH_ENV = os.getenv("TRAIN_PATH", "sf_train_stops_with_geoid.csv")
+TRAIN_PATHS = [
+    ARTIFACT_DIR / TRAIN_PATH_ENV,
+    BASE_DIR / TRAIN_PATH_ENV,
+    Path(TRAIN_PATH_ENV),
 ]
 
-# ---------- 1) crime oku ----------
-if not DAILY_IN.exists() or not DAILY_IN.is_file():
-    raise FileNotFoundError(f"❌ Girdi yok: {DAILY_IN}")
-crime = pd.read_csv(DAILY_IN, low_memory=False)
-if "GEOID" not in crime.columns:
-    raise KeyError("❌ daily_crime_04.csv içinde 'GEOID' yok.")
-crime["GEOID"] = normalize_geoid(crime["GEOID"], DEFAULT_GEOID_LEN)
-crime_geoids = pd.Series(crime["GEOID"].unique(), name="GEOID")
-log(f"📥 daily_crime_04.csv okundu — satır={len(crime):,}, uniq GEOID={crime_geoids.size:,}")
+# Hangi tren özelliklerini arayalım? (dosyada ne varsa alır)
+TRAIN_FEATS_CANDIDATES = [
+    "train_stop_count", "distance_to_train_m",
+    "train_within_250m","train_within_300m","train_within_500m","train_within_600m",
+    "train_within_750m","train_within_900m","train_within_1000m",
+    "train_0_300m","train_300_600m","train_600_900m",
+]
 
-# ---------- 2) GTFS durak cache (indirimsiz) ----------
-stops_path = TRAIN_STOPS_WITH_GEOID if (TRAIN_STOPS_WITH_GEOID.exists() and TRAIN_STOPS_WITH_GEOID.is_file()) else (
-    TRAIN_LEGACY_RAW_Y if (TRAIN_LEGACY_RAW_Y.exists() and TRAIN_LEGACY_RAW_Y.is_file()) else None
-)
-if stops_path is None:
-    raise FileNotFoundError("❌ GTFS durak cache'i bulunamadı (sf_train_stops_with_geoid.csv veya train_y.csv).")
+# ============================== Core ==============================
+def aggregate_train_by_geoid(train: pd.DataFrame) -> pd.DataFrame:
+    """Satır=durak ise GEOID bazında özet üret:
+       - *count/within* → sum
+       - *distance*     → min
+       - en azından train_stop_count üret.
+    """
+    t_geoid = _find_geoid_col(train)
+    if not t_geoid:
+        raise RuntimeError("Tren verisinde GEOID kolonu tespit edilemedi.")
+    train["_key"] = _key_11(train[t_geoid])
 
-stops = pd.read_csv(stops_path, low_memory=False)
-# Kolonları normalize et
-lat_col = next((c for c in ["stop_lat","latitude","lat","y"] if c in stops.columns), None)
-lon_col = next((c for c in ["stop_lon","longitude","long","lon","x"] if c in stops.columns), None)
-if lat_col is None or lon_col is None:
-    raise KeyError("❌ Train cache içinde lat/lon benzeri kolonlar yok (stop_lat/stop_lon vb.).")
+    present = [c for c in TRAIN_FEATS_CANDIDATES if c in train.columns]
+    if not present:
+        agg = (train.groupby("_key", as_index=False)
+                     .size().rename(columns={"size":"train_stop_count"}))
+        return agg.rename(columns={"_key":"GEOID"})
 
-stops["stop_lat"] = pd.to_numeric(stops[lat_col], errors="coerce")
-stops["stop_lon"] = pd.to_numeric(stops[lon_col], errors="coerce")
-stops = stops.dropna(subset=["stop_lat","stop_lon"]).copy()
-if "GEOID" in stops.columns:
-    stops["GEOID"] = normalize_geoid(stops["GEOID"], DEFAULT_GEOID_LEN)
-log(f"🚉 Train stops cache: {stops_path} — satır={len(stops):,}, GEOID kolonlu={ 'GEOID' in stops.columns }")
+    agg_dict = {}
+    for c in present:
+        if re.search(r"(count|within)", c, flags=re.I):
+            agg_dict[c] = "sum"
+        elif re.search(r"(dist|distance)", c, flags=re.I):
+            agg_dict[c] = "min"
+        else:
+            agg_dict[c] = "sum"
 
-# ---------- 3) Blocks GeoJSON ----------
-blocks_path = next((p for p in BLOCKS_CANDIDATES if p and p.exists() and p.is_file()), None)
-if blocks_path is None:
-    raise FileNotFoundError("❌ Blocks GeoJSON yok: sf_census_blocks_with_population.geojson")
-gdf_blocks = gpd.read_file(blocks_path)
-gcol = "GEOID" if "GEOID" in gdf_blocks.columns else next((c for c in gdf_blocks.columns if str(c).upper().startswith("GEOID")), None)
-if not gcol:
-    raise KeyError("❌ Blocks GeoJSON içinde GEOID benzeri kolon yok.")
-gdf_blocks["GEOID"] = normalize_geoid(gdf_blocks[gcol], DEFAULT_GEOID_LEN)
-if gdf_blocks.crs is None:
-    gdf_blocks.set_crs("EPSG:4326", inplace=True)
-elif str(gdf_blocks.crs).lower() not in ("epsg:4326","wgs84","wgs 84"):
-    gdf_blocks = gdf_blocks.to_crs(epsg=4326)
+    tr_num = train[["_key"] + present].copy()
+    for c in present:
+        tr_num[c] = pd.to_numeric(tr_num[c], errors="coerce")
 
-# ---------- 4) GEOID sayımı ----------
-if "GEOID" not in stops.columns or stops["GEOID"].isna().all():
-    gdf_stops = gpd.GeoDataFrame(stops, geometry=gpd.points_from_xy(stops["stop_lon"], stops["stop_lat"]), crs="EPSG:4326")
-    try:
-        # Poligon içinde mi?
-        gdf_stops = gpd.sjoin(gdf_stops, gdf_blocks[["geometry","GEOID"]], how="left", predicate="within")
-    except Exception:
-        # WGS84'te max_distance derece olur → metrik CRS'e geç
-        gdf_stops_m = gdf_stops.to_crs(3857)
-        gdf_blocks_m = gdf_blocks.to_crs(3857)[["geometry","GEOID"]]
-        gdf_stops = gpd.sjoin_nearest(gdf_stops_m, gdf_blocks_m, how="left", max_distance=1000).to_crs(4326)
-    gdf_stops = gdf_stops.drop(columns=["index_right"], errors="ignore")
-    stops_geo = pd.DataFrame(gdf_stops.drop(columns=["geometry"], errors="ignore"))
-else:
-    stops_geo = stops.copy()
+    agg = tr_num.groupby("_key", as_index=False).agg(agg_dict)
 
-stops_geo["GEOID"] = normalize_geoid(stops_geo["GEOID"], DEFAULT_GEOID_LEN)
-train_count = (
-    stops_geo.dropna(subset=["GEOID"])
-             .groupby("GEOID", as_index=False)
-             .agg(train_stop_count=("stop_lat","size"))
-)
+    # güvenlik: stop sayısı yoksa ekle
+    if "train_stop_count" not in agg.columns:
+        add_cnt = (train.groupby("_key", as_index=False)
+                         .size().rename(columns={"size":"train_stop_count"}))
+        agg = agg.merge(add_cnt, on="_key", how="outer")
 
-# ---------- 5) distance_to_train (m) ----------
-gdf_blocks_3857 = gdf_blocks[["GEOID","geometry"]].copy().to_crs(epsg=3857)
-gdf_blocks_3857["cx"] = gdf_blocks_3857.geometry.centroid.x
-gdf_blocks_3857["cy"] = gdf_blocks_3857.geometry.centroid.y
+    agg = agg.rename(columns={"_key":"GEOID"})
+    agg["GEOID"] = agg["GEOID"].astype("string")
 
-_stops_pts = stops_geo.dropna(subset=["stop_lat","stop_lon"]).copy()
-gdf_train_xy = gpd.GeoDataFrame(
-    _stops_pts[["stop_lat","stop_lon"]],
-    geometry=gpd.points_from_xy(_stops_pts["stop_lon"], _stops_pts["stop_lat"]),
-    crs="EPSG:4326"
-).to_crs(epsg=3857)
+    # tip düzeltmeleri
+    if "distance_to_train_m" in agg.columns:
+        agg["distance_to_train_m"] = pd.to_numeric(agg["distance_to_train_m"], errors="coerce")
+    for c in [col for col in agg.columns if col.startswith("train_within_")] + ["train_stop_count",
+                                                                                "train_0_300m","train_300_600m","train_600_900m"]:
+        if c in agg.columns:
+            agg[c] = pd.to_numeric(agg[c], errors="coerce").fillna(0).astype("Int64")
+    return agg
 
-if len(gdf_train_xy) == 0:
-    dist_tbl = gdf_blocks_3857[["GEOID"]].copy()
-    dist_tbl["distance_to_train"] = np.nan
-else:
-    train_xy = np.vstack([gdf_train_xy.geometry.x.values, gdf_train_xy.geometry.y.values]).T
-    centroids = np.vstack([gdf_blocks_3857["cx"].values, gdf_blocks_3857["cy"].values]).T
-    if cKDTree is not None:
-        tree = cKDTree(train_xy)
-        d, _ = tree.query(centroids, k=1)
+def enrich_one(df: pd.DataFrame, train_agg: pd.DataFrame, is_grid: bool) -> pd.DataFrame:
+    """GEOID merge; GRID ise date kolonunu normalize eder."""
+    if df.empty: return df
+    c_geoid = _find_geoid_col(df)
+    if not c_geoid:
+        raise RuntimeError("Hedef tabloda GEOID kolonu bulunamadı.")
+    out = df.copy()
+
+    if is_grid:
+        out = _ensure_date(out)
+
+    # hedef GEOID → resmi tek GEOID (string, 11 hane)
+    out.insert(0, "GEOID", _key_11(out[c_geoid]).astype("string"))
+    drop_candidates = [c for c in out.columns if c != "GEOID" and "geoid" in c.lower()]
+    out.drop(columns=drop_candidates, inplace=True, errors="ignore")
+
+    out = out.merge(train_agg, on="GEOID", how="left", validate="many_to_one")
+
+    # doldurma
+    if "distance_to_train_m" in out.columns:
+        out["distance_to_train_m"] = pd.to_numeric(out["distance_to_train_m"], errors="coerce")
+    for c in ["train_stop_count","train_0_300m","train_300_600m","train_600_900m"] + \
+             [col for col in out.columns if col.startswith("train_within_")]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype("Int64")
+
+    return out
+
+# ============================== Run ==============================
+def main() -> int:
+    # 0) artifact varsa aç
+    safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
+
+    # 1) girişleri oku
+    grid = _read_csv(BASE_DIR / GRID_IN) if not GRID_IN.is_absolute() else _read_csv(GRID_IN)
+    ev   = _read_csv(BASE_DIR / EV_IN)   if not EV_IN.is_absolute()  else _read_csv(EV_IN)
+
+    train_path = next((p for p in TRAIN_PATHS if Path(p).exists()), None)
+    if not train_path:
+        raise FileNotFoundError(f"❌ Tren dosyası yok: {TRAIN_PATH_ENV} (artifact/BASE/local)")
+    train = _read_csv(Path(train_path))
+
+    # 2) GEOID bazında tren özetlerini hazırla
+    train_agg = aggregate_train_by_geoid(train)
+
+    # 3) enrich & yaz
+    if not grid.empty:
+        grid2 = enrich_one(grid, train_agg, is_grid=True)
+        _safe_write_csv(grid2, BASE_DIR / GRID_OUT if not GRID_OUT.is_absolute() else GRID_OUT)
     else:
-        # NumPy fallback — O(N×M)
-        diff = centroids[:, None, :] - train_xy[None, :, :]
-        d = np.sqrt((diff ** 2).sum(axis=2)).min(axis=1)
-    dist_tbl = gdf_blocks_3857[["GEOID"]].copy()
-    dist_tbl["distance_to_train"] = d.astype(float)
+        log("ℹ️ GRID dosyası bulunamadı/boş, atlandı.")
 
-# ---------- 6) GEOID-level feature + binler ----------
-geo_metrics = dist_tbl.merge(train_count, on="GEOID", how="left")
-geo_metrics["train_stop_count"] = pd.to_numeric(geo_metrics["train_stop_count"], errors="coerce").fillna(0).astype(int)
-geo_metrics["GEOID"] = normalize_geoid(geo_metrics["GEOID"], DEFAULT_GEOID_LEN)
+    if not ev.empty:
+        ev2 = enrich_one(ev, train_agg, is_grid=False)
+        _safe_write_csv(ev2, BASE_DIR / EV_OUT if not EV_OUT.is_absolute() else EV_OUT)
+    else:
+        log("ℹ️ EVENTS dosyası bulunamadı/boş, atlandı.")
 
-# sadece crime GEOID evreni
-geo_metrics = geo_metrics.merge(crime_geoids.to_frame(), on="GEOID", how="right")
+    # 4) kısa önizleme
+    try:
+        cols = ["GEOID","train_stop_count","distance_to_train_m",
+                "train_within_300m","train_within_600m","train_within_900m",
+                "train_0_300m","train_300_600m","train_600_900m"]
+        if not grid.empty:
+            log("— GRID preview —")
+            log(grid2[[c for c in cols if c in grid2.columns]].head(10).to_string(index=False))
+        if not ev.empty:
+            log("— EVENTS preview —")
+            log(ev2[[c for c in cols if c in ev2.columns]].head(10).to_string(index=False))
+    except Exception:
+        pass
 
-dist = pd.to_numeric(geo_metrics["distance_to_train"], errors="coerce").replace([np.inf, -np.inf], np.nan)
-finite_dist = dist.dropna()
-if len(finite_dist) >= 2 and finite_dist.max() > finite_dist.min():
-    n_bins = freedman_diaconis_bin_count(finite_dist.to_numpy(), max_bins=10)
-    _, edges = pd.qcut(finite_dist, q=n_bins, retbins=True, duplicates="drop")
-    labels = [f"{int(round(edges[i]))}–{int(round(edges[i+1]))}m" for i in range(len(edges) - 1)]
-    geo_metrics["distance_to_train_range"] = pd.cut(dist, bins=edges, labels=labels, include_lowest=True)
-else:
-    geo_metrics["distance_to_train_range"] = "0–0m"
+    log("✅ enrich_with_train_daily.py tamam.")
+    return 0
 
-cnt = pd.to_numeric(geo_metrics["train_stop_count"], errors="coerce").fillna(0)
-if cnt.nunique() > 1:
-    n_c_bins = freedman_diaconis_bin_count(cnt.to_numpy(), max_bins=8)
-    _, c_edges = pd.qcut(cnt, q=n_c_bins, retbins=True, duplicates="drop")
-    c_labels = [f"{int(round(c_edges[i]))}–{int(round(c_edges[i+1]))}" for i in range(len(c_edges) - 1)]
-    geo_metrics["train_stop_count_range"] = pd.cut(cnt, bins=c_edges, labels=c_labels, include_lowest=True)
-else:
-    geo_metrics["train_stop_count_range"] = f"{int(cnt.min())}–{int(cnt.max())}"
-
-# GEOID tekilleştir
-geo_metrics = geo_metrics.sort_values("GEOID").drop_duplicates("GEOID", keep="first")
-assert geo_metrics["GEOID"].is_unique, "TRAIN: GEOID unique olmalı"
-
-# ---------- 7) GEOID-level özeti yaz (train.csv) ----------
-safe_save_csv(geo_metrics, str(TRAIN_SUMMARY_NAME))
-print(f"✅ TRAIN özet (GEOID-level) yazıldı → {TRAIN_SUMMARY_NAME}")
-
-# ---------- 8) crime ile merge ----------
-_before = crime.shape
-crime_enriched = crime.merge(geo_metrics, on="GEOID", how="left", validate="many_to_one")
-log(f"🔗 CRIME ⨯ TRAIN: {_before} → {crime_enriched.shape} (KDTree={_TREE_IMPL})")
-
-# ---------- 9) yaz ----------
-safe_save_csv(crime_enriched, str(DAILY_OUT))
-try:
-    print("daily_crime_05.csv — ilk 5 satır")
-    print(crime_enriched.head(5).to_string(index=False))
-except Exception:
-    pass
+if __name__ == "__main__":
+    raise SystemExit(main())
