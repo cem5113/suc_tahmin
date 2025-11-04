@@ -14,9 +14,9 @@ concurrency:
   group: daily-crime-${{ github.ref }}
   cancel-in-progress: true
 
-# 🔧 ORTAK ENV (iki job da buradan okur)
+# 🔧 ORTAK ENV
 env:
-  CRIME_DATA_DIR: crime_prediction_data
+  CRIME_DATA_DIR: ${{ github.workspace }}/crime_prediction_data
   WX_LOCATION: "paris"
   WX_UNIT: "metric"
   GEOID_LEN: "11"
@@ -83,14 +83,13 @@ jobs:
             echo "No artifact ZIP file found (this is fine)."
           fi
 
-      # -------------------- FIXED: path triple issue --------------------
+      # (0) GRID & EVENTS üretimi + Y_label — mutlak path kullan
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
-        working-directory: ${{ env.CRIME_DATA_DIR }}
         env:
-          # Sadece dosya adları (CWD = CRIME_DATA_DIR)
-          FR_EVENTS_PATH:  sf_crime.csv
-          FR_OUT_EVENTS:   fr_crime_events_daily.csv
-          FR_OUT_GRID:     fr_crime_grid_daily.csv
+          # Elinizde hangi dosya varsa onu kullanın (çoğu kurulumda fr_crime.csv).
+          FR_EVENTS_PATH:  ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
+          FR_OUT_EVENTS:   ${{ env.CRIME_DATA_DIR }}/fr_crime_events_daily.csv
+          FR_OUT_GRID:     ${{ env.CRIME_DATA_DIR }}/fr_crime_grid_daily.csv
           FR_MIN_YEARS:    "5"
           FR_DATE_COL:     "incident_datetime"
           FR_GEOID_COL:    "GEOID"
@@ -98,15 +97,15 @@ jobs:
         run: |
           set -e
           echo "📂 CWD: $(pwd)"
-          echo "🔧 ENV → FR_EVENTS_PATH: ${FR_EVENTS_PATH}"
-          echo "🔧 ENV → FR_OUT_EVENTS : ${FR_OUT_EVENTS}"
-          echo "🔧 ENV → FR_OUT_GRID   : ${FR_OUT_GRID}"
-          python -u ../update_crime_daily.py
+          echo "🔧 FR_EVENTS_PATH: ${FR_EVENTS_PATH}"
+          echo "🔧 FR_OUT_EVENTS : ${FR_OUT_EVENTS}"
+          echo "🔧 FR_OUT_GRID   : ${FR_OUT_GRID}"
+          ls -la "${CRIME_DATA_DIR}" || true
+          python -u update_crime_daily.py
           echo "---- GRID head ----"
-          head -n 5 "fr_crime_grid_daily.csv" || true
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_grid_daily.csv" || true
           echo "---- EVENTS head ----"
-          head -n 5 "fr_crime_events_daily.csv" || true
-      # -----------------------------------------------------------------
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_events_daily.csv" || true
 
       - name: (1) 911 -> enrich GRID & EVENTS
         env:
