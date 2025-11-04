@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-enrich_with_poi_daily.py  (REVIZE - tür-bilinçli fill + doğru centroid CRS)
+enrich_with_poi_daily.py  (REVIZE-2: range kolonlarını numeric cast dışı bırak, deprecation fix)
 
 Ne yapar?
 - POI (OSM) → GEOID eşle (blocks geojson ile), türleri çıkar, dinamik risk sözlüğü üret (opsiyonel),
@@ -30,7 +30,7 @@ ENV (varsayılanlar):
 """
 
 from __future__ import annotations
-import os, json, ast, zipfile
+import os, json, ast, zipfile, re
 from pathlib import Path
 from collections import defaultdict, Counter
 
@@ -38,7 +38,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from sklearn.neighbors import BallTree
-from pandas.api.types import is_numeric_dtype, is_categorical_dtype
+from pandas.api.types import CategoricalDtype, is_numeric_dtype
 
 pd.options.mode.copy_on_write = True
 
@@ -61,11 +61,15 @@ def _read_csv(p: Path) -> pd.DataFrame:
 
 def _safe_write_csv(df: pd.DataFrame, p: Path):
     p.parent.mkdir(parents=True, exist_ok=True)
-    # hafif downcast
-    for c in df.select_dtypes(include=["float64"]).columns:
-        df[c] = pd.to_numeric(df[c], downcast="float")
-    for c in df.select_dtypes(include=["int64","Int64"]).columns:
-        df[c] = pd.to_numeric(df[c], downcast="integer")
+    # sadece güvenli sayısal alanları downcast et
+    for c in df.columns:
+        if re.match(r"^poi_count_\d+m$", c) or re.match(r"^poi_risk_\d+m$", c) or c in ("poi_risk_score", "poi_total_count"):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+            # int/float ayrımı
+            if c.startswith("poi_count_") or c == "poi_total_count":
+                df[c] = pd.to_numeric(df[c], downcast="integer").fillna(0)
+            else:
+                df[c] = pd.to_numeric(df[c], downcast="float").fillna(0.0)
     tmp = p.with_suffix(p.suffix + ".tmp")
     df.to_csv(tmp, index=False)
     tmp.replace(p)
@@ -106,10 +110,10 @@ GRID_OUT  = Path(os.getenv("FR_GRID_DAILY_OUT", "fr_crime_grid_daily.csv"))
 EV_IN     = Path(os.getenv("FR_EVENTS_DAILY_IN","fr_crime_events_daily.csv"))
 EV_OUT    = Path(os.getenv("FR_EVENTS_DAILY_OUT","fr_crime_events_daily.csv"))
 
-POI_GEOJSON  = os.getenv("POI_GEOJSON",  "sf_pois.geojson")
-BLOCKS_GEOJSON = os.getenv("BLOCKS_GEOJSON","sf_census_blocks_with_population.geojson")
-POI_CLEAN_CSV  = os.getenv("POI_CLEAN_CSV","sf_pois_cleaned_with_geoid.csv")
-POI_RISK_JSON  = os.getenv("POI_RISK_JSON","risky_pois_dynamic.json")
+POI_GEOJSON   = os.getenv("POI_GEOJSON",  "sf_pois.geojson")
+BLOCKS_GEOJSON= os.getenv("BLOCKS_GEOJSON","sf_census_blocks_with_population.geojson")
+POI_CLEAN_CSV = os.getenv("POI_CLEAN_CSV","sf_pois_cleaned_with_geoid.csv")
+POI_RISK_JSON = os.getenv("POI_RISK_JSON","risky_pois_dynamic.json")
 
 POI_PATHS       = [ARTIFACT_DIR / POI_GEOJSON, BASE_DIR / POI_GEOJSON, Path(POI_GEOJSON)]
 BLOCKS_PATHS    = [ARTIFACT_DIR / BLOCKS_GEOJSON, BASE_DIR / BLOCKS_GEOJSON, Path(BLOCKS_GEOJSON)]
@@ -244,8 +248,7 @@ def _fillna_typed(df: pd.DataFrame, fills: dict[str, float | int | str]) -> pd.D
             s = out[c]
             if is_numeric_dtype(s):
                 out[c] = pd.to_numeric(s, errors="coerce").fillna(val)
-            elif is_categorical_dtype(s):
-                # kategorik: val string değilse stringe çevir
+            elif isinstance(s.dtype, CategoricalDtype):
                 sval = str(val)
                 if sval not in s.cat.categories:
                     s = s.cat.add_categories([sval])
@@ -293,7 +296,7 @@ def geoid_poi_features(blocks: gpd.GeoDataFrame, poi_df: pd.DataFrame, poi_risk:
         "poi_dominant_type": grp["poi_subcategory"].agg(_mode).values
     })
 
-    # range etiketleri
+    # range etiketleri (metinsel)
     base["poi_total_count_range"] = pd.cut(
         base["poi_total_count"], bins=5,
         labels=[f"Q{i}" for i in range(1,6)], duplicates="drop"
@@ -307,7 +310,6 @@ def geoid_poi_features(blocks: gpd.GeoDataFrame, poi_df: pd.DataFrame, poi_risk:
     poi_rad  = np.radians(dfp[["lat","lon"]].values)
     cent_rad = np.radians(cent[["cent_lat","cent_lon"]].values)
     if len(poi_rad) == 0:
-        # hiç POI yoksa sıfırla
         buf = cent[["GEOID"]].copy()
         for r_m in radii:
             buf[f"poi_count_{r_m}m"] = 0
@@ -323,7 +325,7 @@ def geoid_poi_features(blocks: gpd.GeoDataFrame, poi_df: pd.DataFrame, poi_risk:
 
     out = cent[["GEOID"]].merge(base, on="GEOID", how="left").merge(buf, on="GEOID", how="left")
 
-    # tür-bilinçli doldurma (Categorical hatası yaşamamak için)
+    # tür-bilinçli doldurma (Categorical/Range güvenli)
     fills = {"poi_total_count":0, "poi_risk_score":0.0, "poi_dominant_type":"No_POI",
              "poi_total_count_range":"Q1", "poi_risk_score_range":"Q1"}
     for r_m in radii:
@@ -331,20 +333,26 @@ def geoid_poi_features(blocks: gpd.GeoDataFrame, poi_df: pd.DataFrame, poi_risk:
         fills[f"poi_risk_{r_m}m"]  = 0.0
     out = _fillna_typed(out, fills)
 
-    # tipler
-    for c in [x for x in out.columns if x.startswith("poi_count_")]:
-        out[c] = pd.to_numeric(out[c], downcast="integer")
-    for c in [x for x in out.columns if x.startswith("poi_risk_") or x in ("poi_risk_score",)]:
-        out[c] = pd.to_numeric(out[c], downcast="float")
+    # sadece sayısal alanları downcast et (range/type metinleri hariç!)
+    for c in out.columns:
+        if re.match(r"^poi_count_\d+m$", c):
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype("Int64").astype("int32")
+        elif re.match(r"^poi_risk_\d+m$", c):
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0).astype("float32")
+        elif c == "poi_total_count":
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype("Int64").astype("int32")
+        elif c == "poi_risk_score":
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0).astype("float32")
+
     return out
 
 # ============================== Enrich (GRID / EVENTS) ==============================
 def enrich_df_with_poi(df: pd.DataFrame, geoid_poi: pd.DataFrame, is_grid: bool) -> pd.DataFrame:
     if df.empty: return df
     out = df.copy()
-    # date normalizasyonu (görünürlük; içerik sabit)
     if is_grid:
         out = _ensure_date(out)
+
     # GEOID tek ve 11 hane
     if "GEOID" not in out.columns:
         cand = [c for c in out.columns if "geoid" in c.lower()]
