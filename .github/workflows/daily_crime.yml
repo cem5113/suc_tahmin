@@ -4,7 +4,7 @@ on:
   workflow_run:
     workflows: ["Full SF Crime Pipeline"]
     types: [completed]
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,55 +16,41 @@ concurrency:
 
 jobs:
   run_fr:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     env:
       CRIME_DATA_DIR: crime_prediction_data
       WX_LOCATION: "paris"
       WX_UNIT: "metric"
       GEOID_LEN: "11"
-
-      # artifact indirilecek yerler
       ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
       ARTIFACT_DIR: artifact
       FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
       FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
-
-      # GÜNLÜK I/O dosya adları (ADIMLAR BUNLARA BAKIYOR)
       FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
       FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
       FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
       FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
-
-      # komşuluk dosyası
       NEIGH_FILE: neighbors.csv
 
     steps:
       - name: Debug trigger
         run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "from workflow=${{ github.event.workflow_run.name }}"
+          echo "event=${{ github.event_name }}"
+          echo "from=${{ github.event.workflow_run.name }}"
           echo "conclusion=${{ github.event.workflow_run.conclusion }}"
-
+          echo "head_branch=${{ github.event.workflow_run.head_branch }}"
       - uses: actions/checkout@v4
-
-      - name: Ensure data dir (FR)
-        run: mkdir -p "${CRIME_DATA_DIR}"
-
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install deps (quick)
+        with: { python-version: "3.11", cache: "pip" }
+      - name: Install deps
         run: |
-          python -m pip install -U pip wheel setuptools
-          [ -f requirements.txt ] && pip install -r requirements.txt || true
-          python -m pip install -U pyarrow pandas
-          # günlük zenginleştirme adımları için
-          python -m pip install numpy scikit-learn pyproj shapely geopandas fiona rtree
+          python -m pip install -U pip wheel setuptools pyarrow pandas
+          pip install numpy scikit-learn pyproj shapely geopandas fiona rtree
 
+      # (artefact çekme + unzip) — aynı
       - name: Download upstream artifact (triggering run)
+        if: ${{ github.event_name == 'workflow_run' }}
         uses: dawidd6/action-download-artifact@v6
         with:
           run_id: ${{ github.event.workflow_run.id }}
@@ -241,51 +227,73 @@ PY
             ${{ env.CRIME_DATA_DIR }}/${{ env.FR_EVENTS_DAILY_OUT }}
           if-no-files-found: warn
 
-  # İKİNCİ JOB — doğru needs: run_fr
-  patrol-fr:
-    needs: [run_fr]
-    runs-on: ubuntu-latest
-    env:
-      CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-      GRID_FILE:      ${{ env.FR_GRID_DAILY_OUT }}
-      EVENTS_FILE:    ${{ env.FR_EVENTS_DAILY_OUT }}
-      PATROL_TOP_K:   "25"
-      PATROL_MIN_SPACING_M: "300"
-      PATROL_OUT_CSV: "fr_patrol_plan.csv"
-      PATROL_OUT_GEOJSON: "fr_patrol_plan.geojson"
+# İKİNCİ JOB — doğru needs + güvenli env/guard
+patrol-fr:
+  needs: [run_fr]
+  if: ${{ needs.run_fr.result == 'success' }}
+  runs-on: ubuntu-latest
+  env:
+    CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+    FR_GRID_DAILY_OUT: ${{ env.FR_GRID_DAILY_OUT || 'fr_crime_grid_daily.csv' }}
+    PATROL_TOP_K: "25"
+    PATROL_MIN_SPACING_M: "300"
+    PATROL_OUT_CSV: "fr_patrol_plan.csv"
 
-    steps:
-      - uses: actions/checkout@v4
+  steps:
+    - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: "pip"
 
-      - name: Install deps (runtime only)
-        run: |
-          python -m pip install -U pip
-          pip install pandas numpy shapely geopandas
+    - name: Install deps (runtime only)
+      run: |
+        python -m pip install -U pip
+        pip install pandas numpy
 
-      - name: Run patrol planner
-        run: |
-          set -e
-          python - <<'PY'
-import os, pandas as pd
+    - name: Run patrol planner
+      env:
+        GRID_FILE: ${{ env.FR_GRID_DAILY_OUT }}
+      run: |
+        set -e
+        python - <<'PY'
+import os, sys, pandas as pd
 from pathlib import Path
 
-base = Path(os.environ["CRIME_DATA_DIR"])
-grid = pd.read_csv(base / os.environ["GRID_FILE"])
+base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
+grid_path = base / os.environ.get("GRID_FILE","fr_crime_grid_daily.csv")
 k    = int(os.environ.get("PATROL_TOP_K","25"))
 out_csv = base / os.environ.get("PATROL_OUT_CSV","fr_patrol_plan.csv")
 
-grid["date"] = pd.to_datetime(grid["date"], errors="coerce")
-last_day = grid["date"].max()
-today = grid[grid["date"]==last_day].copy()
+if not grid_path.exists():
+    print(f"❌ GRID bulunamadı: {grid_path}", file=sys.stderr)
+    sys.exit(2)
 
-def safe_num(col):
-    return pd.to_numeric(today.get(col, 0), errors="coerce").fillna(0)
+df = pd.read_csv(grid_path)
+if df.empty:
+    print("⚠️ GRID boş, devriye planı üretilemedi.")
+    pd.DataFrame(columns=["GEOID","date","risk_score","Y_label","events_count"]).to_csv(out_csv, index=False)
+    sys.exit(0)
 
+# Zorunlu kolonlar
+need = ["GEOID","date"]
+for c in need:
+    if c not in df.columns:
+        print(f"❌ Zorunlu kolon yok: {c}", file=sys.stderr); sys.exit(3)
+
+df["date"] = pd.to_datetime(df["date"], errors="coerce")
+last_day = df["date"].dropna().max()
+if pd.isna(last_day):
+    print("❌ Tarih alanı hatalı.", file=sys.stderr); sys.exit(4)
+
+today = df[df["date"]==last_day].copy()
+
+def safe_num(name, default=0.0):
+    s = pd.to_numeric(today[name], errors="coerce").fillna(0) if name in today.columns else default
+    return s if hasattr(s, "values") else pd.Series(default, index=today.index)
+
+# Eksik metrikler 0 kabul
 today["risk_score"] = (
     safe_num("events_count")*1.0 +
     safe_num("neighbor_crime_24h")*0.20 +
@@ -294,22 +302,25 @@ today["risk_score"] = (
     safe_num("n911_prev_1d")*0.10
 )
 
-topk = (today
-        .sort_values("risk_score", ascending=False)
-        .groupby("GEOID", as_index=False)
-        .agg({"risk_score":"max","Y_label":"max","events_count":"max"})
-        .sort_values("risk_score", ascending=False)
-        .head(k))
+agg_cols = {c:"max" for c in ["risk_score","events_count"] if c in today.columns}
+if "Y_label" in today.columns:
+    agg_cols["Y_label"] = "max"
+
+topk = (today.sort_values("risk_score", ascending=False)
+             .groupby("GEOID", as_index=False)
+             .agg(agg_cols)
+             .sort_values("risk_score", ascending=False)
+             .head(k))
 
 topk.insert(1, "date", last_day.date())
+out_csv.parent.mkdir(parents=True, exist_ok=True)
 topk.to_csv(out_csv, index=False)
-print(f"Wrote patrol CSV -> {out_csv} (rows={len(topk)})")
+print(f"✅ Wrote patrol CSV -> {out_csv} (rows={len(topk)})")
 PY
 
-      - name: Upload patrol artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: fr-patrol-plan
-          path: |
-            ${{ env.CRIME_DATA_DIR }}/${{ env.PATROL_OUT_CSV }}
-          if-no-files-found: warn
+    - name: Upload patrol artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: fr-patrol-plan
+        path: ${{ env.CRIME_DATA_DIR }}/${{ env.PATROL_OUT_CSV }}
+        if-no-files-found: warn
