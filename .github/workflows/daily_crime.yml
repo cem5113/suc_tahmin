@@ -14,32 +14,43 @@ concurrency:
   group: daily-crime-${{ github.ref }}
   cancel-in-progress: true
 
+# 🔧 ORTAK ENV (iki job da buradan okur)
+env:
+  CRIME_DATA_DIR: crime_prediction_data
+  WX_LOCATION: "paris"
+  WX_UNIT: "metric"
+  GEOID_LEN: "11"
+  ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
+  ARTIFACT_DIR: artifact
+  FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
+  FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
+  FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
+  FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
+  FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
+  FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
+  NEIGH_FILE: neighbors.csv
+
 jobs:
   run_fr:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    env:
-      CRIME_DATA_DIR: crime_prediction_data
-      WX_LOCATION: "paris"
-      WX_UNIT: "metric"
-      GEOID_LEN: "11"
-      ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
-      ARTIFACT_DIR: artifact
-      FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
-      FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
-      FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
-      FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
-      FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
-      FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
-      NEIGH_FILE: neighbors.csv
 
     steps:
-      - name: Debug trigger
+      - name: Debug trigger (workflow_run)
+        if: ${{ github.event_name == 'workflow_run' }}
         run: |
           echo "event=${{ github.event_name }}"
           echo "from=${{ github.event.workflow_run.name }}"
           echo "conclusion=${{ github.event.workflow_run.conclusion }}"
           echo "head_branch=${{ github.event.workflow_run.head_branch }}"
+
+      - name: Debug trigger (dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          echo "event=${{ github.event_name }}"
+          echo "from="
+          echo "conclusion="
+          echo "head_branch="
 
       - uses: actions/checkout@v4
 
@@ -74,7 +85,6 @@ jobs:
 
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
         env:
-          CRIME_DATA_DIR:  ${{ env.CRIME_DATA_DIR }}
           FR_EVENTS_PATH:  ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
           FR_OUT_EVENTS:   ${{ env.CRIME_DATA_DIR }}/fr_crime_events_daily.csv
           FR_OUT_GRID:     ${{ env.CRIME_DATA_DIR }}/fr_crime_grid_daily.csv
@@ -106,7 +116,6 @@ jobs:
 
       - name: (2) 311 -> enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
@@ -124,7 +133,6 @@ jobs:
 
       - name: (3) Bus stops -> enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           BUS_CANON_RAW: "sf_bus_stops_with_geoid.csv"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
@@ -136,7 +144,6 @@ jobs:
 
       - name: (4) Train stops -> enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           TRAIN_STOPS_NAME: "sf_train_stops_with_geoid.csv"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
@@ -148,7 +155,6 @@ jobs:
 
       - name: (5) POI -> enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           POI_GEOJSON_1: "${{ env.CRIME_DATA_DIR }}/sf_pois.geojson"
           POI_GEOJSON_2: "sf_pois.geojson"
           POI_CLEAN_CSV: "${{ env.CRIME_DATA_DIR }}/sf_pois_cleaned_with_geoid.csv"
@@ -163,7 +169,6 @@ jobs:
 
       - name: (6) Police & Government -> enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           POLICE_FILE: "sf_police_stations.csv"
           GOV_FILE: "sf_government_buildings.csv"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
@@ -176,7 +181,6 @@ jobs:
 
       - name: (7) Weather (date-merge) -> enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           WEATHER_FILE: "sf_weather_5years.csv"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
@@ -188,7 +192,6 @@ jobs:
 
       - name: (8) Neighbor windows (1/3/7d) -> enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           NEIGH_FILE: "${{ env.NEIGH_FILE }}"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
@@ -225,7 +228,6 @@ jobs:
     if: ${{ needs.run_fr.result == 'success' }}
     runs-on: ubuntu-latest
     env:
-      CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
       GRID_FILE:      fr_crime_grid_daily.csv
       PATROL_TOP_K:   "25"
       PATROL_MIN_SPACING_M: "300"
