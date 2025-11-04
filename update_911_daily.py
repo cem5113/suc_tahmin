@@ -1,4 +1,5 @@
-# update_911_daily.py — revize (dosya bulma + NN fallback + geniş tarih algılama)
+# update_911_daily.py
+
 from __future__ import annotations
 import os, re
 from pathlib import Path
@@ -6,58 +7,39 @@ import pandas as pd
 import numpy as np
 
 # ------------ ENV & yollar ------------
-CRIME_DATA_DIR = Path(os.getenv("CRIME_DATA_DIR", ".")).resolve()
-
 P_911      = Path(os.getenv("FR_911_PATH", "fr_911.csv"))
 COL_DT_911 = os.getenv("FR_911_DATE_COL", "incident_datetime")
 COL_G_911  = os.getenv("FR_911_GEOID_COL", "GEOID")
 COL_CAT    = os.getenv("FR_911_CAT_COL", "category")
 
-GRID_IN    = Path(os.getenv("FR_GRID_DAILY_IN",  "crime_prediction_data/fr_crime_grid_daily.csv"))
-GRID_OUT   = Path(os.getenv("FR_GRID_DAILY_OUT", "crime_prediction_data/fr_crime_grid_daily.csv"))
-EV_IN      = Path(os.getenv("FR_EVENTS_DAILY_IN","crime_prediction_data/fr_crime_events_daily.csv"))
-EV_OUT     = Path(os.getenv("FR_EVENTS_DAILY_OUT","crime_prediction_data/fr_crime_events_daily.csv"))
-
-# GEOID fallback için lookup (opsiyonel): CSV kolonları: GEOID,lat,lon
-GEOID_LOOKUP = Path(os.getenv("FR_GEOID_LOOKUP", "sf_blocks_centroids.csv"))
+GRID_IN    = Path(os.getenv("FR_GRID_DAILY_IN",  "fr_crime_grid_daily.csv"))
+GRID_OUT   = Path(os.getenv("FR_GRID_DAILY_OUT", "fr_crime_grid_daily.csv"))
+EV_IN      = Path(os.getenv("FR_EVENTS_DAILY_IN","fr_crime_events_daily.csv"))
+EV_OUT     = Path(os.getenv("FR_EVENTS_DAILY_OUT","fr_crime_events_daily.csv"))
 
 CAT_TOPK   = int(os.getenv("FR_CAT_TOPK", "8"))
 WINS_Q     = float(os.getenv("FR_911_WINSOR_Q", "0.999"))
 
 def log(x): print(x, flush=True)
 
-# ---------- Yol bulucu (CRIME_DATA_DIR altında da dene) ----------
-def _resolve_path(p: Path) -> Path:
-    if p.is_absolute():
-        return p
-    direct = (Path.cwd() / p).resolve()
-    if direct.exists():
-        return direct
-    under = (CRIME_DATA_DIR / p).resolve()
-    return under
-
 def _read_csv(p: Path) -> pd.DataFrame:
-    p2 = _resolve_path(p)
-    if not p2.exists():
-        log(f"❌ Bulunamadı: {p2} (P_911='{p}')")
+    if not p.exists():
+        log(f"❌ Bulunamadı: {p}")
         return pd.DataFrame()
-    log(f"📖 Okunuyor: {p2}")
-    df = pd.read_csv(p2, low_memory=False)
-    log(f"✅ Okundu: {p2} ({len(df):,}×{df.shape[1]})")
+    df = pd.read_csv(p, low_memory=False)
+    log(f"📖 Okundu: {p} ({len(df):,}×{df.shape[1]})")
     return df
 
 def _save_csv(df: pd.DataFrame, p: Path):
-    p2 = _resolve_path(p)
-    p2.parent.mkdir(parents=True, exist_ok=True)
     # downcast + kaydet
     for c in df.select_dtypes(include=["float64"]).columns:
         df[c] = pd.to_numeric(df[c], downcast="float")
     for c in df.select_dtypes(include=["int64","Int64"]).columns:
         df[c] = pd.to_numeric(df[c], downcast="integer")
-    tmp = p2.with_suffix(p2.suffix + ".tmp")
+    tmp = p.with_suffix(p.suffix + ".tmp")
     df.to_csv(tmp, index=False)
-    tmp.replace(p2)
-    log(f"💾 Yazıldı: {p2} ({len(df):,}×{df.shape[1]})")
+    tmp.replace(p)
+    log(f"💾 Yazıldı: {p} ({len(df):,}×{df.shape[1]})")
 
 def _norm_geoid(s: pd.Series) -> pd.Series:
     return (
@@ -67,65 +49,21 @@ def _norm_geoid(s: pd.Series) -> pd.Series:
          .apply(lambda x: x.zfill(11) if x else "")
     )
 
-# ---- GENİŞLETİLMİŞ tarih kolonu autodetect ----
-_DT_CANDIDATES = [
-    # en sık kullandıkların
-    "incident_datetime", "received_time", "received_datetime",
-    "call_received_datetime", "call_time", "call_datetime", "call_timestamp",
-    # genel varyantlar
-    "datetime","occurred_at","timestamp","date_time","created_at","updated_at",
-    "created_datetime","opened_datetime","reported_datetime","time",
-    # salt tarih
-    "date"
-]
-
 def autodetect_dt_col(df: pd.DataFrame, pref: str) -> str | None:
-    if pref in df.columns: 
-        log(f"🧭 Tarih kolonu (ENV): {pref}")
-        return pref
-    for c in _DT_CANDIDATES:
-        if c in df.columns:
-            log(f"🧭 Tarih kolonu (auto): {c}")
-            return c
+    if pref in df.columns: return pref
+    for c in ["datetime","occurred_at","timestamp","date_time","created_at","time"]:
+        if c in df.columns: return c
     if "date" in df.columns and "time" in df.columns:
-        log("🧭 Tarih kolonu (date+time) kullanılıyor.")
         return "date+time"
+    if "date" in df.columns:
+        return "date"
     return None
 
 def _slug(s: str) -> str:
+    # kategori colon adı güvenli kısa slug
     s = str(s).strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
     return s[:24] if s else "cat"
-
-# ---------- lat/lon → GEOID fallback (opsiyonel, NN ile) ----------
-def _geoid_from_latlon(df: pd.DataFrame) -> pd.Series:
-    lat_cols = [c for c in df.columns if c.lower() in ("lat","latitude","y","lat_dd")]
-    lon_cols = [c for c in df.columns if c.lower() in ("lon","lng","longitude","x","lon_dd")]
-    if not lat_cols or not lon_cols:
-        return pd.Series([], dtype=str)
-
-    look = _read_csv(GEOID_LOOKUP)
-    if look.empty or not all(k in look.columns for k in ["GEOID","lat","lon"]):
-        return pd.Series([], dtype=str)
-
-    try:
-        from sklearn.neighbors import NearestNeighbors
-        pts = look[["lat","lon"]].to_numpy(dtype=float)
-        nbrs = NearestNeighbors(n_neighbors=1, algorithm="auto").fit(pts)
-
-        lat = pd.to_numeric(df[lat_cols[0]], errors="coerce")
-        lon = pd.to_numeric(df[lon_cols[0]], errors="coerce")
-        mask = lat.notna() & lon.notna()
-        out = pd.Series(index=df.index, dtype=object)
-
-        if mask.any():
-            query = np.c_[lat[mask].to_numpy(), lon[mask].to_numpy()]
-            dist, idx = nbrs.kneighbors(query, n_neighbors=1, return_distance=True)
-            out.loc[mask] = look.iloc[idx[:,0]]["GEOID"].to_numpy()
-        return out.fillna("")
-    except Exception as e:
-        log(f"ℹ️ GEOID NN fallback başarısız: {e}")
-        return pd.Series([], dtype=str)
 
 # ========== 911 → Günlük ==========
 def make_911_daily(df911: pd.DataFrame, col_g: str, col_dt_hint: str) -> pd.DataFrame:
@@ -137,48 +75,35 @@ def make_911_daily(df911: pd.DataFrame, col_g: str, col_dt_hint: str) -> pd.Data
             if len(df911) != before: log(f"🧹 Dedup: {before-len(df911)} satır çıkarıldı ({cid})")
             break
 
-    # GEOID normalize / fallback
+    # GEOID normalize
     if col_g not in df911.columns:
         cand = [c for c in df911.columns if "geoid" in c.lower()]
-        if cand:
-            col_g = cand[0]
-            df911["GEOID"] = _norm_geoid(df911[col_g])
-        else:
-            nn_geoid = _geoid_from_latlon(df911)
-            if nn_geoid.empty or nn_geoid.isna().all():
-                log("⚠️ 911 verisinde GEOID yok ve lat/lon fallback başarısız → atlanıyor.")
-                return pd.DataFrame()
-            df911["GEOID"] = _norm_geoid(nn_geoid)
-    else:
-        df911["GEOID"] = _norm_geoid(df911[col_g])
-
-    # Eğer dosya zaten günlükse (opsiyonel hızlandırıcı)
-    if "date" in df911.columns and ("n911_d" in df911.columns or "count" in df911.columns):
-        df911["date"] = pd.to_datetime(df911["date"], errors="coerce").dt.date
-        if "n911_d" not in df911.columns:
-            df911 = df911.rename(columns={"count":"n911_d"})
-        daily_raw = df911[["GEOID","date","n911_d"]].dropna().copy()
-    else:
-        # datetime parse → date
-        use_dt = autodetect_dt_col(df911, col_dt_hint)
-        if use_dt is None:
-            log("⚠️ 911 zaman sütunu bulunamadı → atlanıyor.")
+        if not cand:
+            log("⚠️ 911 verisinde GEOID yok → atlanıyor.")
             return pd.DataFrame()
-        if use_dt == "date+time":
-            dt = pd.to_datetime(df911["date"].astype(str).str.strip() + " " +
-                                df911["time"].astype(str).str.strip(),
-                                errors="coerce", utc=True)
-        else:
-            dt = pd.to_datetime(df911[use_dt], errors="coerce", utc=True)
-        df911["date"] = dt.dt.date
+        col_g = cand[0]
+    df911["GEOID"] = _norm_geoid(df911[col_g])
 
-        # günlük sayım (ham)
-        daily_raw = (
-            df911.dropna(subset=["GEOID","date"])
-                 .groupby(["GEOID","date"], as_index=False)
-                 .size()
-                 .rename(columns={"size":"n911_d"})
-        )
+    # datetime parse → date
+    use_dt = autodetect_dt_col(df911, col_dt_hint)
+    if use_dt is None:
+        log("⚠️ 911 zaman sütunu bulunamadı → atlanıyor.")
+        return pd.DataFrame()
+    if use_dt == "date+time":
+        dt = pd.to_datetime(df911["date"].astype(str).str.strip() + " " +
+                            df911["time"].astype(str).str.strip(),
+                            errors="coerce", utc=True)
+    else:
+        dt = pd.to_datetime(df911[use_dt], errors="coerce", utc=True)
+    df911["date"] = dt.dt.date
+
+    # günlük sayım (ham)
+    daily_raw = (
+        df911.dropna(subset=["GEOID","date"])
+             .groupby(["GEOID","date"], as_index=False)
+             .size()
+             .rename(columns={"size":"n911_d"})
+    )
 
     # [8] winsorize (opsiyonel)
     if WINS_Q and 0 < WINS_Q < 1 and not daily_raw.empty:
@@ -286,6 +211,7 @@ def make_911_category_rollings(df911: pd.DataFrame) -> pd.DataFrame:
                                columns="_cat_slug",
                                values=["cnt_prev_1d","cnt_roll_7d","cnt_roll_30d"],
                                fill_value=0, aggfunc="first")
+    # kolon isimlerini düzleştir
     piv.columns = [f"n911_{lvl2}_{lvl1}" for (lvl1,lvl2) in piv.columns.to_flat_index()]
     piv = piv.reset_index()
     return piv
@@ -293,24 +219,31 @@ def make_911_category_rollings(df911: pd.DataFrame) -> pd.DataFrame:
 # ========== GRID / EVENTS enrich ==========
 def enrich_grid(grid: pd.DataFrame, g911: pd.DataFrame, gcat: pd.DataFrame) -> pd.DataFrame:
     out = grid.copy()
+    # tarih tipi normalize
     if not np.issubdtype(pd.Series(out["date"]).dtype, np.datetime64):
         out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+
     out = out.merge(g911, on=["GEOID","date"], how="left")
     if not gcat.empty:
         out = out.merge(gcat, on=["GEOID","date"], how="left")
+
+    # doldur
     base_int = ["n911_d","n911_prev_1d","n911_roll_3d","n911_roll_7d","n911_roll_30d"]
-    for c in out.columns:
-        if c in base_int: out[c] = out[c].fillna(0).astype("int32")
+    for c in base_int:
+        if c in out.columns: out[c] = out[c].fillna(0).astype("int32")
     for c in ["n911_ema_a3","n911_ema_a5","n911_trend_7v30"]:
         if c in out.columns: out[c] = out[c].fillna(0).astype("float32")
+    # kategori kolonları (float)
     if not gcat.empty:
         for c in gcat.columns:
             if c not in ("GEOID","date"):
                 out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+
     return out
 
 def enrich_events(events: pd.DataFrame, g911: pd.DataFrame, gcat: pd.DataFrame) -> pd.DataFrame:
     out = events.copy()
+    # GEOID + date
     if "GEOID" in out.columns:
         out["GEOID"] = _norm_geoid(out["GEOID"])
     if "date" not in out.columns:
@@ -318,11 +251,17 @@ def enrich_events(events: pd.DataFrame, g911: pd.DataFrame, gcat: pd.DataFrame) 
             out["date"] = pd.to_datetime(out["incident_datetime"], errors="coerce", utc=True).dt.date
         else:
             raise ValueError("OUT_EVENTS içinde 'date' yok ve 'incident_datetime' yok.")
+
+    # sadece geçmiş pencereler: prev/roll/ema/trend güvenli
     feats = g911[["GEOID","date","n911_prev_1d","n911_roll_3d","n911_roll_7d",
                   "n911_roll_30d","n911_ema_a3","n911_ema_a5","n911_trend_7v30"]].drop_duplicates()
     out = out.merge(feats, on=["GEOID","date"], how="left")
+
+    # kategori (opsiyonel)
     if not gcat.empty:
         out = out.merge(gcat, on=["GEOID","date"], how="left")
+
+    # fill
     for c in ["n911_prev_1d","n911_roll_3d","n911_roll_7d","n911_roll_30d"]:
         if c in out.columns: out[c] = out[c].fillna(0).astype("int32")
     for c in ["n911_ema_a3","n911_ema_a5","n911_trend_7v30"]:
@@ -331,25 +270,23 @@ def enrich_events(events: pd.DataFrame, g911: pd.DataFrame, gcat: pd.DataFrame) 
         for c in gcat.columns:
             if c not in ("GEOID","date"):
                 out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+
     return out
 
 # ========== MAIN ==========
 def main():
-    log("🚀 update_911_daily.py (revize: dosya bulma + NN fallback + geniş tarih algılama)")
-    log(f"🔧 CRIME_DATA_DIR = {CRIME_DATA_DIR}")
-    log(f"🔧 FR_911_PATH    = {P_911}")
-
+    log("🚀 enrich_with_911.py (revize: 1,2,3,7,8)")
     df911 = _read_csv(P_911)
     if df911.empty:
         log("ℹ️ 911 verisi yok, işlem atlandı.")
         return 0
 
-    g911 = make_911_daily(df911, COL_G_911, COL_DT_911)
+    g911 = make_911_daily(df911, COL_G_911, COL_DT_911)    # base + reindex + EMA + trend
     if g911.empty:
         log("ℹ️ 911 günlük türetilemedi, işlem atlandı.")
         return 0
 
-    gcat = make_911_category_rollings(df911)
+    gcat = make_911_category_rollings(df911)               # kategori-bazlı (opsiyonel)
     if not gcat.empty:
         log(f"📊 Kategori rolling kolonları: {len(gcat.columns)-2}")
 
