@@ -1,14 +1,20 @@
 name: Daily FR Grid/Events Enrichment + Patrol
 
 on:
+  # Upstream workflow doğrudan çağırabilsin
+  workflow_call:
+    inputs:
+      reason:
+        description: "Upstream çağrı nedeni"
+        required: false
+        type: string
+
+  # Manuel çalıştırma
   workflow_dispatch:
+
+  # Her gün 07:30 (Europe/Istanbul)
   schedule:
-    - cron: "30 04 * * *"  # 07:30 Europe/Istanbul
-  workflow_run:
-    workflows:
-      - "Full SF Crime Pipeline"   # upstream workflow 'name:' ile birebir aynı olmalı
-    types: [completed]
-    branches: [main]
+    - cron: "30 04 * * *"
 
 permissions:
   contents: read
@@ -30,7 +36,6 @@ env:
 
   # Komşuluk dosyası
   NEIGH_FILE: neighbors.csv
-
 jobs:
   enrich-fr-daily:
     # Upstream workflow_run tetiklendi ise sadece 'success' sonrasında çalış
