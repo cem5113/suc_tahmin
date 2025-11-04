@@ -36,6 +36,7 @@ warnings.simplefilter("ignore", FutureWarning)
 # -----------------------
 # ENV / PATHS & SETTINGS
 # -----------------------
+BASE_DIR    = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).expanduser().resolve()
 EVENTS_PATH = Path(os.getenv("FR_EVENTS_PATH", "sf_crime.csv"))
 OUT_EVENTS  = Path(os.getenv("FR_OUT_EVENTS",  "fr_crime_events_daily.csv"))
 OUT_GRID    = Path(os.getenv("FR_OUT_GRID",    "fr_crime_grid_daily.csv"))
@@ -51,7 +52,9 @@ MIN_DAYS    = MIN_YEARS * 365
 # Helpers
 # -----------------------
 def _abs(p: Path) -> Path:
-    return p.expanduser().resolve()
+    p = p.expanduser()
+    # Eğer verilen path göreliyse CRIME_DATA_DIR altına yaz/oku
+    return (p if p.is_absolute() else (BASE_DIR / p)).resolve()
 
 def safe_read_csv(p: Path) -> pd.DataFrame:
     p = _abs(p)
