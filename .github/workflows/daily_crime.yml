@@ -157,6 +157,55 @@ jobs:
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
       # ---------------------- 911 ENRICH (revize arama desenleri) ----------------------
+      - name: Fallback: Download 911 from latest Release if missing
+        env:
+          WANT1: sf_911_last_5_year.csv          # sizin release’teki dosya adı (ekranda gördüğünüz)
+          WANT2: sf_911_last_5_years.csv         # olası çoğul varyant
+        run: |
+          set -euo pipefail
+          # 1) Workspace/Artifact araması (zaten biraz sonra da aranacak),
+          #    burada sadece hızlı bir kontrol ve gerekirse Release indir.
+          found=""
+
+          # aday yollar
+          for p in \
+            "${CRIME_DATA_DIR}/${WANT1}" \
+            "${CRIME_DATA_DIR}/${WANT2}" \
+            "${CRIME_DATA_DIR}/crime_prediction_data/${WANT1}" \
+            "${CRIME_DATA_DIR}/crime_prediction_data/${WANT2}" \
+            "${CRIME_DATA_DIR}/artifact/${WANT1}" \
+            "${CRIME_DATA_DIR}/artifact/${WANT2}"
+          do
+            if [ -f "$p" ]; then found="$p"; break; fi
+          done
+
+          if [ -z "$found" ]; then
+            echo "ℹ️ 911 yerelde yok → latest release'tan indiriyorum..."
+            mkdir -p "${CRIME_DATA_DIR}"
+            # current repo’dan son release’teki dosyayı desenle indir
+            gh release download --repo "$GITHUB_REPOSITORY" --latest \
+              --pattern "${WANT1}" --dir "${CRIME_DATA_DIR}" || true
+            gh release download --repo "$GITHUB_REPOSITORY" --latest \
+              --pattern "${WANT2}" --dir "${CRIME_DATA_DIR}" || true
+
+            # tekrar bak
+            for p in \
+              "${CRIME_DATA_DIR}/${WANT1}" \
+              "${CRIME_DATA_DIR}/${WANT2}" \
+              "${CRIME_DATA_DIR}/crime_prediction_data/${WANT1}" \
+              "${CRIME_DATA_DIR}/crime_prediction_data/${WANT2}"
+            do
+              if [ -f "$p" ]; then found="$p"; break; fi
+            done
+          fi
+
+          if [ -n "$found" ]; then
+            echo "✅ 911 release dosyası hazır: $found"
+            echo "FR_911_PATH=$found" >> "$GITHUB_ENV"
+          else
+            echo "ℹ️ Release'ta da 911 bulunamadı (devamında arama adımı yine deneyecek)."
+          fi
+
       - name: (1) 911 → enrich GRID & EVENTS (robust recursive find)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
