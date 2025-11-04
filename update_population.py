@@ -25,8 +25,23 @@ def safe_unzip(zip_path: Path, dest_dir: Path):
                 dst.write(src.read())
     log("✅ ZIP çıkarma tamam.")
 
+# --- GEOID temizleyici: scientific notation & float görünümünü düzelt ---
+def _clean_geoid_scalar(x: str) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip()
+    # Bilimsel gösterim veya float görünümlü değerleri güvenle sayıya çevir
+    try:
+        if re.fullmatch(r"[0-9]+(\.[0-9]+)?([eE][+\-]?[0-9]+)?", s):
+            as_int = int(float(s))
+            return str(as_int)
+    except Exception:
+        pass
+    # Genel durum: rakam dışını at
+    return re.sub(r"\D+", "", s)
+
 def _digits_only(s: pd.Series) -> pd.Series:
-    return s.astype(str).str.extract(r"(\d+)", expand=False).fillna("")
+    return s.astype(str).map(_clean_geoid_scalar).fillna("")
 
 def _mode_len(series: pd.Series) -> int:
     if series.empty: return 11
@@ -35,8 +50,8 @@ def _mode_len(series: pd.Series) -> int:
     return int(m.iloc[0]) if not m.empty else int(L.dropna().median())
 
 def _key(series: pd.Series, L: int) -> pd.Series:
-    # Yalnızca rakamları al, boşlukları at, L haneye zfill, fazla ise kes
-    s = _digits_only(series).str.replace(" ", "", regex=False)
+    # Yalnızca rakamları al; kısa ise zfill, uzun ise kırp
+    s = _digits_only(series)
     return s.str.zfill(L).str[:L]
 
 def _find_geoid_col(df: pd.DataFrame) -> str | None:
@@ -50,7 +65,9 @@ def _find_geoid_col(df: pd.DataFrame) -> str | None:
         if "geoid" in c.lower(): return c
     return None
 
-def _find_population_col(df: pd.DataFrame) -> str | None:
+def _find_population_col(df: pd.DataFrame, forced: str | None = None) -> str | None:
+    if forced and forced in df.columns:
+        return forced
     cands = ["population","pop","total_population","B01003_001E","estimate","total","value"]
     low = {c.lower(): c for c in df.columns}
     for n in cands:
@@ -70,7 +87,15 @@ BASE_DIR      = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")); BASE
 ARTIFACT_ZIP  = Path(os.getenv("ARTIFACT_ZIP", "artifact/sf-crime-pipeline-output.zip"))
 ARTIFACT_DIR  = Path(os.getenv("ARTIFACT_DIR", "artifact_unzipped"))
 CRIME_OUTPUT  = str(BASE_DIR / "sf_crime_03.csv")
-JOIN_LEN      = 11  # TRACT
+
+# Birleşim anahtar uzunluğu (tract için 11)
+JOIN_LEN      = int(os.getenv("JOIN_LEN", "11"))
+
+# SF'ye filtre için prefiks; boş ise filtre uygulanmaz
+SF_PREFIX     = os.getenv("SF_PREFIX_FILTER", "06075").strip()
+
+# İsteğe bağlı: nüfus kolonunu zorla
+FORCE_POP_COL = os.getenv("POPULATION_COL", "").strip() or None
 
 # ZIP varsa aç
 safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
@@ -91,7 +116,7 @@ POP_CANDS = [
     Path("sf_population.csv"),
 ]
 
-def pick(paths): 
+def pick(paths):
     for p in paths:
         if p and Path(p).exists(): return str(p)
     return None
@@ -112,19 +137,26 @@ crime_geoid_col = _find_geoid_col(crime)
 if not crime_geoid_col: raise RuntimeError("Suç veri setinde GEOID kolonu yok.")
 pop_geoid_col = _find_geoid_col(pop)
 if not pop_geoid_col:  raise RuntimeError("Nüfus CSV’de GEOID kolonu yok.")
-pop_val_col   = _find_population_col(pop)
+pop_val_col   = _find_population_col(pop, FORCE_POP_COL)
 if not pop_val_col:    raise RuntimeError("Nüfus CSV’de nüfus değer kolonu yok (population/B01003_001E/estimate/...).")
 
 crime_len = _mode_len(_digits_only(crime[crime_geoid_col]))
 pop_len   = _mode_len(_digits_only(pop[pop_geoid_col]))
 log(f"[info] crime GEO len≈{crime_len} | pop GEO len≈{pop_len} | join_len={JOIN_LEN} (tract)")
+log(f"[info] pop_val_col={pop_val_col!r}")
 
 # ============================== Prepare POP ==============================
 pp = pop[[pop_geoid_col, pop_val_col]].copy()
 pp["_key"] = _key(pp[pop_geoid_col], JOIN_LEN)
 pp["population"] = _num(pp[pop_val_col]).fillna(0)
 
-# Pop seviyesi 12/15 ise 11'e aggregate (sum)
+# Opsiyonel: SF prefiksi ile filtre (gürültüyü azaltır)
+if SF_PREFIX:
+    before = len(pp)
+    pp = pp[pp["_key"].str.startswith(SF_PREFIX)]
+    log(f"[info] POP SF filtresi: prefix={SF_PREFIX} | {before:,} → {len(pp):,}")
+
+# Pop seviyesi tract üstü ise 11'e aggregate (sum)
 if pop_len > JOIN_LEN:
     pp = pp.groupby("_key", as_index=False)["population"].sum()
 else:
@@ -134,7 +166,20 @@ else:
 cc = crime.copy()
 cc["_key"] = _key(cc[crime_geoid_col], JOIN_LEN)
 
-# Merge ve GEOID temizliği:
+# --- Teşhis: Anahtar kümeleri ve kesişim ---
+left_keys  = set(cc["_key"].unique())
+right_keys = set(pp["_key"].unique())
+inter      = left_keys & right_keys
+log(f"[debug] left_keys={len(left_keys):,} | right_keys={len(right_keys):,} | intersection={len(inter):,}")
+
+if len(inter) == 0:
+    samp_left  = list(sorted(left_keys))[:5]
+    samp_right = list(sorted(right_keys))[:5]
+    log(f"[debug] örnek left keys:  {samp_left}")
+    log(f"[debug] örnek right keys: {samp_right}")
+    log("⚠️ Hiç eşleşme yok: Muhtemelen GEOID scientific-notation / vintaj (2010↔2020) farkı.")
+
+# ============================== Merge & GEOID Temizliği ==============================
 out = cc.merge(pp, how="left", on="_key")
 
 # Tüm GEOID türevlerini at ve en başa 11 hanelik string GEOID koy
@@ -145,7 +190,7 @@ out.drop(columns=[c for c in geoid_like_cols if c != "_key"], errors="ignore", i
 out.insert(0, "GEOID", out["_key"].astype("string"))
 out.drop(columns=["_key"], inplace=True)
 
-# Tip güvenliği: GEOID -> string (11 hane), population -> float (veya int)
+# Tip güvenliği: GEOID -> string (11 hane)
 out["GEOID"] = out["GEOID"].astype("string")
 
 # Ek güvence: tüm GEOID'ler 11 hane mi?
@@ -159,10 +204,13 @@ Path(CRIME_OUTPUT).parent.mkdir(parents=True, exist_ok=True)
 # CSV yazarken sayıları tırnak içine alma; ama GEOID zaten string olduğu için .0 olmaz.
 out.to_csv(CRIME_OUTPUT, index=False, na_rep="")
 
+# ============================== Summary Logs ==============================
 log(f"✅ Kaydedildi → {CRIME_OUTPUT}")
 try:
     null_rate = out["population"].isna().mean()
-    log(f"📊 satır: crime={len(crime):,} | pop={len(pp):,} | out={len(out):,} | population NaN oranı={null_rate:.2%}")
+    match_rate = 1.0 - null_rate
+    log(f"📊 satır: crime={len(crime):,} | pop={len(pp):,} | out={len(out):,}")
+    log(f"🔗 match_rate={match_rate:.2%} | population NaN oranı={null_rate:.2%}")
     with pd.option_context("display.max_columns", 60, "display.width", 1600):
         log(out[["GEOID","population"]].head(10).to_string(index=False))
 except Exception as e:
