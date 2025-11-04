@@ -340,7 +340,52 @@ jobs:
             echo "ℹ️ neighbors.csv yok → komşu enrich atlanıyor."
             exit 0
           fi
-          python -u make_neighbors_fr.py
+          python -u scripts/make_neighbors_daily.py
+
+      - name: (9) Population -> enrich GRID & EVENTS
+        env:
+          POP_FILE: "sf_population.csv"
+        run: |
+          set -euo pipefail
+
+          POP="${CRIME_DATA_DIR}/${POP_FILE}"
+          GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
+          EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
+
+          if [ ! -f "$POP" ]; then
+            echo "ℹ️ population yok → atlanıyor ($POP)"
+            exit 0
+          fi
+
+          python - <<'PY'
+          import os, pandas as pd
+          base = os.environ["CRIME_DATA_DIR"]
+          pop_path = os.path.join(base, os.environ["POP_FILE"])
+          grid_path = os.path.join(base, os.environ["FR_GRID_DAILY_OUT"])
+          evt_path  = os.path.join(base, os.environ["FR_EVENTS_DAILY_OUT"])
+
+          pop = pd.read_csv(pop_path)
+          # normalize
+          pop["GEOID"] = (
+              pop["GEOID"].astype(str).str.extract(r"(\d+)",expand=False)
+              .str.zfill(11).str[:11]
+          )
+
+          def enrich(pth):
+              if not os.path.exists(pth): return
+              df = pd.read_csv(pth)
+              if "GEOID" not in df.columns: return
+              df["GEOID"] = (
+                  df["GEOID"].astype(str).str.extract(r"(\d+)",expand=False)
+                  .str.zfill(11).str[:11]
+              )
+              df = df.merge(pop[["GEOID","population"]], on="GEOID", how="left")
+              df.to_csv(pth,index=False)
+              print("✅ enriched:",pth)
+
+          enrich(grid_path)
+          enrich(evt_path)
+          PY
 
       - name: Final previews
         run: |
