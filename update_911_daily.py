@@ -26,7 +26,20 @@ def _read_csv(p: Path) -> pd.DataFrame:
     if not p.exists():
         log(f"❌ Bulunamadı: {p}")
         return pd.DataFrame()
-    df = pd.read_csv(p, low_memory=False)
+    suf = p.suffix.lower()
+    suf2 = "".join(p.suffixes).lower()  # .csv.gz vs
+    try:
+        if suf == ".parquet" or suf2.endswith(".parquet"):
+            df = pd.read_parquet(p)
+        elif suf2.endswith(".csv.gz"):
+            df = pd.read_csv(p, compression="gzip", low_memory=False)
+        elif suf == ".csv":
+            df = pd.read_csv(p, low_memory=False)
+        else:
+            df = pd.read_csv(p, low_memory=False)
+    except Exception as e:
+        log(f"❌ Okuma hatası: {p} — {type(e).__name__}: {e}")
+        return pd.DataFrame()
     log(f"📖 Okundu: {p} ({len(df):,}×{df.shape[1]})")
     return df
 
