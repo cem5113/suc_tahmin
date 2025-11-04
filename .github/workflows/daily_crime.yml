@@ -40,7 +40,8 @@ env:
   FR_EVENTS_DAILY_IN:  crime_prediction_data/fr_crime_events_daily.csv
   FR_EVENTS_DAILY_OUT: crime_prediction_data/fr_crime_events_daily.csv
 
-  NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+  # (Fix) Top-level env içinde başka env'e referans verilemez ⇒ github.workspace kullan
+  NEIGH_FILE: ${{ github.workspace }}/neighbors.csv
 
   # 911 varsayılanları
   FR_911_DATE_COL: "incident_datetime"
@@ -191,7 +192,6 @@ jobs:
           pick_latest_by_mtime () {
             local -a arr=("$@")
             if [ "${#arr[@]}" -eq 0 ]; then echo ""; return 0; fi
-            # printf ile NUL-safe değil ama yollarımızda boşluk yok varsayımıyla
             stat --format '%Y %n' "${arr[@]}" | sort -nr | head -n1 | cut -d' ' -f2-
           }
 
@@ -221,7 +221,6 @@ jobs:
               df = pd.read_parquet(p)
           else:
               df = pd.read_csv(p, low_memory=False)
-          # Kolon adları farklı olabilir; en olası timestamp alanlarını deneyelim
           ts_cols = ["received_time","received_datetime","date","datetime","timestamp","call_received_datetime"]
           use = next((c for c in ts_cols if c in df.columns), None)
           if use:
