@@ -138,75 +138,111 @@ jobs:
           echo "---- GRID head ----";   head -n 5 "${FR_OUT_GRID}"   || true
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
-      # --- (1) 911: akıllı bul + grid yoksa atla ---
+      # --- (1) 911: akıllı arama + yoksa zarifçe atla ---
       - name: (1) 911 -> enrich GRID & EVENTS
-        working-directory: ${{ github.workspace }}
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_GEOID_LOOKUP:    "${{ env.CRIME_DATA_DIR }}/sf_blocks_centroids.csv"
-          FR_911_DATE_COL: "incident_datetime"
-          FR_911_GEOID_COL: "GEOID"
         run: |
           set -euo pipefail
+      
           GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
           EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
-            echo "⚠️ daily grid/events yok → 911 enrich atlanıyor."; exit 0
+            echo "⚠️ daily grid/events yok → 911 enrich atlanıyor."
+            exit 0
           fi
-
-          P1="${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
-          P2="${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year.csv"
-          P22="${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_911_last_5_year.csv"
-          P3="${CRIME_DATA_DIR}/artifact/sf_911_last_5_year.csv"
-          
-          if   [ -f "$P1" ]; then export FR_911_PATH="$P1"
-          elif [ -f "$P2" ]; then export FR_911_PATH="$P2"
-          elif [ -f "$P22" ]; then export FR_911_PATH="$P22"
-          elif [ -f "$P3" ]; then export FR_911_PATH="$P3"
-          else
-            echo "ℹ️ 911 verisi yok (aradım: $P1 $P2 $P3) → adım atlanıyor."; exit 0
+      
+          # Tüm makul 911 konumlarını sırayla dene (Y versiyonu öncelikli)
+          CANDIDATES=(
+            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
+            "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+      
+            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year_y.csv"
+            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year.csv"
+      
+            "${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_911_last_5_year_y.csv"
+            "${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_911_last_5_year.csv"
+      
+            "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year_y.csv"
+            "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year.csv"
+          )
+      
+          PICK=""
+          TRIED=()
+          for p in "${CANDIDATES[@]}"; do
+            TRIED+=("$p")
+            if [ -f "$p" ]; then
+              PICK="$p"
+              break
+            fi
+          done
+      
+          if [ -z "$PICK" ]; then
+            echo "ℹ️ 911 verisi yok (aradım: ${TRIED[*]}) → adım atlanıyor."
+            exit 0
           fi
-
+      
+          echo "✅ 911 kaynağı: $PICK"
+          export FR_911_PATH="$PICK"
+          export FR_911_DATE_COL="incident_datetime"
+          export FR_911_GEOID_COL="GEOID"
+      
           python -u update_911_daily.py
-          head -n 5 "${GRID}" || true
-
-      # --- (2) 311: akıllı bul + grid yoksa atla ---
+      
+          # Kısa kontrol
+          head -n 5 "$GRID" || true
+      
+      
+      # --- (2) 311: akıllı arama + yoksa zarifçe atla ---
       - name: (2) 311 -> enrich GRID & EVENTS
-        working-directory: ${{ github.workspace }}
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_311_DATE_COL: "incident_datetime"
-          FR_311_GEOID_COL: "GEOID"
         run: |
           set -euo pipefail
+      
           GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
           EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
-            echo "⚠️ daily grid/events yok → 311 enrich atlanıyor."; exit 0
+            echo "⚠️ daily grid/events yok → 311 enrich atlanıyor."
+            exit 0
           fi
-
-          Q1="${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
-          Q2="${CRIME_DATA_DIR}/crime_prediction_data/sf_311_last_5_years.csv"
-          Q3="${CRIME_DATA_DIR}/artifact/sf_311_last_5_years.csv"
-          if   [ -f "$Q1" ]; then SRC311="$Q1"
-          elif [ -f "$Q2" ]; then SRC311="$Q2"
-          elif [ -f "$Q3" ]; then SRC311="$Q3"
-          else
-            echo "ℹ️ 311 verisi yok (aradım: $Q1 $Q2 $Q3) → adım atlanıyor."; exit 0
+      
+          # Tüm makul 311 konumlarını sırayla dene
+          CANDIDATES=(
+            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
+            "${CRIME_DATA_DIR}/crime_prediction_data/sf_311_last_5_years.csv"
+            "${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_311_last_5_years.csv"
+            "${CRIME_DATA_DIR}/artifact/sf_311_last_5_years.csv"
+          )
+      
+          PICK=""
+          TRIED=()
+          for p in "${CANDIDATES[@]}"; do
+            TRIED+=("$p")
+            if [ -f "$p" ]; then
+              PICK="$p"
+              break
+            fi
+          done
+      
+          if [ -z "$PICK" ]; then
+            echo "ℹ️ 311 verisi yok (aradım: ${TRIED[*]}) → adım atlanıyor."
+            exit 0
           fi
-          echo "✅ 311 kaynağı: $SRC311"
-
-          # enrich_with_311.py FR_311_DAILY_IN veya FR_311_PATH bekler
-          export FR_311_DAILY_IN="$SRC311"
+      
+          echo "✅ 311 kaynağı: $PICK"
+          # enrich_with_311.py ya günlük ya ham dosya bekler; biz günlük olarak geçiyoruz
+          export FR_311_DAILY_IN="$PICK"
+      
           python -u enrich_with_311.py
-
-          # Kolon kontrolü (grid dosyası var sayılarak)
+      
+          # Kolon listesi kontrolü
           python - <<'PY'
           import os, pandas as pd
           p=os.path.join(os.getenv("CRIME_DATA_DIR"), os.getenv("FR_GRID_DAILY_OUT","crime_prediction_data/fr_crime_grid_daily.csv"))
