@@ -206,10 +206,10 @@ jobs:
           head -n 3 "${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}" || true
           echo "==== GRID column list ===="
           python - <<'PY'
-import pandas as pd, os
-p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
-df=pd.read_csv(p, nrows=0); print("\n".join(df.columns))
-PY
+          import pandas as pd, os
+          p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
+          df=pd.read_csv(p, nrows=0); print("\n".join(df.columns))
+          PY
 
       - name: Upload artifacts (GRID & EVENTS)
         uses: actions/upload-artifact@v4
