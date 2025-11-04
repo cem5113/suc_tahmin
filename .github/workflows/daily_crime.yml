@@ -133,7 +133,7 @@ jobs:
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          python -u enrich_with_911.py
+          python -u update_911_daily.py
           head -n 5 "${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}" || true
 
       - name: (2) 311 -> enrich GRID & EVENTS
