@@ -40,7 +40,7 @@ env:
   FR_EVENTS_DAILY_IN:  crime_prediction_data/fr_crime_events_daily.csv
   FR_EVENTS_DAILY_OUT: crime_prediction_data/fr_crime_events_daily.csv
 
-  NEIGH_FILE: neighbors.csv
+  NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
 
   # 911 varsayılanları
   FR_911_DATE_COL: "incident_datetime"
