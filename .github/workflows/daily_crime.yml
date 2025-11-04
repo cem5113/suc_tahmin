@@ -20,15 +20,15 @@ env:
   WX_UNIT: "metric"
   GEOID_LEN: "11"
 
-  # 🔽 artifact ve zip yolları
+  # Artifact ve ZIP yolları
   ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
   ARTIFACT_DIR: artifact
 
-  # 🔽 çıktı/okuma için ana veri klasörü
+  # Çıktı/okuma için ana veri klasörü
   FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
   FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
 
-  # 🔽 GÜNLÜK dosyalar — ALT KLASÖRLE BİRLİKTE!
+  # Günlük dosyalar — ALT KLASÖRLE BİRLİKTE!
   FR_GRID_DAILY_IN:  crime_prediction_data/fr_crime_grid_daily.csv
   FR_GRID_DAILY_OUT: crime_prediction_data/fr_crime_grid_daily.csv
   FR_EVENTS_DAILY_IN:  crime_prediction_data/fr_crime_events_daily.csv
@@ -45,6 +45,7 @@ jobs:
       - name: Debug trigger (workflow_run)
         if: ${{ github.event_name == 'workflow_run' }}
         run: |
+          set -euo pipefail
           echo "event=${{ github.event_name }}"
           echo "from=${{ github.event.workflow_run.name }}"
           echo "conclusion=${{ github.event.workflow_run.conclusion }}"
@@ -53,20 +54,30 @@ jobs:
       - name: Debug trigger (dispatch)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
+          set -euo pipefail
           echo "event=${{ github.event_name }}"
           echo "from="
           echo "conclusion="
           echo "head_branch="
 
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: System deps for geo stack (rtree/libspatialindex)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y libspatialindex-dev
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install deps
+      - name: Install Python dependencies
         run: |
+          set -euo pipefail
           python -m pip install -U pip wheel setuptools pyarrow pandas
           pip install numpy scikit-learn pyproj shapely geopandas fiona rtree
 
@@ -91,8 +102,10 @@ jobs:
 
       # --- (0) Build FR daily: sf_crime.csv konumunu otomatik bul ---
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
+        working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
+
           echo "📂 CWD: $(pwd)"
           echo "📦 CRIME_DATA_DIR=${CRIME_DATA_DIR}"
           mkdir -p "${CRIME_DATA_DIR}/crime_prediction_data"
@@ -127,11 +140,15 @@ jobs:
 
       # --- (1) 911: akıllı bul + grid yoksa atla ---
       - name: (1) 911 -> enrich GRID & EVENTS
+        working-directory: ${{ github.workspace }}
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
+          FR_GEOID_LOOKUP:    "${{ env.CRIME_DATA_DIR }}/sf_blocks_centroids.csv"
+          FR_911_DATE_COL: "incident_datetime"
+          FR_911_GEOID_COL: "GEOID"
         run: |
           set -euo pipefail
           GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
@@ -150,19 +167,19 @@ jobs:
             echo "ℹ️ 911 verisi yok (aradım: $P1 $P2 $P3) → adım atlanıyor."; exit 0
           fi
 
-          export FR_911_DATE_COL="incident_datetime"
-          export FR_911_GEOID_COL="GEOID"
-
           python -u update_911_daily.py
           head -n 5 "${GRID}" || true
 
       # --- (2) 311: akıllı bul + grid yoksa atla ---
       - name: (2) 311 -> enrich GRID & EVENTS
+        working-directory: ${{ github.workspace }}
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
+          FR_311_DATE_COL: "incident_datetime"
+          FR_311_GEOID_COL: "GEOID"
         run: |
           set -euo pipefail
           GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
@@ -170,7 +187,7 @@ jobs:
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
             echo "⚠️ daily grid/events yok → 311 enrich atlanıyor."; exit 0
           fi
-      
+
           Q1="${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
           Q2="${CRIME_DATA_DIR}/crime_prediction_data/sf_311_last_5_years.csv"
           Q3="${CRIME_DATA_DIR}/artifact/sf_311_last_5_years.csv"
@@ -181,11 +198,11 @@ jobs:
             echo "ℹ️ 311 verisi yok (aradım: $Q1 $Q2 $Q3) → adım atlanıyor."; exit 0
           fi
           echo "✅ 311 kaynağı: $SRC311"
-      
+
           # enrich_with_311.py FR_311_DAILY_IN veya FR_311_PATH bekler
           export FR_311_DAILY_IN="$SRC311"
           python -u enrich_with_311.py
-      
+
           # Kolon kontrolü (grid dosyası var sayılarak)
           python - <<'PY'
           import os, pandas as pd
@@ -197,8 +214,8 @@ jobs:
               print("⚠️ GRID yok, kolon listesi alınamadı.")
           PY
 
-
       - name: (3) Bus stops -> enrich GRID & EVENTS
+        working-directory: ${{ github.workspace }}
         env:
           BUS_CANON_RAW: "sf_bus_stops_with_geoid.csv"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
@@ -206,10 +223,11 @@ jobs:
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
-          set -e
+          set -euo pipefail
           python -u update_bus_daily.py
 
       - name: (4) Train stops -> enrich GRID & EVENTS
+        working-directory: ${{ github.workspace }}
         env:
           TRAIN_STOPS_NAME: "sf_train_stops_with_geoid.csv"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
@@ -217,10 +235,11 @@ jobs:
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
-          set -e
+          set -euo pipefail
           python -u update_train_daily.py
 
       - name: (5) POI -> enrich GRID & EVENTS
+        working-directory: ${{ github.workspace }}
         env:
           POI_GEOJSON_1: "${{ env.CRIME_DATA_DIR }}/sf_pois.geojson"
           POI_GEOJSON_2: "sf_pois.geojson"
@@ -231,10 +250,11 @@ jobs:
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
-          set -e
+          set -euo pipefail
           python -u update_poi_daily.py
 
       - name: (6) Police & Government -> enrich GRID & EVENTS
+        working-directory: ${{ github.workspace }}
         env:
           POLICE_FILE: "sf_police_stations.csv"
           GOV_FILE: "sf_government_buildings.csv"
@@ -243,10 +263,11 @@ jobs:
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
-          set -e
+          set -euo pipefail
           python -u update_police_gov_daily.py
 
       - name: (7) Weather (date-merge) -> enrich GRID & EVENTS
+        working-directory: ${{ github.workspace }}
         env:
           WEATHER_FILE: "sf_weather_5years.csv"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
@@ -254,10 +275,11 @@ jobs:
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
-          set -e
+          set -euo pipefail
           python -u update_weather_daily.py
 
       - name: (8) Neighbor windows (1/3/7d) -> enrich GRID & EVENTS
+        working-directory: ${{ github.workspace }}
         env:
           NEIGH_FILE: "${{ env.NEIGH_FILE }}"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
@@ -265,11 +287,17 @@ jobs:
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
-          set -e
+          set -euo pipefail
+          if [ ! -f "${NEIGH_FILE}" ]; then
+            echo "ℹ️ neighbors.csv yok → komşu enrich atlanıyor."
+            exit 0
+          fi
           python -u make_neighbors_fr.py
 
       - name: Final previews
+        working-directory: ${{ github.workspace }}
         run: |
+          set -euo pipefail
           echo "==== GRID (top 3 rows) ====";   head -n 3 "${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"   || true
           echo "==== EVENTS (top 3 rows) ===="; head -n 3 "${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}" || true
           echo "==== GRID column list ===="
@@ -296,20 +324,22 @@ jobs:
     if: ${{ needs.run_fr.result == 'success' }}
     runs-on: ubuntu-latest
     env:
+      CRIME_DATA_DIR: ${{ github.workspace }}
       GRID_FILE:      crime_prediction_data/fr_crime_grid_daily.csv
       PATROL_TOP_K:   "25"
       PATROL_MIN_SPACING_M: "300"
       PATROL_OUT_CSV: "fr_patrol_plan.csv"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      # 🔑 Daily dosyalarını önceki job'dan indir
       - name: Download daily grid/events from previous job
         uses: actions/download-artifact@v4
         with:
@@ -318,20 +348,22 @@ jobs:
 
       - name: Verify transferred files
         run: |
+          set -euo pipefail
           echo "📦 CRIME_DATA_DIR=${CRIME_DATA_DIR}"
           ls -la "${CRIME_DATA_DIR}" || true
           ls -la "${CRIME_DATA_DIR}/crime_prediction_data" || true
           head -n 3 "${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_grid_daily.csv" || true
           head -n 3 "${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_events_daily.csv" || true
 
-      - name: Install deps (runtime only)
+      - name: Install runtime Python deps
         run: |
+          set -euo pipefail
           python -m pip install -U pip
           pip install pandas numpy
 
       - name: Run patrol planner
         run: |
-          set -e
+          set -euo pipefail
           python - <<'PY'
           import os, sys, pandas as pd
           from pathlib import Path
