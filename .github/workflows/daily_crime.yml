@@ -86,8 +86,8 @@ jobs:
       # (0) GRID & EVENTS üretimi + Y_label — mutlak path kullan
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
         env:
-          # Elinizde hangi dosya varsa onu kullanın (çoğu kurulumda fr_crime.csv).
-          FR_EVENTS_PATH:  ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
+          # Elinizde hangi dosya varsa onu kullanın (çoğu kurulumda sf_crime.csv).
+          FR_EVENTS_PATH:  ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
           FR_OUT_EVENTS:   ${{ env.CRIME_DATA_DIR }}/fr_crime_events_daily.csv
           FR_OUT_GRID:     ${{ env.CRIME_DATA_DIR }}/fr_crime_grid_daily.csv
           FR_MIN_YEARS:    "5"
