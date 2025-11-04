@@ -11,9 +11,9 @@ FR_GRID_DAILY_OUT        (çıktı grid)   default: "crime_prediction_data/fr_cr
 FR_EVENTS_DAILY_IN       (girdi events) default: "crime_prediction_data/fr_crime_events_daily.csv"
 FR_EVENTS_DAILY_OUT      (çıktı events) default: "crime_prediction_data/fr_crime_events_daily.csv"
 
-FR_311_DAILY_IN          (311 özet/ham CSV)  Örn: "sf_311_last_5_years.csv"
-FR_311_DATE_COL          (311’de tarih/datetime alanı) default: "created_date"
-FR_311_GEOID_COL         (311’de GEOID alanı)          default: "GEOID"
+FR_311_DAILY_IN          (311 özet/ham CSV/Parquet)  Örn: "sf_311_last_5_years.csv"
+FR_311_DATE_COL          (311’de tarih/datetime alanı; env ile "date" verilebilir)
+FR_311_GEOID_COL         (311’de GEOID alanı) default: "GEOID"
 FR_311_WINSOR_Q          (winsor üst quantile: "0" kapalı, "0.999" gibi) default: "0"
 FR_311_EMA_ALPHAS        (virgülle "0.3,0.6") default: "0.3,0.6"
 
@@ -21,14 +21,14 @@ GEOID_LEN                (default: "11")
 """
 
 from __future__ import annotations
-import os, re, sys
+import os, sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
 
 pd.options.mode.copy_on_write = True
 
-# ------------- ENV -------------
+# ---------------- ENV ----------------
 BASE = Path(os.getenv("CRIME_DATA_DIR", ".")).resolve()
 
 GRID_IN  = os.getenv("FR_GRID_DAILY_IN",  "crime_prediction_data/fr_crime_grid_daily.csv").strip()
@@ -38,14 +38,11 @@ EV_IN    = os.getenv("FR_EVENTS_DAILY_IN",  "crime_prediction_data/fr_crime_even
 EV_OUT   = os.getenv("FR_EVENTS_DAILY_OUT", "crime_prediction_data/fr_crime_events_daily.csv").strip()
 
 N311_IN  = os.getenv("FR_311_DAILY_IN", "").strip()
-DATE_COL = (os.getenv("FR_311_DATE_COL", "created_date") or "created_date").strip()
+DATE_COL_ENV = (os.getenv("FR_311_DATE_COL", "") or "").strip()  # kullanıcı "date" ya da başka bir ad geçebilir
 GEO_COL  = (os.getenv("FR_311_GEOID_COL", "GEOID") or "GEOID").strip()
 
-# Winsor paramı güvenli parse
 def _parse_float_env(key: str, default: float) -> float:
     raw = os.getenv(key, "")
-    if raw is None:
-        return default
     s = str(raw).strip()
     if s == "":
         return default
@@ -72,7 +69,7 @@ if not EMA_ALPHAS:
 
 GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
 
-# ------------- Utils -------------
+# ---------------- Utils ----------------
 def log(msg: str): 
     print(msg, flush=True)
 
@@ -80,9 +77,10 @@ def _norm_geoid(s: pd.Series) -> pd.Series:
     s = s.astype(str).str.extract(r"(\d+)", expand=False)
     return s.str[:GEOID_LEN].str.zfill(GEOID_LEN)
 
-def _read_csv_any(p: Path, nrows: int | None = None) -> pd.DataFrame:
+def _read_any(p: Path, nrows: int | None = None) -> pd.DataFrame:
     if p.suffix.lower() == ".parquet":
-        return pd.read_parquet(p) if nrows is None else pd.read_parquet(p).head(nrows)
+        df = pd.read_parquet(p)
+        return df if nrows is None else df.head(nrows)
     return pd.read_csv(p, low_memory=False, nrows=nrows)
 
 def _winsorize_upper(series: pd.Series, q: float) -> pd.Series:
@@ -90,18 +88,48 @@ def _winsorize_upper(series: pd.Series, q: float) -> pd.Series:
         return series
     try:
         ub = series.quantile(q)
+        log(f"🔧 Winsorize: q={q} üst={ub}")
         return np.minimum(series, ub)
     except Exception:
         return series
 
-# ------------- Load inputs -------------
+def _choose_date_column(df: pd.DataFrame) -> str:
+    """
+    Env’de verilen DATE_COL varsa onu kullanır, yoksa yaygın adaylar arasından
+    veri çakışması olmadan en fazla non-null sağlayanı seçer.
+    """
+    candidates_ordered = []
+    # 1) Env öncelik
+    if DATE_COL_ENV:
+        candidates_ordered.append(DATE_COL_ENV)
+    # 2) Yaygın varyantlar
+    common = [
+        "date", "created_date", "createddate", "created time", "created_time",
+        "request_datetime", "requested_datetime", "open_dt", "opened",
+        "timestamp", "datetime"
+    ]
+    for c in common:
+        if c not in candidates_ordered:
+            candidates_ordered.append(c)
+    # Sadece df'de var olanları filtrele
+    in_df = [c for c in candidates_ordered if c in df.columns]
+    if not in_df:
+        raise SystemExit(f"❌ 311 kaynağında tarih kolonu bulunamadı. Env FR_311_DATE_COL='{DATE_COL_ENV}',"
+                         f" adaylar: {common}, mevcut kolonlar: {list(df.columns)}")
+    # En çok non-null sayan kolonu seç
+    scores = {c: df[c].notna().sum() for c in in_df}
+    picked = max(scores, key=scores.get)
+    log(f"📅 311 tarih kolonu: '{picked}' (env='{DATE_COL_ENV or '-'}', adaylar={in_df}, non_null={scores[picked]})")
+    return picked
+
+# ---------------- Load inputs ----------------
 def load_grid_events() -> tuple[pd.DataFrame, pd.DataFrame]:
     g_path = BASE / GRID_IN
     e_path = BASE / EV_IN
     if not g_path.exists() or not e_path.exists():
         raise SystemExit(f"❌ GRID/EVENTS yok: {g_path} / {e_path}")
-    grid = _read_csv_any(g_path)
-    evts = _read_csv_any(e_path)
+    grid = _read_any(g_path)
+    evts = _read_any(e_path)
     log(f"📖 Okundu: {GRID_IN} ({len(grid):,}×{len(grid.columns)})")
     log(f"📖 Okundu: {EV_IN} ({len(evts):,}×{len(evts.columns)})")
     return grid, evts
@@ -112,13 +140,12 @@ def load_311_source() -> pd.DataFrame:
     p = Path(N311_IN)
     if not p.exists():
         raise SystemExit(f"❌ 311 kaynağı yok: {p}")
-    df = _read_csv_any(p)
+    df = _read_any(p)
     log(f"📖 Okundu: {p} ({len(df):,}×{len(df.columns)})")
     return df
 
-# ------------- Calendar mask (leakage-safe) -------------
+# ---------------- Calendar mask ----------------
 def build_calendar_dates(grid: pd.DataFrame) -> pd.DataFrame:
-    """GRID içinden kullanılan takvim: GEOID × date (sızıntıyı önlemek için)."""
     need = ["GEOID", "date"]
     for c in need:
         if c not in grid.columns:
@@ -130,51 +157,39 @@ def build_calendar_dates(grid: pd.DataFrame) -> pd.DataFrame:
     log(f"🗓️  Takvim boyutu: {len(cal):,} (GEOID×date)")
     return cal
 
-# ------------- Feature building -------------
+# ---------------- Feature building ----------------
 def make_311_daily_counts(df311: pd.DataFrame) -> pd.DataFrame:
-    # Tarihi normalize et
-    if DATE_COL not in df311.columns:
-        raise SystemExit(f"❌ 311 kaynağında {DATE_COL} yok.")
+    date_col = _choose_date_column(df311)
     if GEO_COL not in df311.columns:
         raise SystemExit(f"❌ 311 kaynağında {GEO_COL} yok.")
 
-    # DATE → date (sadece gün)
-    # Eğer datetime ise gününü al, değilse parse et
-    s = pd.to_datetime(df311[DATE_COL], errors="coerce", utc=True)
+    # Datetime parse → sadece gün
+    s = pd.to_datetime(df311[date_col], errors="coerce", utc=True)
     if s.notna().any():
         dcol = s.dt.tz_convert(None).dt.date if getattr(s.dt, "tz", None) is not None else s.dt.date
     else:
-        dcol = pd.to_datetime(df311[DATE_COL], errors="coerce").dt.date
+        dcol = pd.to_datetime(df311[date_col], errors="coerce").dt.date
 
     out = pd.DataFrame({
         "GEOID": _norm_geoid(df311[GEO_COL]),
         "date":  dcol
-    })
-    out = out.dropna().reset_index(drop=True)
+    }).dropna()
 
-    # günlük sayım
     g = (out.groupby(["GEOID","date"])
              .size()
              .rename("n311")
              .reset_index())
 
-    # winsor (günlük sayıya uygula)
-    if WIN_Q and 0.0 < WIN_Q < 1.0:
-        ub = g["n311"].quantile(WIN_Q)
-        log(f"🔧 Winsorize: q={WIN_Q} üst={ub}")
-        g["n311"] = np.minimum(g["n311"], ub).astype(float)
+    # winsor
+    if 0.0 < WIN_Q < 1.0:
+        g["n311"] = _winsorize_upper(pd.to_numeric(g["n311"], errors="coerce"), WIN_Q).astype(float)
     else:
+        g["n311"] = pd.to_numeric(g["n311"], errors="coerce").astype(float)
         log("🔧 Winsorize kapalı (q=0 veya q>=1).")
 
     return g
 
 def make_311_features(g_daily: pd.DataFrame, cal_dates: pd.DataFrame) -> pd.DataFrame:
-    """
-    g_daily: GEOID×date×n311 (winsor uygulanmış)
-    cal_dates: GRID’ten gelen GEOID×date maskesi (sızıntıyı önler)
-    Çıktı: cal_dates'e hizalı, ek pencereler + EMA kolonları
-    """
-    # GRID takvimi ile birleşip "yoksa 0" yapalım
     cal = cal_dates.copy()
     cal["GEOID"] = _norm_geoid(cal["GEOID"])
     cal["date"]  = pd.to_datetime(cal["date"], errors="coerce").dt.date
@@ -185,62 +200,45 @@ def make_311_features(g_daily: pd.DataFrame, cal_dates: pd.DataFrame) -> pd.Data
     g["date"]  = pd.to_datetime(g["date"], errors="coerce").dt.date
     g = g.dropna()
 
-    # Merge ve boşlara 0
     merged = cal.merge(g, on=["GEOID","date"], how="left")
     merged["n311"] = pd.to_numeric(merged["n311"], errors="coerce").fillna(0.0)
 
-    # Rolling/lag örnekleri (günlük):
-    # Burada sadece EMA istenmişti; örnek olarak 1g ve 3g toplamını da ekleyelim.
     merged = merged.sort_values(["GEOID","date"]).reset_index(drop=True)
-    merged["date_ts"] = pd.to_datetime(merged["date"])
-
-    # MultiIndex’e oturt
     m = merged.set_index(["GEOID","date"]).sort_index()
 
-    # EMA — index hizalaması ÖNEMLİ!
-    # Grup bazında ewm → sonra m.index’e reindex → to_numpy() ile atama
+    # EMA — hizalama + güvenli atama
     for a in EMA_ALPHAS:
         ema = (m["n311"].groupby(level=0)
                .apply(lambda s: s.ewm(alpha=a, adjust=False).mean()))
         m[f"n311_ema_a{int(a*10)}"] = ema.reindex(m.index).to_numpy()
 
-    # İsteğe bağlı basit pencereler (toplam)
-    # 1g önce, 3g toplam gibi özellikler (index-safe)
-    # Lag 1 gün:
+    # Basit pencereler
     m["n311_prev_1d"] = (m["n311"].groupby(level=0).shift(1)).fillna(0.0)
-    # 3 günlük toplam (dahil bugünü):
-    m["n311_sum_3d"] = (m["n311"].groupby(level=0)
-                        .rolling(window=3, min_periods=1).sum()
-                        .reset_index(level=0, drop=True))
+    m["n311_sum_3d"]  = (m["n311"].groupby(level=0)
+                         .rolling(window=3, min_periods=1).sum()
+                         .reset_index(level=0, drop=True))
 
-    m = m.reset_index().drop(columns=["date_ts"], errors="ignore")
-    return m
+    return m.reset_index()
 
-# ------------- Merge into GRID & EVENTS -------------
+# ---------------- Merge into GRID & EVENTS ----------------
 def merge_into_grid_events(feats: pd.DataFrame, grid: pd.DataFrame, evts: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # GRID tarafında tarih sütunu kesin var; evts tarafında varsa tarihle, yoksa calendar-agg (median) üzerinden birleş
     feats["GEOID"] = _norm_geoid(feats["GEOID"])
     feats["date"]  = pd.to_datetime(feats["date"], errors="coerce").dt.date
 
-    # GRID merge
     g2 = grid.copy()
     g2["GEOID"] = _norm_geoid(g2["GEOID"])
     g2["date"]  = pd.to_datetime(g2["date"], errors="coerce").dt.date
     k = ["GEOID","date"]
     before = g2.shape
     g2 = g2.merge(feats, on=k, how="left")
-    # NaN → 0
     for c in [c for c in g2.columns if c.startswith("n311")]:
         g2[c] = pd.to_numeric(g2[c], errors="coerce").fillna(0.0)
     after = g2.shape
     log(f"🔗 GRID merge: {before} → {after}")
 
-    # EVENTS merge
     e2 = evts.copy()
     e2["GEOID"] = _norm_geoid(e2["GEOID"])
-
-    has_date = "date" in e2.columns
-    if has_date:
+    if "date" in e2.columns:
         e2["date"] = pd.to_datetime(e2["date"], errors="coerce").dt.date
         before_e = e2.shape
         e2 = e2.merge(feats, on=["GEOID","date"], how="left")
@@ -249,8 +247,6 @@ def merge_into_grid_events(feats: pd.DataFrame, grid: pd.DataFrame, evts: pd.Dat
         after_e = e2.shape
         log(f"🔗 EVENTS merge (date-based): {before_e} → {after_e}")
     else:
-        # Takvim tabanlı özet (ör. median) – gerekirse:
-        # Burada minimal bir fallback: GEOID bazında median n311
         agg = feats.groupby("GEOID", as_index=False).median(numeric_only=True)
         before_e = e2.shape
         e2 = e2.merge(agg, on="GEOID", how="left")
@@ -261,28 +257,23 @@ def merge_into_grid_events(feats: pd.DataFrame, grid: pd.DataFrame, evts: pd.Dat
 
     return g2, e2
 
-# ------------- Save -------------
+# ---------------- Save ----------------
 def safe_save_csv(df: pd.DataFrame, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.as_posix() + ".tmp"
     df.to_csv(tmp, index=False)
     os.replace(tmp, path)
 
-# ------------- MAIN -------------
+# ---------------- MAIN ----------------
 def main():
     log("🚀 enrich_with_311.py (GRID + EVENTS, günlük-only, sızıntısız)")
 
     grid, evts = load_grid_events()
     df311 = load_311_source()
 
-    # 311 günlük sayım (winsor güvenli)
-    g_daily = make_311_daily_counts(df311)
-
-    # Takvim maskesi (GRID’tan)
-    cal = build_calendar_dates(grid)
-
-    # Özellikler (EMA + basit pencereler) — index hizalaması FIX
-    feats = make_311_features(g_daily, cal) if len(cal) else pd.DataFrame()
+    g_daily = make_311_daily_counts(df311)      # tarih sütunu otomatik seçiliyor
+    cal     = build_calendar_dates(grid)
+    feats   = make_311_features(g_daily, cal) if len(cal) else pd.DataFrame()
 
     if feats.empty:
         log("ℹ️ 311 feature set boş → passthrough (kolon eklemeden kaydet).")
@@ -290,21 +281,17 @@ def main():
         safe_save_csv(evts, BASE / EV_OUT)
         return 0
 
-    # GRID & EVENTS ile birleştir
     g2, e2 = merge_into_grid_events(feats, grid, evts)
 
-    # Kaydet
     safe_save_csv(g2, BASE / GRID_OUT)
     safe_save_csv(e2, BASE / EV_OUT)
     log(f"✅ Yazıldı: {GRID_OUT} ({len(g2):,} satır, {len(g2.columns)} sütun)")
     log(f"✅ Yazıldı: {EV_OUT} ({len(e2):,} satır, {len(e2.columns)} sütun)")
 
-    # Hızlı önizleme
     try:
         log(g2.head(5).to_string(index=False))
     except Exception:
         pass
-
     return 0
 
 if __name__ == "__main__":
