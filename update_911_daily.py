@@ -275,7 +275,7 @@ def enrich_events(events: pd.DataFrame, g911: pd.DataFrame, gcat: pd.DataFrame) 
 
 # ========== MAIN ==========
 def main():
-    log("🚀 enrich_with_911.py (revize: 1,2,3,7,8)")
+    log("🚀 update_911_daily.py (revize: 1,2,3,7,8)")
     df911 = _read_csv(P_911)
     if df911.empty:
         log("ℹ️ 911 verisi yok, işlem atlandı.")
