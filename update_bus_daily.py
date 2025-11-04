@@ -181,7 +181,14 @@ def enrich_one(df: pd.DataFrame, bus_agg: pd.DataFrame, is_grid: bool) -> pd.Dat
         out = _ensure_date(out)
 
     # hedef GEOID -> resmi (tek) GEOID string(11)
-    out.insert(0, "GEOID", _key_11(out[c_geoid]).astype("string"))
+    geo = _key_11(out[c_geoid]).astype("string")
+    if "GEOID" in out.columns:
+        # mevcut sütunu standardize et / üzerine yaz
+        out.loc[:, "GEOID"] = geo
+    else:
+        # yoksa en başa ekle
+        out.insert(0, "GEOID", geo)
+
     # orijinal GEOID benzer kolonları kaldır
     drop_candidates = [c for c in out.columns if c != "GEOID" and "geoid" in c.lower()]
     out.drop(columns=drop_candidates, inplace=True, errors="ignore")
