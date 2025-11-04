@@ -64,6 +64,14 @@ def _num(s: pd.Series) -> pd.Series:
         errors="coerce"
     )
 
+def _normalize_geoid11(s: pd.Series) -> pd.Series:
+    return _digits_only(s).str[:11].str.zfill(11)
+
+def _first_existing(paths):
+    for p in paths:
+        if p and Path(p).exists(): return str(p)
+    return None
+
 # ============================== Config ==============================
 BASE_DIR      = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")); BASE_DIR.mkdir(parents=True, exist_ok=True)
 ARTIFACT_ZIP  = Path(os.getenv("ARTIFACT_ZIP", "artifact/sf-crime-pipeline-output.zip"))
@@ -74,7 +82,7 @@ POP_FILL_ZERO = os.getenv("POP_FILL_ZERO", "0") == "1"    # eşleşmeyenlerde 0 
 # ZIP varsa aç
 safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
 
-# Aday dosyalar — günlük akış öncelikli
+# Aday dosyalar — günlük akış öncelikli (CRIME)
 CRIME_CANDS = [
     BASE_DIR / "daily_crime_02.csv",             # <— öncelik: 311 eklenmiş GÜNLÜK
     ARTIFACT_DIR / "daily_crime_02.csv",
@@ -85,68 +93,89 @@ CRIME_CANDS = [
     Path("sf_crime_02.csv"),
     Path("sf_crime.csv"),
 ]
-POP_CANDS = [
+
+# Nüfus kaynağı adayları
+PRIMARY_POP_CANDS = [                          # <— ÖNCE sf_crime_03.csv (update_population.py çıktısı)
+    BASE_DIR / "sf_crime_03.csv",
+    ARTIFACT_DIR / "sf_crime_03.csv",
+    Path("sf_crime_03.csv"),
+]
+FALLBACK_POP_CANDS = [
     Path(os.getenv("POPULATION_PATH")) if os.getenv("POPULATION_PATH") else None,
     ARTIFACT_DIR / "sf_population.csv",
     BASE_DIR / "sf_population.csv",
     Path("sf_population.csv"),
 ]
 
-OUT_PATH = BASE_DIR / "daily_crime_03.csv"       # <— günlük çıktı adı
+OUT_PATH = BASE_DIR / "daily_crime_03.csv"     # <— günlük çıktı adı (değişmedi)
 
-def pick(paths):
-    for p in paths:
-        if p and Path(p).exists(): return str(p)
-    return None
-
-crime_path = pick(CRIME_CANDS)
-pop_path   = pick(POP_CANDS)
+crime_path = _first_existing(CRIME_CANDS)
 if not crime_path: raise FileNotFoundError("❌ CRIME CSV bulunamadı (daily_crime_02.csv / *_crime_02.csv / *_crime.csv).")
-if not pop_path:   raise FileNotFoundError("❌ POPULATION CSV bulunamadı (sf_population.csv).")
+
+primary_pop_path = _first_existing(PRIMARY_POP_CANDS)
+fallback_pop_path = None if primary_pop_path else _first_existing(FALLBACK_POP_CANDS)
+
+if not (primary_pop_path or fallback_pop_path):
+    raise FileNotFoundError("❌ Nüfus kaynağı yok: sf_crime_03.csv veya sf_population.csv bulunamadı.")
+
 log(f"📥 crime: {crime_path}")
-log(f"📥 population: {pop_path}")
+if primary_pop_path:
+    log(f"📥 population (primary): {primary_pop_path}  [sf_crime_03.csv]")
+else:
+    log(f"📥 population (fallback CSV): {fallback_pop_path}  [sf_population.csv]")
 
 # ============================== Read (STRING!) ==============================
 crime = pd.read_csv(crime_path, low_memory=False, dtype=str)
-pop   = pd.read_csv(pop_path,   low_memory=False, dtype=str)
-
 crime_geoid_col = _find_geoid_col(crime)
 if not crime_geoid_col: raise RuntimeError("Suç veri setinde GEOID kolonu yok.")
-pop_geoid_col = _find_geoid_col(pop)
-if not pop_geoid_col:  raise RuntimeError("Nüfus CSV’de GEOID kolonu yok.")
-pop_val_col   = _find_population_col(pop)
-if not pop_val_col:    raise RuntimeError("Nüfus CSV’de nüfus değer kolonu yok (population/B01003_001E/estimate/...).")
 
-crime_len = _mode_len(_digits_only(crime[crime_geoid_col]))
-pop_len   = _mode_len(_digits_only(pop[pop_geoid_col]))
-log(f"[info] crime GEO len≈{crime_len} | pop GEO len≈{pop_len} | join_len={JOIN_LEN} (tract)")
+# --- Nüfus haritasını kur ---
+if primary_pop_path:
+    dfp = pd.read_csv(primary_pop_path, low_memory=False, dtype=str)
+    g_src = _find_geoid_col(dfp)
+    if not g_src:
+        raise RuntimeError("sf_crime_03.csv içinde GEOID kolonu bulunamadı.")
+    if "population" not in dfp.columns:
+        raise RuntimeError("sf_crime_03.csv içinde 'population' kolonu bekleniyordu fakat yok.")
+    dfp["_GEOID11"] = _normalize_geoid11(dfp[g_src])
 
-# ============================== Prepare POP ==============================
-pp = pop[[pop_geoid_col, pop_val_col]].copy()
-pp["_key"] = _key(pp[pop_geoid_col], JOIN_LEN)
-pp["population"] = _num(pp[pop_val_col]).clip(lower=0)  # negatifleri 0'a kırp
-# Aynı tract için birden fazla satır varsa sonuncuyu al (veya sum)
-if pop_len > JOIN_LEN:
-    # block(15) / bg(12) → tract(11) topla
-    pp = pp.groupby("_key", as_index=False)["population"].sum()
+    # numerik yap + ilk dolu değeri seç
+    dfp["_pop_num"] = _num(dfp["population"])
+    pop_map = (dfp.loc[~dfp["_pop_num"].isna(), ["_GEOID11","_pop_num"]]
+                    .drop_duplicates("_GEOID11", keep="first")
+                    .rename(columns={"_pop_num":"population"}))
 else:
-    pp = (pp.sort_values([ "_key" ])
-            .drop_duplicates(subset=["_key"], keep="last")
-            .loc[:, ["_key","population"]])
+    pop = pd.read_csv(fallback_pop_path, low_memory=False, dtype=str)
+    pop_geoid_col = _find_geoid_col(pop)
+    if not pop_geoid_col:  raise RuntimeError("Nüfus CSV’de GEOID kolonu yok.")
+    pop_val_col   = _find_population_col(pop)
+    if not pop_val_col:    raise RuntimeError("Nüfus CSV’de nüfus değer kolonu yok (population/B01003_001E/estimate/...).")
 
-# ============================== Prepare CRIME ==============================
+    pop_len   = _mode_len(_digits_only(pop[pop_geoid_col]))
+    log(f"[info] pop GEO len≈{pop_len} | join_len={JOIN_LEN} (tract)")
+    pp = pop[[pop_geoid_col, pop_val_col]].copy()
+    pp["_GEOID11"]   = _key(pp[pop_geoid_col], JOIN_LEN)
+    pp["population"] = _num(pp[pop_val_col]).clip(lower=0)
+    if pop_len > JOIN_LEN:
+        # block(15) / bg(12) → tract(11) topla
+        pop_map = pp.groupby("_GEOID11", as_index=False)["population"].sum()
+    else:
+        pop_map = (pp.sort_values(["_GEOID11"])
+                     .drop_duplicates(subset=["_GEOID11"], keep="last")
+                     .loc[:, ["_GEOID11","population"]])
+
+# ============================== Prepare CRIME + Merge ==============================
 cc = crime.copy()
-cc["_key"] = _key(cc[crime_geoid_col], JOIN_LEN)
+cc["_GEOID11"] = _key(cc[crime_geoid_col], JOIN_LEN)
 
-# ============================== Merge ==============================
-out = cc.merge(pp, how="left", on="_key")
+out = cc.merge(pop_map, how="left", on="_GEOID11")
 
-# Resmi GEOID kolonunu en başa koy
-out.drop(columns=[c for c in out.columns if c.lower().startswith("geoid") and c != "_key"], errors="ignore", inplace=True)
-out.insert(0, "GEOID", out["_key"].astype("string"))
-out.drop(columns=["_key"], inplace=True)
+# Resmi GEOID kolonunu öne al (mevcut geoid kolonlarını bozma)
+# Eğer zaten "GEOID" varsa dokunma; yoksa üret.
+if "GEOID" not in out.columns:
+    out.insert(0, "GEOID", out["_GEOID11"].astype("string"))
 
-# Tip güvenliği
+out.drop(columns=["_GEOID11"], inplace=True, errors="ignore")
 out["GEOID"] = out["GEOID"].astype("string")
 
 # ============================== NaN Teşhis & Opsiyonel Doldurma ==============================
@@ -155,7 +184,6 @@ n_unmatched = int(unmatched_mask.sum())
 if n_unmatched:
     rate = n_unmatched / len(out) if len(out) else 0
     log(f"⚠️ Uyarı: population eşleşmeyen satır = {n_unmatched:,} (%{rate:.2%})")
-    # örnekleri bırak
     try:
         sample = out.loc[unmatched_mask, ["GEOID"]].head(50)
         sample_path = BASE_DIR / "unmatched_sample.csv"
