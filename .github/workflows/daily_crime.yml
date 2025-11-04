@@ -170,21 +170,22 @@ jobs:
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
             echo "⚠️ daily grid/events yok → 311 enrich atlanıyor."; exit 0
           fi
-
+      
           Q1="${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
           Q2="${CRIME_DATA_DIR}/crime_prediction_data/sf_311_last_5_years.csv"
           Q3="${CRIME_DATA_DIR}/artifact/sf_311_last_5_years.csv"
-          if   [ -f "$Q1" ]; then export AGG_311_NAME="sf_311_last_5_years.csv";  SRC311="$Q1"
-          elif [ -f "$Q2" ]; then export AGG_311_NAME="sf_311_last_5_years.csv";  SRC311="$Q2"
-          elif [ -f "$Q3" ]; then export AGG_311_NAME="sf_311_last_5_years.csv";  SRC311="$Q3"
+          if   [ -f "$Q1" ]; then SRC311="$Q1"
+          elif [ -f "$Q2" ]; then SRC311="$Q2"
+          elif [ -f "$Q3" ]; then SRC311="$Q3"
           else
             echo "ℹ️ 311 verisi yok (aradım: $Q1 $Q2 $Q3) → adım atlanıyor."; exit 0
           fi
           echo "✅ 311 kaynağı: $SRC311"
-
-          # update_311_daily.py CRIME_DATA_DIR + AGG_311_NAME kullanır
-          python -u update_311_daily.py
-
+      
+          # enrich_with_311.py FR_311_DAILY_IN veya FR_311_PATH bekler
+          export FR_311_DAILY_IN="$SRC311"
+          python -u enrich_with_311.py
+      
           # Kolon kontrolü (grid dosyası var sayılarak)
           python - <<'PY'
           import os, pandas as pd
@@ -195,6 +196,7 @@ jobs:
           else:
               print("⚠️ GRID yok, kolon listesi alınamadı.")
           PY
+
 
       - name: (3) Bus stops -> enrich GRID & EVENTS
         env:
@@ -294,7 +296,7 @@ jobs:
     if: ${{ needs.run_fr.result == 'success' }}
     runs-on: ubuntu-latest
     env:
-      GRID_FILE:      fr_crime_grid_daily.csv
+      GRID_FILE:      crime_prediction_data/fr_crime_grid_daily.csv
       PATROL_TOP_K:   "25"
       PATROL_MIN_SPACING_M: "300"
       PATROL_OUT_CSV: "fr_patrol_plan.csv"
@@ -318,8 +320,9 @@ jobs:
         run: |
           echo "📦 CRIME_DATA_DIR=${CRIME_DATA_DIR}"
           ls -la "${CRIME_DATA_DIR}" || true
-          head -n 3 "${CRIME_DATA_DIR}/fr_crime_grid_daily.csv" || true
-          head -n 3 "${CRIME_DATA_DIR}/fr_crime_events_daily.csv" || true
+          ls -la "${CRIME_DATA_DIR}/crime_prediction_data" || true
+          head -n 3 "${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_grid_daily.csv" || true
+          head -n 3 "${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_events_daily.csv" || true
 
       - name: Install deps (runtime only)
         run: |
