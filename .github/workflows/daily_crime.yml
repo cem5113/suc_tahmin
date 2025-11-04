@@ -23,10 +23,13 @@ jobs:
       WX_LOCATION: "paris"
       WX_UNIT: "metric"
       GEOID_LEN: "11"
+
       ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
       ARTIFACT_DIR: artifact
       FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
       FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
+
+      # Daily I/O
       FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
       FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
       FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
@@ -40,15 +43,19 @@ jobs:
           echo "from=${{ github.event.workflow_run.name }}"
           echo "conclusion=${{ github.event.workflow_run.conclusion }}"
           echo "head_branch=${{ github.event.workflow_run.head_branch }}"
+
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11", cache: "pip" }
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
       - name: Install deps
         run: |
           python -m pip install -U pip wheel setuptools pyarrow pandas
           pip install numpy scikit-learn pyproj shapely geopandas fiona rtree
 
-      # (artefact çekme + unzip) — aynı
       - name: Download upstream artifact (triggering run)
         if: ${{ github.event_name == 'workflow_run' }}
         uses: dawidd6/action-download-artifact@v6
@@ -68,7 +75,7 @@ jobs:
             echo "No artifact ZIP file found (this is fine)."
           fi
 
-      # (0) Daily + Y_label (GRID & EVENTS üret)
+      # (0) Daily + Y_label (GRID & EVENTS)
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
         env:
           CRIME_DATA_DIR:  ${{ env.CRIME_DATA_DIR }}
@@ -111,8 +118,8 @@ jobs:
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_311_DAILY_IN: ""                        # varsa dogrudan gunluk 311 dosyasi
-          AGG_311_NAME: "sf_311_last_5_years.csv"   # yoksa buradan gunluk uretilir
+          FR_311_DAILY_IN: ""                        # varsa doğrudan günlük 311
+          AGG_311_NAME: "sf_311_last_5_years.csv"    # yoksa buradan türet
         run: |
           set -e
           python -u update_311_daily.py
@@ -227,37 +234,34 @@ PY
             ${{ env.CRIME_DATA_DIR }}/${{ env.FR_EVENTS_DAILY_OUT }}
           if-no-files-found: warn
 
-# İKİNCİ JOB — doğru needs + güvenli env/guard
-patrol-fr:
-  needs: [run_fr]
-  if: ${{ needs.run_fr.result == 'success' }}
-  runs-on: ubuntu-latest
-  env:
-    CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-    FR_GRID_DAILY_OUT: ${{ env.FR_GRID_DAILY_OUT || 'fr_crime_grid_daily.csv' }}
-    PATROL_TOP_K: "25"
-    PATROL_MIN_SPACING_M: "300"
-    PATROL_OUT_CSV: "fr_patrol_plan.csv"
+  patrol-fr:
+    needs: [run_fr]
+    if: ${{ needs.run_fr.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+      GRID_FILE:      ${{ env.FR_GRID_DAILY_OUT }}
+      PATROL_TOP_K:   "25"
+      PATROL_MIN_SPACING_M: "300"
+      PATROL_OUT_CSV: "fr_patrol_plan.csv"
 
-  steps:
-    - uses: actions/checkout@v4
+    steps:
+      - uses: actions/checkout@v4
 
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
-        cache: "pip"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
 
-    - name: Install deps (runtime only)
-      run: |
-        python -m pip install -U pip
-        pip install pandas numpy
+      - name: Install deps (runtime only)
+        run: |
+          python -m pip install -U pip
+          pip install pandas numpy
 
-    - name: Run patrol planner
-      env:
-        GRID_FILE: ${{ env.FR_GRID_DAILY_OUT }}
-      run: |
-        set -e
-        python - <<'PY'
+      - name: Run patrol planner
+        run: |
+          set -e
+          python - <<'PY'
 import os, sys, pandas as pd
 from pathlib import Path
 
@@ -276,7 +280,6 @@ if df.empty:
     pd.DataFrame(columns=["GEOID","date","risk_score","Y_label","events_count"]).to_csv(out_csv, index=False)
     sys.exit(0)
 
-# Zorunlu kolonlar
 need = ["GEOID","date"]
 for c in need:
     if c not in df.columns:
@@ -293,7 +296,6 @@ def safe_num(name, default=0.0):
     s = pd.to_numeric(today[name], errors="coerce").fillna(0) if name in today.columns else default
     return s if hasattr(s, "values") else pd.Series(default, index=today.index)
 
-# Eksik metrikler 0 kabul
 today["risk_score"] = (
     safe_num("events_count")*1.0 +
     safe_num("neighbor_crime_24h")*0.20 +
@@ -318,9 +320,9 @@ topk.to_csv(out_csv, index=False)
 print(f"✅ Wrote patrol CSV -> {out_csv} (rows={len(topk)})")
 PY
 
-    - name: Upload patrol artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: fr-patrol-plan
-        path: ${{ env.CRIME_DATA_DIR }}/${{ env.PATROL_OUT_CSV }}
-        if-no-files-found: warn
+      - name: Upload patrol artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fr-patrol-plan
+          path: ${{ env.CRIME_DATA_DIR }}/${{ env.PATROL_OUT_CSV }}
+          if-no-files-found: warn
