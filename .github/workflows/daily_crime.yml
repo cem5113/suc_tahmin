@@ -88,7 +88,7 @@ jobs:
         working-directory: ${{ env.CRIME_DATA_DIR }}
         env:
           # Sadece dosya adları (CWD = CRIME_DATA_DIR)
-          FR_EVENTS_PATH:  fr_crime.csv
+          FR_EVENTS_PATH:  sf_crime.csv
           FR_OUT_EVENTS:   fr_crime_events_daily.csv
           FR_OUT_GRID:     fr_crime_grid_daily.csv
           FR_MIN_YEARS:    "5"
