@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-enrich_with_311.py — Günlük 311 (GEOID×date) özelliklerini hem GRID'e hem EVENTS'e ekler.
+update_311_daily.py — Günlük 311 (GEOID×date) özelliklerini hem GRID'e hem EVENTS'e ekler.
 - Saatlik YOK. Sadece günlük agregasyon.
 - Leakage YOK: tüm lag/rolling/EMA hesapları shift(1) ile (gün t için yalnızca t-1..t-k kullanılır).
 - [1] Tam takvim reindex (eksik günleri 0'la)
@@ -284,7 +284,7 @@ def enrich_events(ev: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
 
 # ----------- MAIN -----------
 def main() -> int:
-    log("🚀 enrich_with_311.py (GRID + EVENTS, günlük-only, sızıntısız)")
+    log("🚀 update_311_daily.py (GRID + EVENTS, günlük-only, sızıntısız)")
     log(f"📦 CRIME_DATA_DIR={CRIME_DATA_DIR}")
 
     # 1) Dosyaları oku (akıllı path çözümleme ile)
