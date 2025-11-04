@@ -30,6 +30,8 @@ import pandas as pd
 import numpy as np
 
 # ----------- ENV -----------
+CRIME_DATA_DIR = Path(os.getenv("CRIME_DATA_DIR", ".")).resolve()
+
 P_311_RAW   = Path(os.getenv("FR_311_PATH", "fr_311.csv"))
 P_311_DAILY = os.getenv("FR_311_DAILY_IN", "").strip()  # varsa direkt günlük dosya
 COL_DT_311  = os.getenv("FR_311_DATE_COL", "incident_datetime")
@@ -45,13 +47,51 @@ EMA_ALPHAS  = [float(x) for x in os.getenv("FR_311_EMA_ALPHAS", "0.3,0.5").split
 
 def log(x): print(x, flush=True)
 
+# ----------- PATH RESOLVER (yeni) -----------
+def _resolve_path(p: Path) -> Path:
+    """
+    Aday arama sırası:
+      1) p (mutlaksa direkt)
+      2) çalışma dizini / p
+      3) CRIME_DATA_DIR / p
+      4) CRIME_DATA_DIR / crime_prediction_data / p.name (sadece dosya adı verilmişse)
+      5) CRIME_DATA_DIR / artifact / p.name
+    İlk bulunan döner.
+    """
+    if p.is_absolute():
+        return p
+
+    # 1) CWD relative
+    p1 = Path.cwd() / p
+    if p1.exists():
+        return p1.resolve()
+
+    # 2) CRIME_DATA_DIR / p
+    p2 = CRIME_DATA_DIR / p
+    if p2.exists():
+        return p2.resolve()
+
+    # 3) CRIME_DATA_DIR/crime_prediction_data/<filename>
+    p3 = CRIME_DATA_DIR / "crime_prediction_data" / p.name
+    if p3.exists():
+        return p3.resolve()
+
+    # 4) CRIME_DATA_DIR/artifact/<filename>
+    p4 = CRIME_DATA_DIR / "artifact" / p.name
+    if p4.exists():
+        return p4.resolve()
+
+    # yoksa en mantıklı hedef olarak CRIME_DATA_DIR/p'yi döndür (yazma için)
+    return p2.resolve()
+
 # ----------- I/O -----------
 def _read_csv(p: Path) -> pd.DataFrame:
-    if not p.exists():
-        log(f"❌ Bulunamadı: {p}")
+    rp = _resolve_path(p)
+    if not rp.exists():
+        log(f"❌ Bulunamadı: {rp}")
         return pd.DataFrame()
-    df = pd.read_csv(p, low_memory=False)
-    log(f"📖 Okundu: {p} ({len(df):,}×{df.shape[1]})")
+    df = pd.read_csv(rp, low_memory=False)
+    log(f"📖 Okundu: {rp} ({len(df):,}×{df.shape[1]})")
     return df
 
 def _save_csv(df: pd.DataFrame, p: Path):
@@ -60,11 +100,13 @@ def _save_csv(df: pd.DataFrame, p: Path):
         df[c] = pd.to_numeric(df[c], downcast="float")
     for c in df.select_dtypes(include=["int64","Int64"]).columns:
         df[c] = pd.to_numeric(df[c], downcast="integer")
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    p.parent.mkdir(parents=True, exist_ok=True)
+
+    rp = _resolve_path(p)
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    tmp = rp.with_suffix(rp.suffix + ".tmp")
     df.to_csv(tmp, index=False)
-    tmp.replace(p)
-    log(f"💾 Yazıldı: {p} ({len(df):,}×{df.shape[1]})")
+    tmp.replace(rp)
+    log(f"💾 Yazıldı: {rp} ({len(df):,}×{df.shape[1]})")
 
 # ----------- Utils -----------
 def _to_date(s: pd.Series) -> pd.Series:
@@ -239,7 +281,9 @@ def enrich_events(ev: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
 # ----------- MAIN -----------
 def main() -> int:
     log("🚀 enrich_with_311.py (GRID + EVENTS, günlük-only, sızıntısız)")
-    # 1) Dosyaları oku
+    log(f"📦 CRIME_DATA_DIR={CRIME_DATA_DIR}")
+
+    # 1) Dosyaları oku (akıllı path çözümleme ile)
     grid = _read_csv(GRID_IN)
     ev   = _read_csv(EV_IN)
 
@@ -259,7 +303,7 @@ def main() -> int:
         cal_dates = e2["date"].values
     cal_dates = pd.to_datetime(pd.Series(cal_dates), errors="coerce").dt.date.dropna().unique()
 
-    # 2) 311 günlük yükle
+    # 2) 311 günlük yükle (ham veya günlük)
     d311 = load_311_daily()
     if d311.empty:
         log("ℹ️ Günlük 311 bulunamadı → sadece 0 kolonları eklenecek.")
