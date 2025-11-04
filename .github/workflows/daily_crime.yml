@@ -157,141 +157,175 @@ jobs:
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
       # ---------------------- 911 ENRICH (revize arama + doğru gh kullanımı) ----------------------
-      - name: Fallback Download 911
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WANT1: sf_911_last_5_year.csv
-          WANT2: sf_911_last_5_years.csv
-        run: |
-          set -euo pipefail
-          found=""
+- name: Fallback Download 911
+  env:
+    GH_TOKEN: ${{ github.token }}
+    # İsteğe bağlı override
+    FR_911_RELEASE_TAG: ""                 # örn: v2025.11.04  (boşsa latest)
+    FR_911_ASSET_PAT: ""                   # örn: fr_911_daily.csv (boşsa default pattern set)
+    WANT1: sf_911_last_5_year.csv
+    WANT2: sf_911_last_5_years.csv
+  run: |
+    set -euo pipefail
 
-          # Yerel/artefact hızlı kontrol
-          for p in \
-            "${CRIME_DATA_DIR}/${WANT1}" \
-            "${CRIME_DATA_DIR}/${WANT2}" \
-            "${CRIME_DATA_DIR}/crime_prediction_data/${WANT1}" \
-            "${CRIME_DATA_DIR}/crime_prediction_data/${WANT2}" \
-            "${CRIME_DATA_DIR}/artifact/${WANT1}" \
-            "${CRIME_DATA_DIR}/artifact/${WANT2}"
-          do
-            if [ -f "$p" ]; then found="$p"; break; fi
-          done
+    found=""
 
-          if [ -z "$found" ]; then
-            echo "ℹ️ 911 yerelde yok → latest release'tan indiriyorum..."
-            mkdir -p "${CRIME_DATA_DIR}"
-            # Son release tag'ini al ve o tag'den indir (gh --latest yok)
-            TAG="$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName || true)"
-            if [ -n "${TAG:-}" ]; then
-              echo "⬇️ Latest tag: $TAG"
-              gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D "${CRIME_DATA_DIR}" \
-                -p 'sf_911_last_5_year*.csv' \
-                -p 'sf_911_last_5_year*.csv.gz' \
-                -p 'sf_911_last_5_year*.parquet' \
-                --skip-existing || true
-            else
-              echo "ℹ️ Latest release bulunamadı."
-            fi
+    # 0) Yerel/artefact hızlı kontrol
+    for p in \
+      "${CRIME_DATA_DIR}/${WANT1}" \
+      "${CRIME_DATA_DIR}/${WANT2}" \
+      "${CRIME_DATA_DIR}/crime_prediction_data/${WANT1}" \
+      "${CRIME_DATA_DIR}/crime_prediction_data/${WANT2}" \
+      "${CRIME_DATA_DIR}/artifact/${WANT1}" \
+      "${CRIME_DATA_DIR}/artifact/${WANT2}"
+    do
+      if [ -f "$p" ]; then found="$p"; break; fi
+    done
 
-            # Tekrar bak
-            for p in \
-              "${CRIME_DATA_DIR}/${WANT1}" \
-              "${CRIME_DATA_DIR}/${WANT2}" \
-              "${CRIME_DATA_DIR}/crime_prediction_data/${WANT1}" \
-              "${CRIME_DATA_DIR}/crime_prediction_data/${WANT2}"
-            do
-              if [ -f "$p" ]; then found="$p"; break; fi
-            done
+    if [ -z "$found" ]; then
+      echo "ℹ️ 911 yerelde yok → release denemesi..."
+      mkdir -p "${CRIME_DATA_DIR}"
+
+      # 1) Tag tespiti (override > latest)
+      TAG="${FR_911_RELEASE_TAG:-}"
+      if [ -z "${TAG}" ]; then
+        TAG="$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName || true)"
+      fi
+      if [ -z "${TAG}" ]; then
+        echo "ℹ️ Release tag bulunamadı."
+      else
+        echo "⬇️ Release tag: ${TAG}"
+
+        # 2) Desen seti (override varsa onu, yoksa default set)
+        PATS=()
+        if [ -n "${FR_911_ASSET_PAT:-}" ]; then
+          PATS+=("${FR_911_ASSET_PAT}")
+        else
+          PATS+=('sf_911_last_5_year*.csv')
+          PATS+=('sf_911_last_5_year*.csv.gz')
+          PATS+=('sf_911_last_5_year*.parquet')
+        fi
+
+        # 3) Dar desenlerle indir
+        ok=0
+        for pat in "${PATS[@]}"; do
+          if gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D "${CRIME_DATA_DIR}" -p "$pat" --skip-existing; then
+            ok=1
           fi
+        done
 
-          if [ -n "$found" ]; then
-            echo "✅ 911 release dosyası hazır: $found"
-            echo "FR_911_PATH=$found" >> "$GITHUB_ENV"
-          else
-            echo "ℹ️ Release'ta da 911 bulunamadı (devamında arama adımı yine deneyecek)."
-          fi
+        # 4) Hiçbiri tutmadıysa daha geniş dene
+        if [ $ok -eq 0 ]; then
+          echo "ℹ️ Geniş desen denemesi (*911*)."
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D "${CRIME_DATA_DIR}" -p '*911*' --skip-existing || true
+        fi
 
-      - name: (1) 911 → enrich GRID & EVENTS (robust recursive find)
-        env:
-          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
-          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
-          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
-          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_911_DATE_COL:  "${{ env.FR_911_DATE_COL }}"
-          FR_911_GEOID_COL: "${{ env.FR_911_GEOID_COL }}"
-          FR_911_WINSOR_Q:  "${{ env.FR_911_WINSOR_Q }}"
-          FR_CAT_TOPK:      "${{ env.FR_CAT_TOPK }}"
-        run: |
-          set -euo pipefail
+        # 5) Hâlâ yoksa son çare: tüm asset'leri indir
+        if ! ls -1 "${CRIME_DATA_DIR}"/sf_911_last_5_year* 1>/dev/null 2>&1 && ! ls -1 "${CRIME_DATA_DIR}"/'*911*' 1>/dev/null 2>&1; then
+          echo "ℹ️ Hedef dosya adı bulunamadı → tüm asset'leri indiriyorum."
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D "${CRIME_DATA_DIR}" --skip-existing || true
+        fi
+      fi
 
-          GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
-          EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
-          if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
-            echo "⚠️ daily grid/events yok → 911 enrich atlanıyor."
-            exit 0
-          fi
+      # 6) Tekrar ara
+      for p in \
+        "${CRIME_DATA_DIR}/${WANT1}" \
+        "${CRIME_DATA_DIR}/${WANT2}" \
+        "${CRIME_DATA_DIR}/crime_prediction_data/${WANT1}" \
+        "${CRIME_DATA_DIR}/crime_prediction_data/${WANT2}" \
+        "${CRIME_DATA_DIR}"/sf_911_last_5_year* \
+        "${CRIME_DATA_DIR}"/'*911*'
+      do
+        [ -f "$p" ] || continue
+        found="$p"; break
+      done
+    fi
 
-          echo "🔎 911 dosyası aranıyor..."
+    if [ -n "$found" ]; then
+      echo "✅ 911 dosyası hazır: $found"
+      echo "FR_911_PATH=$found" >> "$GITHUB_ENV"
+    else
+      echo "ℹ️ Release'ta da 911 bulunamadı (devamda yine aranacak)."
+    fi
 
-          if [ -n "${FR_911_PATH:-}" ] && [ -f "${FR_911_PATH}" ]; then
-            PICK="${FR_911_PATH}"
-          else
-            mapfile -t FOUND_A < <(find "${CRIME_DATA_DIR}" -maxdepth 8 -type f \
-              \( -iname "sf_911_last_5_year.csv"      -o -iname "sf_911_last_5_year_y.csv" \
-               -o -iname "sf_911_last_5_years.csv"    -o -iname "sf_911_last_5_years_y.csv" \
-               -o -iname "sf_911_last_5_year.csv.gz"  -o -iname "sf_911_last_5_years.csv.gz" \
-               -o -iname "sf_911_last_5_year.parquet" -o -iname "sf_911_last_5_years.parquet" \) 2>/dev/null | sort)
+- name: (1) 911 → enrich GRID & EVENTS (robust recursive find)
+  env:
+    FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
+    FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
+    FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
+    FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
+    FR_911_DATE_COL:  "${{ env.FR_911_DATE_COL }}"
+    FR_911_GEOID_COL: "${{ env.FR_911_GEOID_COL }}"
+    FR_911_WINSOR_Q:  "${{ env.FR_911_WINSOR_Q }}"
+    FR_CAT_TOPK:      "${{ env.FR_CAT_TOPK }}"
+  run: |
+    set -euo pipefail
 
-            if [ -n "${FR_OUTPUT_DIR:-}" ] && [ -d "${FR_OUTPUT_DIR}" ]; then
-              mapfile -t FOUND_B < <(find "${FR_OUTPUT_DIR}" -maxdepth 8 -type f \
-                \( -iname "sf_911_last_5_year.csv"      -o -iname "sf_911_last_5_year_y.csv" \
-                 -o -iname "sf_911_last_5_years.csv"    -o -iname "sf_911_last_5_years_y.csv" \
-                 -o -iname "sf_911_last_5_year.csv.gz"  -o -iname "sf_911_last_5_years.csv.gz" \
-                 -o -iname "sf_911_last_5_year.parquet" -o -iname "sf_911_last_5_years.parquet" \) 2>/dev/null | sort)
-            else
-              FOUND_B=()
-            fi
+    # ---- path normalize: FR_* değeri mutlak değilse CRIME_DATA_DIR ile birleştir
+    GRID="${FR_GRID_DAILY_OUT}";  [[ "$GRID" != /* ]] && GRID="${CRIME_DATA_DIR}/${GRID}"
+    EVTS="${FR_EVENTS_DAILY_OUT}"; [[ "$EVTS" != /* ]] && EVTS="${CRIME_DATA_DIR}/${EVTS}"
 
-            mapfile -t FOUND_C < <(find "${CRIME_DATA_DIR}/artifact" -maxdepth 10 -type f \
-              \( -iname "sf_911_last_5_year.csv"      -o -iname "sf_911_last_5_year_y.csv" \
-               -o -iname "sf_911_last_5_years.csv"    -o -iname "sf_911_last_5_years_y.csv" \
-               -o -iname "sf_911_last_5_year.csv.gz"  -o -iname "sf_911_last_5_years.csv.gz" \
-               -o -iname "sf_911_last_5_year.parquet" -o -iname "sf_911_last_5_years.parquet" \) 2>/dev/null | sort || true)
+    if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
+      echo "⚠️ daily grid/events yok → 911 enrich atlanıyor."
+      exit 0
+    fi
 
-            ALL=("${FOUND_A[@]}" "${FOUND_B[@]}" "${FOUND_C[@]}")
-            PICK=""
-            declare -A seen
-            for p in "${ALL[@]}"; do
-              [ -z "${p}" ] && continue
-              if [ -f "$p" ] && [ -z "${seen[$p]+x}" ]; then
-                seen[$p]=1
-                base="$(basename "$p")"
-                if [[ "$base" =~ ^sf_911_last_5_years?_y\.csv(\.gz)?$ ]]; then PICK="$p"; break; fi
-                if [ -z "$PICK" ]; then PICK="$p"; fi
-              fi
-            done
-          fi
+    echo "🔎 911 dosyası aranıyor..."
 
-          if [ -z "${PICK:-}" ]; then
-            echo "ℹ️ 911 verisi bulunamadı → adım atlanıyor."
-            exit 0
-          fi
-          echo "✅ 911 kaynağı: $PICK"
+    if [ -n "${FR_911_PATH:-}" ] && [ -f "${FR_911_PATH}" ]; then
+      PICK="${FR_911_PATH}"
+    else
+      # geniş arama: CRIME_DATA_DIR, FR_OUTPUT_DIR, artifact
+      mapfile -t FOUND_A < <(find "${CRIME_DATA_DIR}" -maxdepth 8 -type f \
+        \( -iname "sf_911_last_5_year.csv"      -o -iname "sf_911_last_5_year_y.csv" \
+         -o -iname "sf_911_last_5_years.csv"    -o -iname "sf_911_last_5_years_y.csv" \
+         -o -iname "sf_911_last_5_year.csv.gz"  -o -iname "sf_911_last_5_years.csv.gz" \
+         -o -iname "sf_911_last_5_year.parquet" -o -iname "sf_911_last_5_years.parquet" \) 2>/dev/null | sort)
 
-          export FR_911_PATH="$PICK"
+      if [ -n "${FR_OUTPUT_DIR:-}" ] && [ -d "${FR_OUTPUT_DIR}" ]; then
+        mapfile -t FOUND_B < <(find "${FR_OUTPUT_DIR}" -maxdepth 8 -type f \
+          \( -iname "sf_911_last_5_year.csv"      -o -iname "sf_911_last_5_year_y.csv" \
+           -o -iname "sf_911_last_5_years.csv"    -o -iname "sf_911_last_5_years_y.csv" \
+           -o -iname "sf_911_last_5_year.csv.gz"  -o -iname "sf_911_last_5_years.csv.gz" \
+           -o -iname "sf_911_last_5_year.parquet" -o -iname "sf_911_last_5_years.parquet" \) 2>/dev/null | sort)
+      else
+        FOUND_B=()
+      fi
 
-          if [ -f "./update_911_daily.py" ]; then
-            PYFILE="./update_911_daily.py"
-          elif [ -f "./scripts/update_911_daily.py" ]; then
-            PYFILE="./scripts/update_911_daily.py"
-          else
-            echo "❌ update_911_daily.py yok."; exit 66
-          fi
+      mapfile -t FOUND_C < <(find "${CRIME_DATA_DIR}/artifact" -maxdepth 10 -type f \
+        \( -iname "sf_911_last_5_year.csv"      -o -iname "sf_911_last_5_year_y.csv" \
+         -o -iname "sf_911_last_5_years.csv"    -o -iname "sf_911_last_5_years_y.csv" \
+         -o -iname "sf_911_last_5_year.csv.gz"  -o -iname "sf_911_last_5_years.csv.gz" \
+         -o -iname "sf_911_last_5_year.parquet" -o -iname "sf_911_last_5_years.parquet" \) 2>/dev/null | sort || true)
 
-          python -u "$PYFILE"
+      ALL=("${FOUND_A[@]}" "${FOUND_B[@]}" "${FOUND_C[@]}")
+      PICK=""
+      declare -A seen
+      for p in "${ALL[@]}"; do
+        [ -z "${p}" ] && continue
+        if [ -f "$p" ] && [ -z "${seen[$p]+x}" ]; then
+          seen[$p]=1
+          base="$(basename "$p")"
+          if [[ "$base" =~ ^sf_911_last_5_years?_y\.csv(\.gz)?$ ]]; then PICK="$p"; break; fi
+          if [ -z "$PICK" ]; then PICK="$p"; fi
+        fi
+      done
+    fi
 
-          head -n 5 "$GRID" || true
+    if [ -z "${PICK:-}" ]; then
+      echo "ℹ️ 911 verisi bulunamadı → adım atlanıyor."
+      exit 0
+    fi
+    echo "✅ 911 kaynağı: $PICK"
+    export FR_911_PATH="$PICK"
+
+    PYFILE=""
+    if   [ -f "./update_911_daily.py" ];        then PYFILE="./update_911_daily.py"
+    elif [ -f "./scripts/update_911_daily.py" ]; then PYFILE="./scripts/update_911_daily.py"
+    else echo "❌ update_911_daily.py yok."; exit 66; fi
+
+    python -u "$PYFILE"
+    head -n 5 "$GRID" || true
 
       # ---------------------- 311 ENRICH (winsor+EMA sağlam) ----------------------
       - name: (2) 311 → enrich GRID & EVENTS (robust path + robust script)
