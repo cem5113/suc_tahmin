@@ -159,9 +159,12 @@ jobs:
 
           P1="${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
           P2="${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year.csv"
+          P22="${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_911_last_5_year.csv"
           P3="${CRIME_DATA_DIR}/artifact/sf_911_last_5_year.csv"
+          
           if   [ -f "$P1" ]; then export FR_911_PATH="$P1"
           elif [ -f "$P2" ]; then export FR_911_PATH="$P2"
+          elif [ -f "$P22" ]; then export FR_911_PATH="$P22"
           elif [ -f "$P3" ]; then export FR_911_PATH="$P3"
           else
             echo "ℹ️ 911 verisi yok (aradım: $P1 $P2 $P3) → adım atlanıyor."; exit 0
