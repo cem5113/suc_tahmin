@@ -1,42 +1,34 @@
-name: daily_crime — robust
+name: Daily FR Grid/Events Enrichment
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
-    - cron: "30 04 * * *"   # her gün 07:30 (Europe/Istanbul) ≈ 04:30 UTC
-  workflow_run:
-    workflows: ["Post Processing (FR)"]
-    types: [completed]
-    branches: [main]
+    - cron: "30 04 * * *"   # 07:30 Europe/Istanbul
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: daily-1-9-${{ github.ref }}
+  group: fr-daily-grid-events-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   TZ: Europe/Istanbul
   CRIME_DATA_DIR: crime_prediction_data
-  GEOID_LEN: "11"
+  # Girdi/Çıktı dosyaları (aynı isimle yerinde güncellenir)
+  FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
+  FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
+  FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
+  FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
+  # Komşuluk dosyası (repo kökü veya data altında olabilir)
+  NEIGH_FILE: neighbors.csv
 
 jobs:
-  daily_pipeline:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+  enrich-fr-daily:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Debug event
-        run: |
-          echo "event_name=${{ github.event_name }}"
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            echo "from_workflow=${{ github.event.workflow_run.name }}"
-            echo "conclusion=${{ github.event.workflow_run.conclusion }}"
-            echo "from_branch=${{ github.event.workflow_run.head_branch }}"
-          fi
-
       - name: Checkout repo
         uses: actions/checkout@v4
 
@@ -48,208 +40,182 @@ jobs:
 
       - name: Install Python deps
         run: |
-          set -e
-          python -m pip install -U pip wheel setuptools
-          pip install -U pandas numpy pyarrow requests scipy meteostat
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends libspatialindex-dev
-          pip install -U "geopandas==1.0.1" "shapely==2.0.4" "pyproj==3.6.1" "rtree==1.3.0"
+          python -m pip install -U pip
+          pip install pandas numpy scikit-learn pyproj shapely geopandas fiona rtree
 
-      - name: Create data dir if missing
-        run: mkdir -p "${CRIME_DATA_DIR}"
-
-      - name: Sanity — DO NOT use legacy update_crime.py
+      - name: Show working tree
         run: |
-          test ! -f update_crime.py || (echo "⚠️ Eski akış dosyası var ama çağrılmayacak: update_crime.py" && true)
+          echo "📂 CWD: $PWD"
+          ls -lah
+          echo "📂 Data dir:"
+          ls -lah "${CRIME_DATA_DIR}" || true
 
-      - name: Show CWD and locate sf_crime_y.csv
-        run: |
-          set -e
-          echo "📂 CWD: $(pwd)"
-          echo "🔎 Search for sf_crime_y.csv (maxdepth 3):"
-          find . -maxdepth 3 -type f -name "sf_crime_y.csv" -print || true
-          echo "🗂 ls crime_prediction_data:"
-          ls -lah crime_prediction_data || true
-
-      # (1) sf_crime(_y).csv → daily_crime_00.csv
-      - name: (1) update_crime_daily.py → daily_crime_00.csv
+      # ───────────────────── (0) Daily + Y_label ─────────────────────
+      - name: (0) Build FR daily (GRID & EVENTS) + Y_label
         env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN:      ${{ env.GEOID_LEN }}
-          SF_DAILY_OUT:   "daily_crime_00.csv"
-          SF_DAILY_TZ:    America/Los_Angeles
-        run: |
-          set -euo pipefail
-          IN_A="crime_prediction_data/sf_crime_y.csv"
-          IN_B="crime_prediction_data/sf_crime.csv"
-          if   [ -f "$IN_A" ]; then export SF_DAILY_IN="$IN_A";
-          elif [ -f "$IN_B" ]; then export SF_DAILY_IN="$IN_B";
-          else
-            echo "❌ Girdi yok: $IN_A / $IN_B" >&2
-            echo "Tree (maxdepth 3):"; find . -maxdepth 3 -type f -name "sf_crime*.csv" -print || true
-            exit 1
-          fi
-          echo "✅ SF_DAILY_IN=$SF_DAILY_IN"
-          python -u update_crime_daily.py
-          echo "---- HEAD daily_crime_00.csv ----"
-          head -n 3 "${CRIME_DATA_DIR}/daily_crime_00.csv" || true
-          echo "---- COLUMNS daily_crime_00.csv ----"
-          head -n 1 "${CRIME_DATA_DIR}/daily_crime_00.csv" | sed 's/,/\n/g'
-
-      # 911 kaynağını hazırla (bul → kopyala → yoksa stub yarat)
-      - name: Prepare 911 source file
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          CRIME_DATA_DIR:        ${{ env.CRIME_DATA_DIR }}
+          FR_EVENTS_PATH:        ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
+          FR_OUT_EVENTS:         ${{ env.CRIME_DATA_DIR }}/fr_crime_events_daily.csv
+          FR_OUT_GRID:           ${{ env.CRIME_DATA_DIR }}/fr_crime_grid_daily.csv
+          FR_MIN_YEARS:          "5"     # en az 5 yıl pencere
+          FR_DATE_COL:           "incident_datetime"
+          FR_GEOID_COL:          "GEOID"
+          FR_ID_COL:             "id"
         run: |
           set -e
-          P_YEAR="${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
-          P_YEARS="${CRIME_DATA_DIR}/sf_911_last_5_years.csv"
-          if [ -f "$P_YEAR" ]; then
-            echo "✅ Found: $P_YEAR"
-          elif [ -f "$P_YEARS" ]; then
-            echo "ℹ️ Found plural: $P_YEARS → copying to $P_YEAR"
-            cp -f "$P_YEARS" "$P_YEAR"
-          else
-            echo "⚠️ 911 source not found; creating empty stub → $P_YEAR"
-            echo "GEOID,datetime" > "$P_YEAR"
-          fi
-          echo "---- HEAD 911 source ----"
-          head -n 5 "$P_YEAR" || true
+          python -u update_crime_fr_daily.py
+          echo "---- GRID head ----"
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_grid_daily.csv" || true
+          echo "---- EVENTS head ----"
+          head -n 5 "${CRIME_DATA_DIR}/fr_crime_events_daily.csv" || true
 
-      # 911 ensure_date_col hotfix (event_date/dt/day/... desteği)
-      - name: Hotfix 911 ensure_date_col
+      # ───────────────────────── 911 → GRID/EVENTS ─────────────────────────
+      - name: (1) 911 → enrich GRID & EVENTS
+        env:
+          FR_911_PATH: "${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv"
+          FR_911_DATE_COL: "incident_datetime"
+          FR_911_GEOID_COL: "GEOID"
+          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
+          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
+          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
+          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          for p in "update_911_daily.py" "crime_prediction_data/update_911_daily.py"; do
-            if [ -f "$p" ]; then
-              sed -i 's/\["datetime", "incident_datetime", "created_datetime"\]/\["event_date","dt","day","datetime","timestamp","incident_date","incident_datetime","created_datetime"\]/' "$p" || true
-            fi
-          done
+          python -u enrich_with_911.py
 
-      # (2) daily_crime_00.csv + 911 → daily_crime_01.csv
-      - name: (2) update_911_daily.py → daily_crime_01.csv
+      - name: Preview after 911
+        run: |
+          echo "---- GRID (head) ----"
+          head -n 5 "${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}" || true
+          echo "---- EVENTS (head) ----"
+          head -n 5 "${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}" || true
+
+      # ───────────────────────── 311 → GRID/EVENTS ─────────────────────────
+      - name: (2) 311 → enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN:      ${{ env.GEOID_LEN }}
-          DAILY_IN:       "daily_crime_00.csv"
-          DAILY_OUT:      "daily_crime_01.csv"
-          N911_IN:        "sf_911_last_5_year.csv"
-          FR_DAILY_TZ:    "UTC"
-          VERBOSE:        "1"
+          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
+          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
+          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
+          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
+          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
+          # Eğer direkt günlük 311 dosyan var ise belirt (opsiyonel):
+          FR_311_DAILY_IN: ""
+          # Yoksa toplu dosyadan günlük üretilecek:
+          AGG_311_NAME: "sf_311_last_5_years.csv"
         run: |
           set -e
-          python -u update_911_daily.py
-          echo "---- HEAD daily_crime_01.csv ----"
-          head -n 3 "${CRIME_DATA_DIR}/daily_crime_01.csv" || true
-          echo "---- COLUMNS daily_crime_01.csv ----"
-          head -n 1 "${CRIME_DATA_DIR}/daily_crime_01.csv" | sed 's/,/\n/g'
+          python -u enrich_with_311_daily.py
 
-      # (3) daily_crime_01.csv + 311 → daily_crime_02.csv
-      - name: (3) update_311_daily.py → daily_crime_02.csv
+      - name: Preview after 311
+        run: |
+          echo "---- GRID cols ----"
+          python - <<'PY'
+import pandas as pd, os
+p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
+df=pd.read_csv(p, nrows=0); print(list(df.columns))
+PY
+
+      # ───────────────────────── BUS → GRID/EVENTS ─────────────────────────
+      - name: (3) Bus stops → enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN:      ${{ env.GEOID_LEN }}
-          DAILY_IN:       "daily_crime_01.csv"
-          DAILY_OUT:      "daily_crime_02.csv"
-          AGG_311_NAME:   "sf_311_last_5_years.csv"   # yoksa buradan günlük türet
+          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
+          BUS_CANON_RAW: "sf_bus_stops_with_geoid.csv"
+          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
+          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
+          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
+          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          python -u update_311_daily.py
-          echo "---- HEAD daily_crime_02.csv ----"
-          head -n 3 "${CRIME_DATA_DIR}/daily_crime_02.csv" || true
-          echo "---- COLUMNS daily_crime_02.csv ----"
-          head -n 1 "${CRIME_DATA_DIR}/daily_crime_02.csv" | sed 's/,/\n/g'
+          python -u update_bus_fr_daily.py
 
-      # (4) daily_crime_03.csv
-      - name: (4) update_bus_daily.py
+      # ───────────────────────── TRAIN → GRID/EVENTS ───────────────────────
+      - name: (4) Train stops → enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN: ${{ env.GEOID_LEN }}
+          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
+          TRAIN_STOPS_NAME: "sf_train_stops_with_geoid.csv"
+          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
+          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
+          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
+          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          python -u update_bus_daily.py
-          head -n 3 "${CRIME_DATA_DIR}/daily_crime_03.csv" || true
+          python -u update_train_fr_daily.py
 
-      # (5) daily_crime_04.csv
-      - name: (5) update_train_daily.py
+      # ───────────────────────── POI → GRID/EVENTS ─────────────────────────
+      - name: (5) POI → enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN: ${{ env.GEOID_LEN }}
+          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
+          # POI kaynakları (en az biri mevcut olmalı)
+          POI_GEOJSON_1: "${{ env.CRIME_DATA_DIR }}/sf_pois.geojson"
+          POI_GEOJSON_2: "sf_pois.geojson"
+          POI_CLEAN_CSV: "${{ env.CRIME_DATA_DIR }}/sf_pois_cleaned_with_geoid.csv"
+          BLOCK_GEOJSON: "${{ env.CRIME_DATA_DIR }}/sf_census_blocks_with_population.geojson"
+          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
+          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
+          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
+          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          python -u update_train_daily.py
-          head -n 3 "${CRIME_DATA_DIR}/daily_crime_04.csv" || true
+          python -u update_poi_fr_daily.py
 
-      # (6) daily_crime_05.csv
-      - name: (6) update_poi_daily.py
+      # ─────────────────── POLICE & GOV → GRID/EVENTS ──────────────────────
+      - name: (6) Police & Government → enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN: ${{ env.GEOID_LEN }}
-        run: |
-          set -e
-          python -u update_poi_daily.py
-          head -n 3 "${CRIME_DATA_DIR}/daily_crime_05.csv" || true
-
-      # (7) daily_crime_06.csv
-      - name: (7) update_police_gov_daily.py
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN: ${{ env.GEOID_LEN }}
+          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
+          POLICE_FILE: "sf_police_stations.csv"
+          GOV_FILE: "sf_government_buildings.csv"
+          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
+          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
+          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
+          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
           python -u update_police_gov_daily.py
-          head -n 3 "${CRIME_DATA_DIR}/daily_crime_06.csv" || true
 
-      # (8) daily_crime_07.csv
-      - name: (8) update_crime_weather_daily.py
+      # ───────────────────────── WEATHER → GRID/EVENTS ─────────────────────
+      - name: (7) Weather (date-merge) → enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
+          WEATHER_FILE: "sf_weather_5years.csv"
+          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
+          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
+          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
+          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          python -u update_crime_weather_daily.py
-          head -n 3 "${CRIME_DATA_DIR}/daily_crime_07.csv" || true
+          python -u update_weather_fr_daily.py
 
-      # neighbors.csv kontrol
-      - name: Ensure neighbors.csv presence
+      # ───────────────────────── NEIGHBORS → GRID/EVENTS ───────────────────
+      - name: (8) Neighbor windows (1/3/7d, shift(1)) → enrich GRID & EVENTS
         env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN: ${{ env.GEOID_LEN }}
+          CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
+          NEIGH_FILE: "${{ env.NEIGH_FILE }}"
+          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
+          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
+          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
+          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          DEST="${CRIME_DATA_DIR}/neighbors.csv"
-          if [ -f "$DEST" ]; then
-            echo "neighbors.csv already present."
-          else
-            echo "⚠️ neighbors.csv bulunamadı; mevcutsa repo kökünden kopyalanacak."
-            for p in "neighbors.csv" "data/neighbors.csv" "inputs/neighbors.csv"; do
-              if [ -f "$p" ] ; then cp -f "$p" "$DEST"; echo "copied $p → $DEST"; break; fi
-            done
-          fi
-          [ -f "$DEST" ] && head -n 5 "$DEST" || echo "⚠️ neighbors.csv hâlâ yok (make_neighbors_daily.py non-fatal uyaracak)."
+          python -u enrich_with_neighbors_daily.py
 
-      # (9) daily_crime_08.csv
-      - name: (9) make_neighbors_daily.py
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN: ${{ env.GEOID_LEN }}
-          NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+      - name: Final previews
         run: |
-          set -e
-          python -u make_neighbors_daily.py || (echo "⚠️ make_neighbors_daily.py uyarıyla bitti." && true)
-          head -n 3 "${CRIME_DATA_DIR}/daily_crime_08.csv" || true
+          echo "==== GRID (top 3 rows) ===="
+          head -n 3 "${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}" || true
+          echo "==== EVENTS (top 3 rows) ===="
+          head -n 3 "${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}" || true
+          echo "==== GRID column list ===="
+          python - <<'PY'
+import pandas as pd, os
+p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
+df=pd.read_csv(p, nrows=0); print("\n".join(df.columns))
+PY
 
-      - name: List outputs
-        run: |
-          ls -lh "${CRIME_DATA_DIR}" | sed -n '1,200p'
-          echo "---- tail daily outputs ----"
-          for f in "${CRIME_DATA_DIR}"/daily_crime_0{1..8}.csv; do
-            [ -f "$f" ] && echo "::group::$f" && head -n 3 "$f" && echo "::endgroup::";
-          done
-
-      - name: Upload artifact (daily_crime_01→08)
+      - name: Upload artifacts (GRID & EVENTS)
         uses: actions/upload-artifact@v4
         with:
-          name: daily-crime-outputs
-          path: ${{ env.CRIME_DATA_DIR }}/daily_crime_0*.csv
+          name: fr-daily-grid-events
+          path: |
+            ${{ env.CRIME_DATA_DIR }}/${{ env.FR_GRID_DAILY_OUT }}
+            ${{ env.CRIME_DATA_DIR }}/${{ env.FR_EVENTS_DAILY_OUT }}
           if-no-files-found: warn
-          retention-days: 7
