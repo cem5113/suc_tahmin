@@ -101,7 +101,7 @@ jobs:
           echo "🔧 ENV → FR_EVENTS_PATH: ${FR_EVENTS_PATH}"
           echo "🔧 ENV → FR_OUT_EVENTS : ${FR_OUT_EVENTS}"
           echo "🔧 ENV → FR_OUT_GRID   : ${FR_OUT_GRID}"
-          python -u ../update_crime_fr_daily.py
+          python -u ../update_crime_daily.py
           echo "---- GRID head ----"
           head -n 5 "fr_crime_grid_daily.csv" || true
           echo "---- EVENTS head ----"
@@ -148,7 +148,7 @@ jobs:
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          python -u update_bus_fr_daily.py
+          python -u update_bus_daily.py
 
       - name: (4) Train stops -> enrich GRID & EVENTS
         env:
@@ -159,7 +159,7 @@ jobs:
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          python -u update_train_fr_daily.py
+          python -u update_train_daily.py
 
       - name: (5) POI -> enrich GRID & EVENTS
         env:
@@ -173,7 +173,7 @@ jobs:
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          python -u update_poi_fr_daily.py
+          python -u update_poi_daily.py
 
       - name: (6) Police & Government -> enrich GRID & EVENTS
         env:
@@ -196,7 +196,7 @@ jobs:
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          python -u update_weather_fr_daily.py
+          python -u update_weather_daily.py
 
       - name: (8) Neighbor windows (1/3/7d) -> enrich GRID & EVENTS
         env:
