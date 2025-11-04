@@ -157,7 +157,7 @@ jobs:
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
       # ---------------------- 911 ENRICH (revize arama desenleri) ----------------------
-      - name: Fallback: Download 911 from latest Release if missing
+      - name: Fallback Download 911
         env:
           WANT1: sf_911_last_5_year.csv          # sizin release’teki dosya adı (ekranda gördüğünüz)
           WANT2: sf_911_last_5_years.csv         # olası çoğul varyant
