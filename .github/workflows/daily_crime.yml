@@ -260,12 +260,12 @@ jobs:
           export FR_311_DAILY_IN="$PICK"
       
           # --- script yol çözümlemesi
-          if [ -f "./enrich_with_311.py" ]; then
-            PYFILE="./enrich_with_311.py"
-          elif [ -f "./scripts/enrich_with_311.py" ]; then
-            PYFILE="./scripts/enrich_with_311.py"
+          if [ -f "./update_311_daily.py" ]; then
+            PYFILE="./update_311_daily.py"
+          elif [ -f "./scripts/update_311_daily.py" ]; then
+            PYFILE="./scripts/update_311_daily.py"
           else
-            echo "❌ enrich_with_311.py bulunamadı. Repo kökünü listeliyorum:"
+            echo "❌ update_311_daily.py bulunamadı. Repo kökünü listeliyorum:"
             ls -la .
             echo "📁 scripts/ dizini:"
             ls -la ./scripts || true
