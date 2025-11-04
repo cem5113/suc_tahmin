@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # update_crime_daily.py — Event-level → (1) events_daily  (2) GEOID×date grid_daily
-# REVIZE: artifact ZIP açma + aday yol keşfi + "en güncel dosyayı seç" + tazelik logu
+# REVIZE: artifact ZIP açma + aday yol keşfi + "en güncel dosyayı seç" + tazelik logu + event_hour/hr_key üretimi
 
 from __future__ import annotations
 import os, zipfile
@@ -128,6 +128,39 @@ def _ensure_date(df: pd.DataFrame, dt_col_hint: str) -> pd.Series:
         dt = pd.to_datetime(df[use], errors="coerce", utc=True)
     return dt.dt.date
 
+def _ensure_event_hour_and_hrkey(df: pd.DataFrame, dt_col_hint: str) -> pd.DataFrame:
+    """
+    event_hour: 0–23  (UTC bazlı parse; saat dilimi normalize edilmek istenirse burada ayarlanabilir)
+    hr_key    : 0,3,6,...,21 (3 saatlik aralık başlangıcı)
+    """
+    use = _detect_dt_col(df, dt_col_hint)
+    hr = None
+    if use == "incident_date+incident_time":
+        dt = pd.to_datetime(
+            df["incident_date"].astype(str).str.strip() + " " +
+            df["incident_time"].astype(str).str.strip(),
+            errors="coerce", utc=True
+        )
+        hr = dt.dt.hour
+    elif use is not None:
+        dt = pd.to_datetime(df[use], errors="coerce", utc=True)
+        hr = dt.dt.hour
+    elif "date" in df.columns:
+        # sadece tarih varsa saat türetilemez; None kalsın
+        hr = None
+
+    if hr is not None:
+        df["event_hour"] = pd.to_numeric(hr, errors="coerce").fillna(0).astype("int16")
+        df["hr_key"]     = ((df["event_hour"] // 3) * 3).astype("int16")
+    else:
+        # Kolon yoksa, merge tarafı takvim-bazlı (varsayılan hr_key=0) join'e düşebilir
+        if "event_hour" not in df.columns:
+            df["event_hour"] = pd.Series([np.nan]*len(df), dtype="float32")
+        if "hr_key" not in df.columns:
+            df["hr_key"] = pd.Series([np.nan]*len(df), dtype="float32")
+
+    return df
+
 # ---- Aday yol üretimi (artifact → BASE_DIR → yerel) + en güncel dosyayı seç
 def _build_event_candidates() -> list[Path]:
     return [
@@ -159,7 +192,7 @@ def _pick_latest(paths: list[Path]) -> Path | None:
 def _max_event_date(df: pd.DataFrame) -> date | None:
     dc = _detect_dt_col(df, DATE_COL)
     col = "date" if "date" in df.columns else dc
-    if col is None: 
+    if col is None:
         return None
     try:
         if col == "incident_date+incident_time":
@@ -210,7 +243,7 @@ def main() -> int:
         return 1
 
     # 3) Tazelik kontrolü (İstanbul günü)
-    today_tr = datetime.now().date()  # Avrupa/İstanbul makine TZ ≈ runner UTC; yine de tarihe bakıyoruz
+    today_tr = datetime.now().date()
     dmax = _max_event_date(ev)
     print(f"📆 Maks olay tarihi: {dmax}")
     if dmax and dmax < today_tr - timedelta(days=1):
@@ -236,6 +269,9 @@ def main() -> int:
 
     df = ev.copy()
     df["date"] = ev_date
+
+    # event_hour + hr_key üret (911 adımı için önemli)
+    df = _ensure_event_hour_and_hrkey(df, DATE_COL)
 
     # id yoksa yarat
     if ID_COL not in df.columns:
