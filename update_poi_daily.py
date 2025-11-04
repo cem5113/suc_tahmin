@@ -1,76 +1,129 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# update_poi_daily.py — GEOID-ONLY POI ENRICH (no date dependency)
-# IN : daily_crime_05.csv
-# OUT: daily_crime_06.csv
+"""
+enrich_with_poi_daily.py
+- POI (OSM) → GEOID eşle (blocks geojson ile), türleri çıkar, dinamik risk sözlüğü üret (opsiyonel),
+  GEOID seviyesinde özet + 300/600/900m buffer sayıları / risk toplamları üret.
+- Sonra bunları hem GRID (GEOID×date) hem de EVENTS (olay satırları) dosyalarına merge eder.
+- Günlük akış: saatlik YOK. POI özellikleri GEOID seviyesinde sabit → tüm günlere/olaylara aynen taşınır.
+
+ENV (varsayılanlar):
+  CRIME_DATA_DIR         (crime_prediction_data)
+
+  FR_GRID_DAILY_IN       (fr_crime_grid_daily.csv)
+  FR_GRID_DAILY_OUT      (fr_crime_grid_daily.csv)
+
+  FR_EVENTS_DAILY_IN     (fr_crime_events_daily.csv)
+  FR_EVENTS_DAILY_OUT    (fr_crime_events_daily.csv)
+
+  # POI & Blocks kaynakları (en az biri bulunmalı; ilk bulunan kullanılır)
+  POI_GEOJSON            (sf_pois.geojson)
+  BLOCKS_GEOJSON         (sf_census_blocks_with_population.geojson)
+  POI_CLEAN_CSV          (sf_pois_cleaned_with_geoid.csv)   # varsa direkt kullanılır/yeniden yazılabilir
+  POI_RISK_JSON          (risky_pois_dynamic.json)          # dinamik risk sözlüğü (opsiyonel üretim)
+
+  # Artifacts (varsa)
+  ARTIFACT_ZIP           (artifact/sf-crime-pipeline-output.zip)
+  ARTIFACT_DIR           (artifact_unzipped)
+"""
 
 from __future__ import annotations
-import os, ast, json
+import os, json, ast, zipfile
 from pathlib import Path
 from collections import defaultdict, Counter
-from typing import Dict, Tuple, List
 
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-
-# BallTree isteğe bağlı (dinamik risk için). Yoksa güvenli fallback.
-try:
-    from sklearn.neighbors import BallTree
-    _BALLTREE_OK = True
-except Exception:
-    BallTree = None
-    _BALLTREE_OK = False
+from sklearn.neighbors import BallTree
 
 pd.options.mode.copy_on_write = True
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# ============================== Utils ==============================
 def log(msg: str): print(msg, flush=True)
-def ensure_parent(path: str): Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-def safe_save_csv(df: pd.DataFrame, path: str):
-    ensure_parent(path)
-    tmp = path + ".tmp"
+def _digits_only(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.extract(r"(\d+)", expand=False).fillna("")
+
+def _geoid11(s: pd.Series) -> pd.Series:
+    return _digits_only(s).str.replace(" ", "", regex=False).str.zfill(11).str[:11]
+
+def _read_csv(p: Path) -> pd.DataFrame:
+    if not p.exists():
+        log(f"ℹ️ Dosya yok: {p}")
+        return pd.DataFrame()
+    df = pd.read_csv(p, low_memory=False)
+    log(f"📖 Okundu: {p}  ({len(df):,}×{df.shape[1]})")
+    return df
+
+def _safe_write_csv(df: pd.DataFrame, p: Path):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # hafif downcast
+    for c in df.select_dtypes(include=["float64"]).columns:
+        df[c] = pd.to_numeric(df[c], downcast="float")
+    for c in df.select_dtypes(include=["int64","Int64"]).columns:
+        df[c] = pd.to_numeric(df[c], downcast="integer")
+    tmp = p.with_suffix(p.suffix + ".tmp")
     df.to_csv(tmp, index=False)
-    os.replace(tmp, path)
-    log(f"💾 Kaydedildi: {path} (satır={len(df):,}, sütun={df.shape[1]})")
+    tmp.replace(p)
+    log(f"💾 Yazıldı: {p}  ({len(df):,}×{df.shape[1]})")
 
-def normalize_geoid(s: pd.Series, L: int = 11) -> pd.Series:
-    x = s.astype(str).str.extract(r"(\d+)", expand=False)
-    return x.str[:L].str.zfill(L)
-
-def read_geojson_robust(path: str) -> gpd.GeoDataFrame:
-    p = Path(path)
-    if not p.exists() or not p.is_file():
-        raise FileNotFoundError(f"GeoJSON yok: {p}")
-    try:
-        gdf = gpd.read_file(p)
-    except Exception as e:
-        txt = p.read_text(encoding="utf-8", errors="ignore").strip()
-        gj = None
-        try:
-            if "\n" in txt and txt.splitlines()[0].strip().startswith("{") and '"features"' not in txt:
-                feats = [json.loads(line) for line in txt.splitlines() if line.strip()]
-                gj = {"type":"FeatureCollection","features":feats}
-            else:
-                gj = json.loads(txt)
-        except Exception as e2:
-            raise ValueError(f"GeoJSON parse edilemedi: {e2}") from e
-        if not isinstance(gj, dict) or "features" not in gj:
-            raise ValueError("FeatureCollection bekleniyordu.")
-        gdf = gpd.GeoDataFrame.from_features(gj["features"], crs="EPSG:4326")
-    # CRS normalize
-    if gdf.crs is None:
-        gdf = gdf.set_crs("EPSG:4326")
+def _ensure_date(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
     else:
-        try:
-            if gdf.crs.to_epsg() != 4326:
-                gdf = gdf.to_crs(4326)
-        except Exception:
-            gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+        for c in ("event_date","dt","day","incident_datetime","datetime","timestamp","created_datetime"):
+            if c in out.columns:
+                out["date"] = pd.to_datetime(out[c], errors="coerce").dt.date
+                break
+    return out
+
+def safe_unzip(zip_path: Path, dest_dir: Path):
+    if not zip_path.exists(): return
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    log(f"📦 ZIP açılıyor: {zip_path} → {dest_dir}")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for m in zf.infolist():
+            out = dest_dir / m.filename
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if m.is_dir():
+                out.mkdir(parents=True, exist_ok=True); continue
+            with zf.open(m, "r") as src, open(out, "wb") as dst:
+                dst.write(src.read())
+    log("✅ ZIP çıkarma tamam.")
+
+# ============================== Config ==============================
+BASE_DIR     = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
+ARTIFACT_ZIP = Path(os.getenv("ARTIFACT_ZIP", "artifact/sf-crime-pipeline-output.zip"))
+ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifact_unzipped"))
+
+GRID_IN   = Path(os.getenv("FR_GRID_DAILY_IN",  "fr_crime_grid_daily.csv"))
+GRID_OUT  = Path(os.getenv("FR_GRID_DAILY_OUT", "fr_crime_grid_daily.csv"))
+EV_IN     = Path(os.getenv("FR_EVENTS_DAILY_IN","fr_crime_events_daily.csv"))
+EV_OUT    = Path(os.getenv("FR_EVENTS_DAILY_OUT","fr_crime_events_daily.csv"))
+
+POI_GEOJSON  = os.getenv("POI_GEOJSON",  "sf_pois.geojson")
+BLOCKS_GJSON = os.getenv("BLOCKS_GEOJSON","sf_census_blocks_with_population.geojson")
+POI_CLEAN_CSV= os.getenv("POI_CLEAN_CSV","sf_pois_cleaned_with_geoid.csv")
+POI_RISK_JSON= os.getenv("POI_RISK_JSON","risky_pois_dynamic.json")
+
+POI_PATHS   = [ARTIFACT_DIR / POI_GEOJSON, BASE_DIR / POI_GEOJSON, Path(POI_GEOJSON)]
+BLOCKS_PATHS= [ARTIFACT_DIR / BLOCKS_GJSON, BASE_DIR / BLOCKS_GJSON, Path(BLOCKS_GJSON)]
+POI_CLEAN_PATHS = [BASE_DIR / POI_CLEAN_CSV, ARTIFACT_DIR / POI_CLEAN_CSV, Path(POI_CLEAN_CSV)]
+
+# ============================== Geo helpers ==============================
+def _ensure_crs(gdf, target="EPSG:4326"):
+    if gdf.crs is None:
+        return gdf.set_crs(target, allow_override=True)
+    s = (gdf.crs.to_string() if hasattr(gdf.crs, "to_string") else str(gdf.crs)).upper()
+    if s.endswith("CRS84"):  # CRS84 == 4326
+        return gdf.set_crs("EPSG:4326", allow_override=True)
+    if s != target:
+        return gdf.to_crs(target)
     return gdf
 
-def parse_tags(val):
+def _parse_tags(val):
     if isinstance(val, dict): return val
     if isinstance(val, str):
         for loader in (json.loads, ast.literal_eval):
@@ -80,255 +133,274 @@ def parse_tags(val):
                 pass
     return {}
 
-def extract_cat_sub_name(tags: dict) -> Tuple[str|None, str|None, str|None]:
+def _extract_cat_sub_name(tags: dict):
     name = tags.get("name")
-    for key in ("amenity","shop","leisure"):
+    for key in ("amenity", "shop", "leisure"):
         if key in tags and tags[key]:
             return key, tags[key], name
     return None, None, name
 
-def make_labels(series: pd.Series, q=5):
-    vals = pd.to_numeric(series, errors="coerce").dropna().values
-    if vals.size == 0:
-        def lab(_): return "Q1 (0-0)"
-        return lab
-    qs = np.quantile(vals, [i/q for i in range(q+1)])
-    def lab(x):
-        if pd.isna(x): return f"Q1 ({qs[0]:.1f}-{qs[1]:.1f})"
-        for i in range(q):
-            if x <= qs[i+1]:
-                return f"Q{i+1} ({qs[i]:.1f}-{qs[i+1]:.1f})"
-        return f"Q{q} ({qs[-2]:.1f}-{qs[-1]:.1f})"
-    return lab
+def _read_geojson(path: Path) -> gpd.GeoDataFrame:
+    gdf = gpd.read_file(path)
+    return _ensure_crs(gdf, "EPSG:4326")
 
-# ── config (no network) ─────────────────────────────────────────────────────
-BASE_DIR   = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")); BASE_DIR.mkdir(parents=True, exist_ok=True)
-DAILY_IN   = Path(os.getenv("DAILY_IN",  str(BASE_DIR / "daily_crime_05.csv")))
-DAILY_OUT  = Path(os.getenv("DAILY_OUT", str(BASE_DIR / "daily_crime_06.csv")))
+# ============================== POI clean + GEOID ==============================
+def load_or_build_poi_clean(blocks: gpd.GeoDataFrame, poi_path: Path, poi_clean_candidates: list[Path]) -> pd.DataFrame:
+    # 1) varsa temiz CSV’yi kullan
+    for p in poi_clean_candidates:
+        if p.exists():
+            log(f"ℹ️ Var olan temiz POI CSV kullanılacak: {p}")
+            df = pd.read_csv(p, low_memory=False)
+            # normalize
+            if "lat" not in df.columns and "latitude" in df.columns:
+                df["lat"] = pd.to_numeric(df["latitude"], errors="coerce")
+            if "lon" not in df.columns and "longitude" in df.columns:
+                df["lon"] = pd.to_numeric(df["longitude"], errors="coerce")
+            if "poi_subcategory" not in df.columns:
+                df["poi_subcategory"] = df.get("poi_category", "Unknown").astype(str)
+            df["GEOID"] = _geoid11(df.get("GEOID"))
+            return df
+    # 2) yoksa geojson’dan üret
+    log(f"📍 POI temizleniyor ve GEOID eşleniyor: {poi_path}")
+    gdf = _read_geojson(poi_path)
+    if "tags" not in gdf.columns:
+        gdf["tags"] = [{}]*len(gdf)
+    gdf["tags"] = gdf["tags"].apply(_parse_tags)
+    triples = gdf["tags"].apply(_extract_cat_sub_name)
+    gdf[["poi_category","poi_subcategory","poi_name"]] = pd.DataFrame(triples.tolist(), index=gdf.index)
 
-# POI kaynakları (önce temiz CSV; yoksa yereldeki GeoJSON’dan üret)
-POI_CLEAN_CSV = Path(os.getenv("POI_CLEAN_CSV", str(BASE_DIR / "sf_pois_cleaned_with_geoid.csv")))
-POI_RISK_JSON = Path(os.getenv("POI_RISK_JSON", str(BASE_DIR / "risky_pois_dynamic.json")))
-POI_GEOJSON   = Path(os.getenv("POI_GEOJSON",   str(BASE_DIR / "sf_pois.geojson")))
-
-# Blok sınırları (GEOID üretimi için)
-BLOCKS_GEOJSON = Path(os.getenv("SF_BLOCKS_GEOJSON", str(BASE_DIR / "sf_census_blocks_with_population.geojson")))
-
-# "en çok görülen" alt-kategori kolon sayısı (şişmeyi önleme)
-TOP_SUBCATS = int(os.getenv("POI_TOP_SUBCATS", "20"))
-
-# ── 1) crime oku ────────────────────────────────────────────────────────────
-if not (DAILY_IN.exists() and DAILY_IN.is_file()):
-    raise FileNotFoundError(f"❌ Girdi yok: {DAILY_IN}")
-crime = pd.read_csv(DAILY_IN, low_memory=False)
-if "GEOID" not in crime.columns:
-    raise KeyError("❌ daily_crime_05.csv içinde 'GEOID' yok.")
-crime["GEOID"] = normalize_geoid(crime["GEOID"], 11)
-crime_geoids = pd.Series(crime["GEOID"].unique(), name="GEOID")
-log(f"📥 daily_crime_05.csv — satır={len(crime):,}, uniq GEOID={crime_geoids.nunique():,}")
-
-# ── 2) POI clean hazır mı? değilse üret ─────────────────────────────────────
-def build_poi_clean(blocks_path: Path, poi_path: Path) -> pd.DataFrame:
-    if not (poi_path.exists() and poi_path.is_file()):
-        raise FileNotFoundError("❌ POI temiz CSV yok ve sf_pois.geojson da bulunamadı.")
-    if not (blocks_path.exists() and blocks_path.is_file()):
-        raise FileNotFoundError("❌ Blok GeoJSON yok; POI→GEOID eşleme yapılamaz.")
-
-    gdf = read_geojson_robust(str(poi_path))
     if "geometry" not in gdf.columns:
         if {"lon","lat"}.issubset(gdf.columns):
             gdf["geometry"] = gpd.points_from_xy(gdf["lon"], gdf["lat"])
-            gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs="EPSG:4326")
         else:
-            raise ValueError("POI verisi lon/lat veya geometry içermiyor.")
+            raise ValueError("GeoJSON 'geometry' veya 'lon/lat' içermiyor.")
+    gdf = _ensure_crs(gdf, "EPSG:4326")
+    gdf["lon"] = gdf.get("lon", pd.Series(index=gdf.index, dtype=float)).fillna(gdf.geometry.x)
+    gdf["lat"] = gdf.get("lat", pd.Series(index=gdf.index, dtype=float)).fillna(gdf.geometry.y)
 
-    if "tags" not in gdf.columns:
-        gdf["tags"] = [{}]*len(gdf)
-    gdf["tags"] = gdf["tags"].apply(parse_tags)
-    triples = gdf["tags"].apply(extract_cat_sub_name)
-    gdf[["poi_category","poi_subcategory","poi_name"]] = pd.DataFrame(triples.tolist(), index=gdf.index)
-
-    blocks = read_geojson_robust(str(blocks_path))
-    gcol = "GEOID" if "GEOID" in blocks.columns else next((c for c in blocks.columns if str(c).upper().startswith("GEOID")), None)
-    if not gcol: raise KeyError("Block GeoJSON içinde GEOID yok.")
-    blocks["GEOID"] = normalize_geoid(blocks[gcol], 11)
-
-    try:
-        joined = gpd.sjoin(gdf.to_crs(4326), blocks[["GEOID","geometry"]], how="left", predicate="within")
-    except Exception:
-        # Shapely STRtree fallback
-        from shapely.strtree import STRtree
-        tree = STRtree(list(blocks.geometry.values))
-        idx_to_geoid = {id(g): ge for g, ge in zip(blocks.geometry.values, blocks["GEOID"])}
-        gl = []
-        for pt in gdf.geometry.values:
-            hits = tree.query(pt, predicate="contains")
-            gl.append(idx_to_geoid[id(hits[0])] if hits else None)
-        joined = gdf.copy()
-        joined["GEOID"] = gl
-
-    df = pd.DataFrame(joined.drop(columns=["geometry"], errors="ignore"))
+    # spatial join
+    joined = gpd.sjoin(gdf, blocks[["GEOID","geometry"]], how="left", predicate="within")
+    keep = [c for c in ["id","lat","lon","poi_category","poi_subcategory","poi_name","GEOID"] if c in joined.columns]
+    df = joined[keep].copy()
     if "id" not in df.columns:
         df["id"] = np.arange(len(df))
-    # koordinat kolonlarını normalize et
-    if "lat" not in df.columns and "latitude" in df.columns:
-        df["lat"] = pd.to_numeric(df["latitude"], errors="coerce")
-    if "lon" not in df.columns and "longitude" in df.columns:
-        df["lon"] = pd.to_numeric(df["longitude"], errors="coerce")
-    df["GEOID"] = normalize_geoid(df["GEOID"], 11)
+    df = df.dropna(subset=["lat","lon"])
+    df["GEOID"] = _geoid11(df["GEOID"])
 
-    keep = [c for c in ["id","lat","lon","latitude","longitude","poi_category","poi_subcategory","poi_name","GEOID"] if c in df.columns]
-    df = df[keep].copy()
-    safe_save_csv(df, str(POI_CLEAN_CSV))
+    # kaydet
+    outp = next((BASE_DIR / POI_CLEAN_CSV,),)
+    outp.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(outp, index=False)
+    log(f"✅ POI clean kaydedildi: {outp}  (satır={len(df):,})")
     return df
 
-if POI_CLEAN_CSV.exists() and POI_CLEAN_CSV.is_file():
-    poi = pd.read_csv(POI_CLEAN_CSV, low_memory=False)
-    # normalize columns
-    if "lat" not in poi.columns and "latitude" in poi.columns:
-        poi["lat"] = pd.to_numeric(poi["latitude"], errors="coerce")
-    if "lon" not in poi.columns and "longitude" in poi.columns:
-        poi["lon"] = pd.to_numeric(poi["longitude"], errors="coerce")
-    poi["GEOID"] = normalize_geoid(poi.get("GEOID"), 11)
-    log(f"ℹ️ Var olan POI clean kullanılacak: {POI_CLEAN_CSV} (satır={len(poi):,})")
-else:
-    poi = build_poi_clean(BLOCKS_GEOJSON, POI_GEOJSON)
-    log(f"🧹 POI clean üretildi: {len(poi):,} satır")
-
-# ── 3) Dinamik risk sözlüğü (opsiyonel) ─────────────────────────────────────
-def compute_dynamic_poi_risk(df_crime: pd.DataFrame, df_poi: pd.DataFrame, radius_m=300) -> Dict[str, float]:
-    """POI alt-kategorisi etrafındaki (radius_m) suç yoğunluğuna göre 0–3 ölçeğinde skorlar."""
-    # POI koordinatları
-    dfp = df_poi.copy()
+# ============================== Dinamik risk (opsiyonel) ==============================
+def compute_dynamic_poi_risk(poi_df: pd.DataFrame, crime_points: pd.DataFrame, radius_m=300) -> dict:
+    """POI alt-kategorileri için yakınındaki suç sayısına göre (ortalama) skor = [0..3] ölçeğinde normalize."""
+    dfp = poi_df.copy()
     dfp["lat"] = pd.to_numeric(dfp.get("lat"), errors="coerce")
     dfp["lon"] = pd.to_numeric(dfp.get("lon"), errors="coerce")
     dfp = dfp.dropna(subset=["lat","lon"])
-    if dfp.empty: return {}
 
-    # Suç koordinatları (varsa)
-    dfc = df_crime.copy()
+    dfc = crime_points.copy()
     dfc["latitude"]  = pd.to_numeric(dfc.get("latitude"), errors="coerce")
     dfc["longitude"] = pd.to_numeric(dfc.get("longitude"), errors="coerce")
     dfc = dfc.dropna(subset=["latitude","longitude"])
-    if dfc.empty or not _BALLTREE_OK:
-        # Koordinat yoksa ya da BallTree yoksa fallback: alt-kategori frekansına dayalı normalize
-        cnt = dfp["poi_subcategory"].value_counts()
-        if cnt.empty: return {}
-        v = cnt.astype(float)
-        vmin, vmax = float(v.min()), float(v.max())
-        if vmax - vmin < 1e-9:
-            return {k: 1.5 for k in cnt.index}
-        return {k: round(3 * (x - vmin) / (vmax - vmin), 2) for k, x in v.items()}
 
-    # BallTree ile haversine arama
+    if dfc.empty or dfp.empty:
+        return {}
+
     crime_rad = np.radians(dfc[["latitude","longitude"]].values)
     poi_rad   = np.radians(dfp[["lat","lon"]].values)
     tree = BallTree(crime_rad, metric="haversine")
     r = radius_m / 6371000.0
 
-    agg = defaultdict(list)
-    for pt, t in zip(poi_rad, dfp["poi_subcategory"].fillna("")):
+    counts = []
+    for pt, t in zip(poi_rad, dfp["poi_subcategory"].fillna("").astype(str)):
         if not t: continue
         idx = tree.query_radius([pt], r=r)[0]
-        agg[t].append(len(idx))
+        counts.append((t, len(idx)))
 
-    if not agg: return {}
+    if not counts: return {}
+    agg = defaultdict(list)
+    for t, c in counts: agg[t].append(c)
     avg = {t: float(np.mean(v)) for t, v in agg.items()}
-    vals = list(avg.values()); vmin, vmax = min(vals), max(vals)
+
+    v = list(avg.values()); vmin, vmax = min(v), max(v)
     if vmax - vmin < 1e-9:
         return {t: 1.5 for t in avg}
     return {t: round(3 * (x - vmin) / (vmax - vmin), 2) for t, x in avg.items()}
 
-# risk sözlüğü oku/üret
-if POI_RISK_JSON.exists() and POI_RISK_JSON.is_file():
-    try:
-        poi_risk: Dict[str,float] = json.loads(POI_RISK_JSON.read_text())
-        if not isinstance(poi_risk, dict):
-            poi_risk = {}
-    except Exception:
-        poi_risk = {}
-else:
-    poi_risk = {}
+# ============================== GEOID-level + buffer ==============================
+def geoid_poi_features(blocks: gpd.GeoDataFrame, poi_df: pd.DataFrame, poi_risk: dict,
+                       radii=(300,600,900)) -> pd.DataFrame:
+    # GEOID centroidleri
+    bl = blocks.copy()
+    bl["GEOID"] = _geoid11(bl["GEOID"])
+    centroids = bl.dissolve(by="GEOID", as_index=False, dropna=False)["geometry"].centroid
+    cent = gpd.GeoDataFrame({"GEOID": bl.dissolve(by="GEOID", as_index=False)["GEOID"]},
+                             geometry=centroids, crs="EPSG:4326")
+    cent["cent_lat"] = cent.geometry.y
+    cent["cent_lon"] = cent.geometry.x
 
-if not poi_risk:
-    log("ℹ️ POI risk sözlüğü yok → dinamik hesaplanıyor (radius=300m).")
-    try:
-        poi_risk = compute_dynamic_poi_risk(crime, poi, radius_m=int(os.getenv("POI_RISK_RADIUS_M", "300")))
-    except Exception as e:
-        log(f"⚠️ Dinamik risk hesaplanamadı: {e} — frekans tabanlı fallback kullanılacak.")
-        cnt = poi["poi_subcategory"].value_counts()
-        if not cnt.empty:
-            v = cnt.astype(float); vmin, vmax = float(v.min()), float(v.max())
-            poi_risk = {k: (1.5 if vmax - vmin < 1e-9 else round(3 * (x - vmin) / (vmax - vmin), 2))
-                        for k, x in v.items()}
+    dfp = poi_df.copy()
+    dfp["GEOID"] = _geoid11(dfp["GEOID"])
+    dfp["lat"] = pd.to_numeric(dfp["lat"], errors="coerce")
+    dfp["lon"] = pd.to_numeric(dfp["lon"], errors="coerce")
+    dfp = dfp.dropna(subset=["lat","lon"])
+
+    # risk sütunu
+    dfp["__risk__"] = dfp["poi_subcategory"].astype(str).map(poi_risk).fillna(0.0)
+
+    # dominant type
+    def _mode(arr):
+        arr = [a for a in arr if pd.notna(a) and a != ""]
+        if not arr: return "No_POI"
+        return Counter(arr).most_common(1)[0][0]
+
+    grp = dfp.groupby("GEOID", dropna=False)
+    base = pd.DataFrame({
+        "GEOID": grp.size().index,
+        "poi_total_count": grp.size().values,
+        "poi_risk_score": grp["__risk__"].sum().values,
+        "poi_dominant_type": grp["poi_subcategory"].agg(_mode).values
+    })
+
+    # range etiketleri (quantile)
+    def _mklabel(series, bins=5):
+        vals = pd.to_numeric(series, errors="coerce").dropna().values
+        if vals.size == 0:
+            qs = [0,0]
         else:
-            poi_risk = {}
+            qs = np.quantile(vals, [0, 1/bins])
+        return lambda x: f"Q1 ({qs[0]:.1f}-{qs[1]:.1f})" if pd.isna(x) else None
+    # (basit: range kolonları doldurulacak)
+    base["poi_total_count_range"] = pd.cut(base["poi_total_count"],
+                                           bins=5, labels=[f"Q{i}" for i in range(1,6)], duplicates="drop")
+    base["poi_risk_score_range"] = pd.cut(base["poi_risk_score"],
+                                          bins=5, labels=[f"Q{i}" for i in range(1,6)], duplicates="drop")
 
-# ── 4) GEOID düzeyinde POI özetleri ────────────────────────────────────────
-poi["poi_subcategory"] = poi["poi_subcategory"].fillna("unknown")
-poi["GEOID"] = normalize_geoid(poi.get("GEOID"), 11)
+    # buffer (BallTree haversine)
+    poi_rad  = np.radians(dfp[["lat","lon"]].values)
+    cent_rad = np.radians(cent[["cent_lat","cent_lon"]].values)
+    tree = BallTree(poi_rad, metric="haversine")
+    poi_risk_vec = dfp["__risk__"].to_numpy()
 
-# en sık TOP_SUBCATS alt-kategori + "other"
-sub_counts = poi["poi_subcategory"].value_counts()
-top_subs = list(sub_counts.head(max(1, TOP_SUBCATS)).index)
+    buf = cent[["GEOID"]].copy()
+    for r_m in radii:
+        idxs = tree.query_radius(cent_rad, r=r_m/6371000.0, count_only=False)
+        buf[f"poi_count_{r_m}m"] = np.array([len(ix) for ix in idxs], dtype=int)
+        buf[f"poi_risk_{r_m}m"]  = np.array([poi_risk_vec[ix].sum() if len(ix) else 0.0 for ix in idxs], dtype=float)
 
-poi["__sub_keep__"] = poi["poi_subcategory"].where(poi["poi_subcategory"].isin(top_subs), other="__other__")
+    out = cent[["GEOID"]].merge(base, on="GEOID", how="left").merge(buf, on="GEOID", how="left")
+    # fillna
+    fills = {"poi_total_count":0, "poi_risk_score":0.0, "poi_dominant_type":"No_POI"}
+    for c in out.columns:
+        if c.startswith("poi_count_"): fills[c] = 0
+        if c.startswith("poi_risk_"):  fills[c] = 0.0
+    out = out.fillna(fills)
+    # tipler
+    for c in [x for x in out.columns if x.startswith("poi_count_")]:
+        out[c] = pd.to_numeric(out[c], downcast="integer")
+    for c in [x for x in out.columns if x.startswith("poi_risk_") or x in ("poi_risk_score",)]:
+        out[c] = pd.to_numeric(out[c], downcast="float")
+    return out
 
-# toplam ve ağırlıklı risk
-poi["__risk_w__"] = poi["poi_subcategory"].map(poi_risk).fillna(1.0)
+# ============================== Enrich (GRID / EVENTS) ==============================
+def enrich_df_with_poi(df: pd.DataFrame, geoid_poi: pd.DataFrame, is_grid: bool) -> pd.DataFrame:
+    if df.empty: return df
+    out = df.copy()
+    # date normalizasyonu (görünürlük; içerik sabit)
+    if is_grid:
+        out = _ensure_date(out)
+    # GEOID tek ve 11 hane
+    if "GEOID" not in out.columns:
+        # başka bir geoid kolonu varsa al
+        cand = [c for c in out.columns if "geoid" in c.lower()]
+        if not cand: raise RuntimeError("Hedef tabloda GEOID kolonu yok.")
+        out.insert(0, "GEOID", _geoid11(out[cand[0]]).astype("string"))
+        out.drop(columns=[c for c in cand if c != "GEOID"], inplace=True, errors="ignore")
+    else:
+        out["GEOID"] = _geoid11(out["GEOID"]).astype("string")
 
-# GEOID × alt_kategori sayıları (yalnızca top + other)
-wide = (poi
-        .groupby(["GEOID","__sub_keep__"], as_index=False)
-        .size()
-        .pivot_table(index="GEOID", columns="__sub_keep__", values="size", fill_value=0)
-        .rename_axis(None, axis=1))
+    # çakışmaları temizle (aynı isimli eski POI kolonu varsa)
+    drop_cols = ["poi_total_count","poi_risk_score","poi_dominant_type",
+                 "poi_total_count_range","poi_risk_score_range"]
+    drop_cols += [c for c in out.columns if c.startswith("poi_count_") or c.startswith("poi_risk_")]
+    out.drop(columns=[c for c in drop_cols if c in out.columns], inplace=True, errors="ignore")
 
-# kolon adları temizle
-wide = wide.rename(columns={"__other__": "poi_other"})
+    out = out.merge(geoid_poi, on="GEOID", how="left", validate="many_to_one")
+    return out
 
-# toplam adet
-wide["poi_total_count"] = wide.sum(axis=1)
+# ============================== Run ==============================
+def main() -> int:
+    # 0) artifact varsa aç
+    safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
 
-# risk skoru (tüm alt-kategorilerle, yalnızca top değil)
-risk_geo = (poi.groupby(["GEOID","poi_subcategory"], as_index=False)
-               .size()
-               .rename(columns={"size":"cnt"}))
-risk_geo["w"] = risk_geo["poi_subcategory"].map(poi_risk).fillna(1.0)
-risk_geo["w_cnt"] = risk_geo["cnt"] * risk_geo["w"]
-poi_risk_geo = (risk_geo.groupby("GEOID", as_index=False)["w_cnt"].sum()
-                        .rename(columns={"w_cnt":"poi_risk_score"}))
+    # 1) kaynakları oku
+    grid = _read_csv(BASE_DIR / GRID_IN) if not GRID_IN.is_absolute() else _read_csv(GRID_IN)
+    ev   = _read_csv(BASE_DIR / EV_IN)   if not EV_IN.is_absolute()  else _read_csv(EV_IN)
 
-# birleştir
-poi_feat = wide.reset_index().merge(poi_risk_geo, on="GEOID", how="left")
-poi_feat["poi_risk_score"] = pd.to_numeric(poi_feat["poi_risk_score"], errors="coerce").fillna(0.0)
+    poi_path   = next((p for p in POI_PATHS if Path(p).exists()), None)
+    blocks_path= next((p for p in BLOCKS_PATHS if Path(p).exists()), None)
+    if not poi_path:   raise FileNotFoundError(f"❌ POI GeoJSON yok: {POI_GEOJSON} (artifact/BASE/local)")
+    if not blocks_path:raise FileNotFoundError(f"❌ Blocks GeoJSON yok: {BLOCKS_GJSON} (artifact/BASE/local)")
 
-# kantil etiketleri
-lab_cnt  = make_labels(poi_feat["poi_total_count"], q=5)
-lab_risk = make_labels(poi_feat["poi_risk_score"], q=5)
-poi_feat["poi_total_count_range"] = poi_feat["poi_total_count"].apply(lab_cnt)
-poi_feat["poi_risk_score_range"]  = poi_feat["poi_risk_score"].apply(lab_risk)
+    blocks = _read_geojson(Path(blocks_path))
+    if "GEOID" not in blocks.columns: raise ValueError("Blocks içinde GEOID yok.")
+    blocks["GEOID"] = _geoid11(blocks["GEOID"])
 
-# GEOID temizle/tekilleştir
-poi_feat["GEOID"] = normalize_geoid(poi_feat["GEOID"], 11)
-poi_feat = poi_feat.sort_values("GEOID").drop_duplicates("GEOID", keep="first")
+    # 2) POI clean yükle/üret
+    poi_clean = load_or_build_poi_clean(blocks, Path(poi_path), [BASE_DIR / POI_CLEAN_CSV, ARTIFACT_DIR / POI_CLEAN_CSV])
 
-# ── 5) CRIME ile merge ─────────────────────────────────────────────────────
-before = crime.shape
-out = crime.merge(poi_feat, on="GEOID", how="left", validate="many_to_one")
+    # 3) Dinamik POI risk sözlüğü (opsiyonel; EVENTS’te koordinat varsa daha iyi)
+    #    Yoksa boş sözlük → riskler 0 olur.
+    crime_points = ev if not ev.empty else grid
+    try:
+        risk_dict = compute_dynamic_poi_risk(poi_clean, crime_points, radius_m=300)
+    except Exception:
+        risk_dict = {}
 
-# boşları doldur
-num_cols = ["poi_total_count","poi_risk_score"]
-num_cols += [c for c in poi_feat.columns if c.startswith("poi_") and c.endswith(tuple(top_subs + ["other"])) and c not in num_cols]
-for c in num_cols:
-    if c in out.columns:
-        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+    # cachele
+    try:
+        (BASE_DIR / POI_RISK_JSON).parent.mkdir(parents=True, exist_ok=True)
+        with open(BASE_DIR / POI_RISK_JSON, "w") as f: json.dump(risk_dict, f, indent=2)
+        log(f"🧾 Risk sözlüğü yazıldı: {BASE_DIR / POI_RISK_JSON}  (count={len(risk_dict)})")
+    except Exception:
+        pass
 
-log(f"🔗 CRIME ⨯ POI: {before} → {out.shape} (BallTree={'ok' if _BALLTREE_OK else 'yok'})")
+    # 4) GEOID-level + buffer
+    geoid_poi = geoid_poi_features(blocks, poi_clean, risk_dict, radii=(300,600,900))
 
-# ── 6) yaz ─────────────────────────────────────────────────────────────────
-safe_save_csv(out, str(DAILY_OUT))
-try:
-    log(out.head(8).to_string(index=False))
-except Exception:
-    pass
+    # 5) Enrich & yaz
+    if not grid.empty:
+        grid2 = enrich_df_with_poi(grid, geoid_poi, is_grid=True)
+        _safe_write_csv(grid2, BASE_DIR / GRID_OUT if not GRID_OUT.is_absolute() else GRID_OUT)
+    else:
+        log("ℹ️ GRID boş/bulunamadı → atlandı.")
+
+    if not ev.empty:
+        ev2 = enrich_df_with_poi(ev, geoid_poi, is_grid=False)
+        _safe_write_csv(ev2, BASE_DIR / EV_OUT if not EV_OUT.is_absolute() else EV_OUT)
+    else:
+        log("ℹ️ EVENTS boş/bulunamadı → atlandı.")
+
+    # 6) kısa önizleme
+    try:
+        cols = ["GEOID","poi_total_count","poi_risk_score","poi_dominant_type",
+                "poi_count_300m","poi_count_600m","poi_count_900m",
+                "poi_risk_300m","poi_risk_600m","poi_risk_900m"]
+        if not grid.empty:
+            log("— GRID preview —")
+            log(grid2[[c for c in cols if c in grid2.columns]].head(10).to_string(index=False))
+        if not ev.empty:
+            log("— EVENTS preview —")
+            log(ev2[[c for c in cols if c in ev2.columns]].head(10).to_string(index=False))
+    except Exception:
+        pass
+
+    log("✅ enrich_with_poi_daily.py tamam.")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
