@@ -1,285 +1,270 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-make_neighbors_daily.py
-daily_crime_08.csv + neighbors.csv → daily_crime_09.csv
+enrich_with_neighbors_daily.py
+- neighbors.csv (GEOID komşuluk listesi) + günlük suç tabanı → komşu-suçu pencereleri.
+- GRID (GEOID×date) ve EVENTS (olay satırları) dosyalarına ekler.
+- Sızıntı yok: tüm pencereler shift(1) ile 'dün'e kadar.
 
-Üretir:
-- neighbor_crime_alltime          (zaman bağımsız toplam)
-- neighbor_crime_{1d,3d,7d,30d}   (rolling pencereler; varsayılan: 1D,3D,7D,30D)
+ENV (varsayılanlar):
+  CRIME_DATA_DIR          (crime_prediction_data)
+  NEIGH_FILE              (neighbors.csv)
 
-ENV:
-- CRIME_DATA_DIR  (default: crime_prediction_data)
-- NEIGH_FILE      (default: {CRIME_DATA_DIR}/neighbors.csv)
-- GEOID_LEN       (default: 11)
-- NEIGH_WINDOWS   (default: "1D,3D,7D,30D")
-- DATE_TZ         (default: "UTC")
+  FR_GRID_DAILY_IN        (fr_crime_grid_daily.csv)
+  FR_GRID_DAILY_OUT       (fr_crime_grid_daily.csv)   # üzerine yazar
+  FR_EVENTS_DAILY_IN      (fr_crime_events_daily.csv)
+  FR_EVENTS_DAILY_OUT     (fr_crime_events_daily.csv) # üzerine yazar
 """
+
 from __future__ import annotations
 import os
 from pathlib import Path
 import pandas as pd
 import numpy as np
 
-# ---------- I/O & ENV ----------
-CRIME_DIR     = Path(os.environ.get("CRIME_DATA_DIR", "crime_prediction_data"))
-SRC           = CRIME_DIR / "daily_crime_08.csv"
-DST           = CRIME_DIR / "daily_crime_09.csv"
-NEIGH_FILE    = Path(os.environ.get("NEIGH_FILE", str(CRIME_DIR / "neighbors.csv")))
-GEOID_LEN     = int(os.environ.get("GEOID_LEN", "11"))
-NEIGH_WINDOWS = os.environ.get("NEIGH_WINDOWS", "1D,3D,7D,30D")
-DATE_TZ       = os.environ.get("DATE_TZ", "UTC")
-
-DATE_CANDS  = ["date", "event_date", "dt", "datetime", "timestamp", "t0", "t"]
-COUNT_CANDS = ["crime_count", "count", "n"]
-LABEL_CANDS = ["Y_label", "label", "target"]
-
 pd.options.mode.copy_on_write = True
 
-# ---------- helpers ----------
-def _norm_geoid(s: pd.Series, L=GEOID_LEN) -> pd.Series:
+# ---------- utils ----------
+def log(m: str): print(m, flush=True)
+
+def _read_csv(p: Path) -> pd.DataFrame:
+    if not p.exists():
+        log(f"ℹ️ Yok: {p}"); return pd.DataFrame()
+    df = pd.read_csv(p, low_memory=False)
+    log(f"📖 Okundu: {p} ({len(df):,}×{df.shape[1]})")
+    return df
+
+def _safe_write_csv(df: pd.DataFrame, p: Path):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # küçük downcast
+    for c in df.select_dtypes(include=["float64"]).columns:
+        df[c] = pd.to_numeric(df[c], downcast="float")
+    for c in df.select_dtypes(include=["int64","Int64"]).columns:
+        df[c] = pd.to_numeric(df[c], downcast="integer")
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    df.to_csv(tmp, index=False)
+    tmp.replace(p)
+    log(f"💾 Yazıldı: {p} ({len(df):,}×{df.shape[1]})")
+
+def _norm_geoid(s: pd.Series, L: int = 11) -> pd.Series:
     return (
         s.astype(str)
          .str.extract(r"(\d+)", expand=False)
          .fillna("")
-         .str[:L]
-         .str.zfill(L)
+         .str[:L].str.zfill(L)
     )
 
-def _pick_col(cols, *cands):
-    low = {str(c).lower(): c for c in cols}
-    for cand in cands:
-        if cand.lower() in low:
-            return low[cand.lower()]
-    # gevşek (case-insensitive) zaten yukarıda
+def _mk_date(s: pd.Series) -> pd.Series:
+    return pd.to_datetime(s, errors="coerce").dt.date
+
+def _ensure_date_col(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    cand = None
+    for c in ["date", "incident_date", "incident_datetime", "datetime", "time", "timestamp"]:
+        if c in d.columns:
+            cand = c; break
+    if cand is None and {"year","month","day"}.issubset(d.columns):
+        d["date"] = pd.to_datetime(d[["year","month","day"]], errors="coerce").dt.date
+    elif cand is not None:
+        d["date"] = _mk_date(d[cand])
+    else:
+        d["date"] = pd.NaT
+    return d
+
+def _pick(cols, *cands):
+    low = {c.lower(): c for c in cols}
+    for k in cands:
+        if k.lower() in low: return low[k.lower()]
     return None
 
-def _detect_date_col(df: pd.DataFrame) -> str | None:
-    return _pick_col(df.columns, *DATE_CANDS)
+# ---------- config ----------
+BASE_DIR   = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
+NEIGH_FILE = Path(os.getenv("NEIGH_FILE", "neighbors.csv"))
 
-def _to_date_col(df: pd.DataFrame, dcol: str) -> pd.Series:
-    # aware/naive her iki olasılık için "gün" çıkarılır
-    try:
-        x = pd.to_datetime(df[dcol], errors="coerce", utc=True).dt.tz_convert(DATE_TZ).dt.date
-    except Exception:
-        x = pd.to_datetime(df[dcol], errors="coerce")
-        if getattr(x.dtype, "tz", None) is None:
-            x = x.dt.tz_localize("UTC")
-        x = x.dt.tz_convert(DATE_TZ).dt.date
-    return x.astype("string")
+GRID_IN  = Path(os.getenv("FR_GRID_DAILY_IN",  "fr_crime_grid_daily.csv"))
+GRID_OUT = Path(os.getenv("FR_GRID_DAILY_OUT", "fr_crime_grid_daily.csv"))
+EV_IN    = Path(os.getenv("FR_EVENTS_DAILY_IN","fr_crime_events_daily.csv"))
+EV_OUT   = Path(os.getenv("FR_EVENTS_DAILY_OUT","fr_crime_events_daily.csv"))
 
-def _parse_windows(s: str) -> list[tuple[str, int]]:
+# ---------- core ----------
+def build_daily_base(grid: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
     """
-    "1D,3D,7D,30D" → [("1d",1),("3d",3),("7d",7),("30d",30)]
-    (Gün bazlı tam sayı pencereler)
+    GEOID×date bazında günlük suç sayısı (base_cnt) üretir.
+    Öncelik: GRID'de 'crime_count' veya 'Y_day'/'Y_label' → sum.
+    Yoksa EVENTS'i GEOID×date gruplayıp count alınır.
     """
-    out = []
-    for tok in (s or "").split(","):
-        tok = tok.strip()
-        if not tok:
-            continue
-        if tok.lower().endswith("d"):
-            try:
-                k = int(tok[:-1])
-                if k >= 1:
-                    out.append((f"{k}d", k))
-            except Exception:
-                pass
-    # tekilleştir ve sırala
-    seen, uniq = set(), []
-    for name, k in out:
-        if k not in seen:
-            seen.add(k)
-            uniq.append((name, k))
-    uniq.sort(key=lambda t: t[1])
-    return uniq
+    # 1) GRID varsa ve en az bir hedef kolonu içeriyorsa onu kullan
+    if not grid.empty:
+        g = grid.copy()
+        g["GEOID"] = _norm_geoid(g["GEOID"]) if "GEOID" in g.columns else ""
+        g = _ensure_date_col(g)
+        base_cols = [c for c in ["crime_count","Y_day","Y_label"] if c in g.columns]
+        if base_cols:
+            # hepsini toplayıp günlük toplam yap (Y_day/Y_label da toplanır → o günkü olay adedi)
+            for c in base_cols:
+                g[c] = pd.to_numeric(g[c], errors="coerce").fillna(0).astype("int64")
+            g["__base__"] = g[base_cols].sum(axis=1)
+            # zaten GEOID×date tekil satırlar olabilir; yine de gruplayıp güvene alalım
+            gb = (g.groupby(["GEOID","date"], dropna=False)["__base__"]
+                    .sum().reset_index(name="base_cnt"))
+            return gb
 
-def _safe_save_csv(df: pd.DataFrame, path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp.csv")
-    df.to_csv(tmp, index=False)
-    tmp.replace(path)
+    # 2) Events'ten günlük üret
+    if not events.empty:
+        ev = events.copy()
+        if "GEOID" not in ev.columns:
+            raise RuntimeError("EVENTS içinde GEOID yok.")
+        ev["GEOID"] = _norm_geoid(ev["GEOID"])
+        ev = _ensure_date_col(ev)
+        ev = ev.dropna(subset=["date"])
+        # olay sayısı = satır sayısı (veya varsa 'crime_count' toplanır)
+        if "crime_count" in ev.columns:
+            ev["crime_count"] = pd.to_numeric(ev["crime_count"], errors="coerce").fillna(0).astype("int64")
+            gb = (ev.groupby(["GEOID","date"], dropna=False)["crime_count"]
+                    .sum().reset_index(name="base_cnt"))
+        else:
+            gb = (ev.groupby(["GEOID","date"], dropna=False)
+                    .size().reset_index(name="base_cnt"))
+        return gb
 
-# ---------- main ----------
-def main():
-    if not SRC.exists():
-        raise FileNotFoundError(f"❌ Girdi dosyası yok: {SRC}")
+    raise RuntimeError("GRID ve EVENTS boş; günlük taban oluşturulamadı.")
+
+def neighbor_daily_features(base: pd.DataFrame, neigh: pd.DataFrame) -> pd.DataFrame:
+    """
+    base: GEOID×date×base_cnt
+    neigh: geoid, neighbor
+    Adımlar:
+      - neighbors ⨯ base (neighbor→date→count)
+      - geoid×date toplamla → nb_cnt_day
+      - geoid bazında tarihe göre sırala, shift(1) ve rolling(3,7)
+    """
+    b = base.copy()
+    b["GEOID"] = _norm_geoid(b["GEOID"])
+    b["date"]  = _mk_date(b["date"])
+    b["base_cnt"] = pd.to_numeric(b["base_cnt"], errors="coerce").fillna(0).astype("int64")
+
+    # Tam tarih kapsaması: her GEOID için min→max arası tüm günler (eksikler 0)
+    # (rolling'in doğru çalışması için gerekli)
+    full = []
+    for g, gdf in b.groupby("GEOID", dropna=False):
+        gdf = gdf.sort_values("date")
+        rng = pd.date_range(gdf["date"].min(), gdf["date"].max(), freq="D").date
+        aux = pd.DataFrame({"GEOID": g, "date": rng})
+        aux = aux.merge(gdf[["date","base_cnt"]], on="date", how="left")
+        aux["base_cnt"] = aux["base_cnt"].fillna(0).astype("int64")
+        full.append(aux)
+    b2 = pd.concat(full, ignore_index=True)
+
+    # Komşuluk: geoid (src) → neighbor (dst)
+    nb = neigh.rename(columns={_pick(neigh.columns, "geoid","src","source"): "geoid",
+                               _pick(neigh.columns, "neighbor","dst","target"): "neighbor"}).copy()
+    nb["geoid"]    = _norm_geoid(nb["geoid"])
+    nb["neighbor"] = _norm_geoid(nb["neighbor"])
+    nb = nb.dropna()
+
+    # Komşu günlük sayıları (neighbor tarafını base ile eşle)
+    # nb (geoid, neighbor) ⨯ base (GEOID=neighbor, date, base_cnt) → geoid×date toplam
+    nb_merge = nb.merge(b2.rename(columns={"GEOID":"neighbor"}),
+                        on="neighbor", how="left")  # cols: geoid, neighbor, date, base_cnt
+    day_sum = (nb_merge.groupby(["geoid","date"], dropna=False)["base_cnt"]
+                        .sum().reset_index(name="neighbor_cnt_day"))
+
+    # Rolling pencereler: geoid bazında tarih sırasıyla, dün dahil
+    day_sum = day_sum.sort_values(["geoid","date"])
+    day_sum["nb_last1d"] = day_sum.groupby("geoid")["neighbor_cnt_day"].shift(1).fillna(0)
+    for W in (3,7):
+        day_sum[f"nb_last{W}d"] = (
+            day_sum.groupby("geoid")["neighbor_cnt_day"]
+                   .shift(1)  # dünü dahil et, bugünü hariç tut -> sızıntı yok
+                   .rolling(W, min_periods=1).sum()
+        ).fillna(0)
+
+    # İsimleri finalleştir
+    out = day_sum.rename(columns={
+        "geoid": "GEOID",
+        "nb_last1d": "neighbor_crime_1d",
+        "nb_last3d": "neighbor_crime_3d",
+        "nb_last7d": "neighbor_crime_7d",
+    })[["GEOID","date","neighbor_crime_1d","neighbor_crime_3d","neighbor_crime_7d"]]
+
+    # tip güvenliği
+    for c in ["neighbor_crime_1d","neighbor_crime_3d","neighbor_crime_7d"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype("int64")
+    return out
+
+def enrich_targets(grid: pd.DataFrame, events: pd.DataFrame, feats: pd.DataFrame):
+    g2 = grid
+    e2 = events
+    if not grid.empty:
+        g2 = grid.merge(feats, on=["GEOID","date"], how="left")
+        for c in ["neighbor_crime_1d","neighbor_crime_3d","neighbor_crime_7d"]:
+            if c in g2.columns:
+                g2[c] = pd.to_numeric(g2[c], errors="coerce").fillna(0).astype("int64")
+    if not events.empty:
+        # EVENTS’e tarih sütunu yoksa üret (ama daily pipeline’da genelde var)
+        ev = _ensure_date_col(events)
+        e2 = ev.merge(feats, on=["GEOID","date"], how="left")
+        for c in ["neighbor_crime_1d","neighbor_crime_3d","neighbor_crime_7d"]:
+            if c in e2.columns:
+                e2[c] = pd.to_numeric(e2[c], errors="coerce").fillna(0).astype("int64")
+    return g2, e2
+
+def main() -> int:
+    log("🚀 enrich_with_neighbors_daily.py")
+
+    # Dosya yollarını çöz
+    grid_in  = BASE_DIR / GRID_IN  if not GRID_IN.is_absolute()  else GRID_IN
+    grid_out = BASE_DIR / GRID_OUT if not GRID_OUT.is_absolute() else GRID_OUT
+    ev_in    = BASE_DIR / EV_IN    if not EV_IN.is_absolute()    else EV_IN
+    ev_out   = BASE_DIR / EV_OUT   if not EV_OUT.is_absolute()   else EV_OUT
+
+    # Girdi oku
+    grid = _read_csv(grid_in)
+    ev   = _read_csv(ev_in)
+
+    # Komşuluk dosyası
     if not NEIGH_FILE.exists():
-        raise FileNotFoundError(f"❌ Komşuluk dosyası yok: {NEIGH_FILE.resolve()}")
+        raise FileNotFoundError(f"❌ neighbors.csv bulunamadı: {NEIGH_FILE.resolve()}")
+    neigh = pd.read_csv(NEIGH_FILE, low_memory=False).dropna()
+    if neigh.empty:
+        raise RuntimeError("❌ neighbors.csv boş.")
 
-    print(f"▶︎ Komşu pencereler: {NEIGH_WINDOWS}")
-    win_spec = _parse_windows(NEIGH_WINDOWS)
-    if not win_spec:
-        print("⚠️ Geçerli pencere bulunamadı; varsayılan 1D,3D,7D,30D kullanılacak.")
-        win_spec = _parse_windows("1D,3D,7D,30D")
+    # Günlük taban (GEOID×date×base_cnt)
+    base = build_daily_base(grid, ev)
+    log(f"🧮 base_cnt hazır: {len(base):,} satır (GEOID×date)")
 
-    # 1) Veri yükle
-    df = pd.read_csv(SRC, low_memory=False)
-    if df.empty:
-        out = df.copy()
-        out["neighbor_crime_alltime"] = 0
-        for nm, _ in win_spec:
-            out[f"neighbor_crime_{nm}"] = 0
-        _safe_save_csv(out, DST)
-        print(f"⚠️ {SRC.name} boş; {DST.name} yazıldı (komşu sütunları 0).")
-        return
+    # Komşu pencereleri
+    feats = neighbor_daily_features(base, neigh)
+    log(f"✨ neighbor feats: {len(feats):,} satır (GEOID×date) — eklenecek kolonlar: "
+        f"[neighbor_crime_1d, _3d, _7d]")
 
-    # 2) GEOID & DATE & COUNT
-    gcol = _pick_col(df.columns, "geoid", "GEOID", "geography_id")
-    if not gcol:
-        raise RuntimeError("❌ GEOID kolonu bulunamadı (örn. geoid/GEOID/geography_id).")
-    df["GEOID"] = _norm_geoid(df[gcol])
+    # Hedef dosyaları zenginleştir
+    g2, e2 = enrich_targets(grid, ev, feats)
 
-    dcol = _detect_date_col(df)
-    if not dcol:
-        raise RuntimeError(f"❌ Tarih kolonu bulunamadı. Adaylar: {DATE_CANDS}")
-    df["__date__"] = _to_date_col(df, dcol)  # string YYYY-MM-DD
-
-    crime_col = _pick_col(df.columns, *COUNT_CANDS)
-    if crime_col:
-        base_count = pd.to_numeric(df[crime_col], errors="coerce").fillna(0).astype(float)
+    # Yaz
+    if not g2.empty:
+        _safe_write_csv(g2, grid_out)
     else:
-        ycol = _pick_col(df.columns, *LABEL_CANDS)
-        if not ycol:
-            raise RuntimeError("❌ crime_count veya Y_label/label/target kolonu bulunamadı.")
-        base_count = pd.to_numeric(df[ycol], errors="coerce").fillna(0).astype(float)
-    df["_crime_used"] = base_count
+        log("ℹ️ GRID yok → yazılmadı.")
+    if not e2.empty:
+        _safe_write_csv(e2, ev_out)
+    else:
+        log("ℹ️ EVENTS yok → yazılmadı.")
 
-    # 3) Komşuluk verisi
-    nb = pd.read_csv(NEIGH_FILE, dtype=str)
-    s = _pick_col(nb.columns, "geoid", "src", "source", "SRC_GEOID")
-    t = _pick_col(nb.columns, "neighbor", "dst", "target", "NEI_GEOID")
-    # Bazı komşuluk dosyalarında hem 'geoid' hem 'neighbor' olabilir
-    if s and t and s.lower() == t.lower():
-        # tek kolon kullanılmışsa (ör. 'geoid'), anlamlı değil → hata
-        raise RuntimeError("❌ neighbors.csv: kaynak ve komşu için farklı kolonlar gerekli (örn. src/dst).")
-    if not s:
-        s = _pick_col(nb.columns, "src", "source")
-    if not t:
-        t = _pick_col(nb.columns, "dst", "target", "neighbor")
-    if not s or not t:
-        raise RuntimeError(f"❌ neighbors.csv başlıkları anlaşılamadı: {nb.columns.tolist()}")
-
-    nb = nb[[s, t]].dropna().rename(columns={s: "SRC_GEOID", t: "NEI_GEOID"})
-    nb["SRC_GEOID"] = _norm_geoid(nb["SRC_GEOID"])
-    nb["NEI_GEOID"] = _norm_geoid(nb["NEI_GEOID"])
-    nb = nb.drop_duplicates()
-    # self-loop'ları at
-    nb = nb[nb["SRC_GEOID"] != nb["NEI_GEOID"]]
-
-    if nb.empty:
-        out = df.copy()
-        out["neighbor_crime_alltime"] = 0
-        for nm, _ in win_spec:
-            out[f"neighbor_crime_{nm}"] = 0
-        out.drop(columns=["_crime_used", "__date__"], errors="ignore", inplace=True)
-        _safe_save_csv(out, DST)
-        print("⚠️ neighbors.csv boş; tüm komşu metrikler 0 yazıldı.")
-        return
-
-    # 4) Günlük GEOID × date olay sayısı
-    daily = (
-        df.groupby(["GEOID", "__date__"], as_index=False)["_crime_used"]
-          .sum()
-          .rename(columns={"_crime_used": "cnt"})
-    )
-    # Tüm tarih evreni → eksik günleri 0’la dolduracağız
-    dates = pd.Index(sorted(daily["__date__"].unique()), name="__date__")
-    geoids = pd.Index(sorted(daily["GEOID"].unique()), name="GEOID")
-
-    # Pivot (T×C): T=tarih sayısı, C=GEOID sayısı
-    pivot = (
-        daily.pivot(index="__date__", columns="GEOID", values="cnt")
-             .reindex(index=dates, columns=geoids, fill_value=0.0)
-             .astype(float)
-    )  # shape: (T, C)
-
-    # 5) Adjacency matrisi (S×C): S=src sayısı, C=GEOID sayısı
-    src_list = sorted(nb["SRC_GEOID"].unique())
-    # Kaynaklar df’de yoksa (ör. boş gün) yine de adjacency’de yer alabilir;
-    # kolon evreni pivot’un geoids’idir.
-    idx_geo = {g: j for j, g in enumerate(geoids)}
-    idx_src = {g: i for i, g in enumerate(src_list)}
-    A = np.zeros((len(src_list), len(geoids)), dtype=np.float32)
-    for _, r in nb.iterrows():
-        si = idx_src.get(r["SRC_GEOID"])
-        tj = idx_geo.get(r["NEI_GEOID"])
-        if si is not None and tj is not None:
-            A[si, tj] += 1.0  # ağırlıksız komşuluk; isterseniz ağırlıklandırılabilir
-
-    # 6) All-time komşu toplamı (zaman bağımsız)
-    geo_totals = np.asarray(pivot.sum(axis=0))  # (C,)
-    neigh_alltime = A @ geo_totals  # (S,)
-    # GEOID→alltime map
-    map_alltime = {src_list[i]: float(neigh_alltime[i]) for i in range(len(src_list))}
-
-    # 7) Rolling pencereler (sızıntısız: shift(1))
-    # pivot: (T, C); rolled: (T, C)
-    feats = {}  # (date, src_geoid) → {win_name: value}
-    rolled_cache = {}
-    for win_name, k in win_spec:
-        rolled = pivot.rolling(window=k, min_periods=1).sum().shift(1).fillna(0.0)
-        rolled_cache[win_name] = rolled  # gerekirse debug için sakla
-
-    # 8) Her pencere için komşu toplamları (T×S) = (T×C) @ (C×S)
-    # Adjacency transpozu: C×S
-    AT = A.T  # (C, S)
-    neigh_frames = {}
-    for win_name, _ in win_spec:
-        rolled = rolled_cache[win_name]  # (T, C)
-        TS = rolled.values @ AT  # (T, S)
-        neigh_frames[win_name] = pd.DataFrame(
-            TS, index=dates, columns=src_list, dtype="float32"
-        )
-
-    # 9) Orijinal tabloya merge
-    out = df.copy()
-    # alltime (GEOID-only, tarih bağımsız)
-    out["neighbor_crime_alltime"] = out["GEOID"].map(map_alltime).fillna(0).astype("float32")
-
-    # rollingler (GEOID + date)
-    # hızlı map için (date, geoid) → index yaklaşımı
-    # önce tarih başına küçük bir dict üretmek yerine direkt merge yapalım:
-    out["_key_date"] = out["__date__"]
-    out["_key_geoid"] = out["GEOID"]
-
-    for win_name, _ in win_spec:
-        g = neigh_frames[win_name].reset_index().melt(
-            id_vars="__date__", var_name="GEOID", value_name=f"neighbor_crime_{win_name}"
-        )
-        g["__date__"] = g["__date__"].astype("string")
-        g["GEOID"] = g["GEOID"].astype("string")
-        before = out.shape
-        out = out.merge(
-            g.rename(columns={"__date__": "_key_date"}),
-            left_on=["_key_date", "_key_geoid"],
-            right_on=["_key_date", "GEOID"],
-            how="left"
-        )
-        # sağdan gelen GEOID (melt’ten) gereksiz
-        out.drop(columns=["GEOID_y"], inplace=True, errors="ignore")
-        # orijinal GEOID'i geri adlandır
-        if "GEOID_x" in out.columns:
-            out = out.rename(columns={"GEOID_x": "GEOID"})
-        # boş kalanlar 0
-        out[f"neighbor_crime_{win_name}"] = (
-            pd.to_numeric(out[f"neighbor_crime_{win_name}"], errors="coerce")
-              .fillna(0)
-              .astype("float32")
-        )
-        print(f"🔗 merge {win_name}: {before} → {out.shape}")
-
-    # 10) temizlik ve yaz
-    out.drop(columns=["_crime_used", "__date__", "_key_date", "_key_geoid"], errors="ignore", inplace=True)
-    _safe_save_csv(out, DST)
-
-    # kısa özet
-    cols = ["neighbor_crime_alltime"] + [f"neighbor_crime_{nm}" for nm, _ in win_spec]
+    # Küçük önizleme
     try:
-        print("Örnek (ilk 5 satır):")
-        print(out[["GEOID"] + cols].head(5).to_string(index=False))
+        cols = ["GEOID","date","neighbor_crime_1d","neighbor_crime_3d","neighbor_crime_7d"]
+        if not g2.empty:
+            log("— GRID preview —")
+            log(g2[cols].head(6).to_string(index=False))
+        if not e2.empty:
+            log("— EVENTS preview —")
+            log(e2[cols].head(6).to_string(index=False))
     except Exception:
         pass
 
+    log("✅ Tamam.")
+    return 0
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
