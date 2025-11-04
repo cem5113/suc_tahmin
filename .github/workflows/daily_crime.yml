@@ -45,7 +45,7 @@ env:
   # 311 varsayılanları (boş kalmasın)
   FR_311_DATE_COL: "date"
   FR_311_GEOID_COL: "GEOID"
-  FR_311_WINSOR_Q: "0"      # boş gelirse 0 (kapalı) → kod içinde 0.999'a çekmek isterseniz ENV'de değiştirin
+  FR_311_WINSOR_Q: "0"
   FR_311_EMA_ALPHAS: "0.3,0.6"
 
 jobs:
@@ -156,18 +156,17 @@ jobs:
           echo "---- GRID head ----";   head -n 5 "${FR_OUT_GRID}"   || true
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
-      # ---------------------- 911 ENRICH (revize arama desenleri) ----------------------
+      # ---------------------- 911 ENRICH (revize arama + doğru gh kullanımı) ----------------------
       - name: Fallback Download 911
         env:
-          WANT1: sf_911_last_5_year.csv          # sizin release’teki dosya adı (ekranda gördüğünüz)
-          WANT2: sf_911_last_5_years.csv         # olası çoğul varyant
+          GH_TOKEN: ${{ github.token }}
+          WANT1: sf_911_last_5_year.csv
+          WANT2: sf_911_last_5_years.csv
         run: |
           set -euo pipefail
-          # 1) Workspace/Artifact araması (zaten biraz sonra da aranacak),
-          #    burada sadece hızlı bir kontrol ve gerekirse Release indir.
           found=""
 
-          # aday yollar
+          # Yerel/artefact hızlı kontrol
           for p in \
             "${CRIME_DATA_DIR}/${WANT1}" \
             "${CRIME_DATA_DIR}/${WANT2}" \
@@ -182,13 +181,20 @@ jobs:
           if [ -z "$found" ]; then
             echo "ℹ️ 911 yerelde yok → latest release'tan indiriyorum..."
             mkdir -p "${CRIME_DATA_DIR}"
-            # current repo’dan son release’teki dosyayı desenle indir
-            gh release download --repo "$GITHUB_REPOSITORY" --latest \
-              --pattern "${WANT1}" --dir "${CRIME_DATA_DIR}" || true
-            gh release download --repo "$GITHUB_REPOSITORY" --latest \
-              --pattern "${WANT2}" --dir "${CRIME_DATA_DIR}" || true
+            # Son release tag'ini al ve o tag'den indir (gh --latest yok)
+            TAG="$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName || true)"
+            if [ -n "${TAG:-}" ]; then
+              echo "⬇️ Latest tag: $TAG"
+              gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D "${CRIME_DATA_DIR}" \
+                -p 'sf_911_last_5_year*.csv' \
+                -p 'sf_911_last_5_year*.csv.gz' \
+                -p 'sf_911_last_5_year*.parquet' \
+                --skip-existing || true
+            else
+              echo "ℹ️ Latest release bulunamadı."
+            fi
 
-            # tekrar bak
+            # Tekrar bak
             for p in \
               "${CRIME_DATA_DIR}/${WANT1}" \
               "${CRIME_DATA_DIR}/${WANT2}" \
@@ -228,11 +234,9 @@ jobs:
 
           echo "🔎 911 dosyası aranıyor..."
 
-          # Manuel override destekle
           if [ -n "${FR_911_PATH:-}" ] && [ -f "${FR_911_PATH}" ]; then
             PICK="${FR_911_PATH}"
           else
-            # Aranacak desenler: year/years, csv/csv.gz/parquet (+ _y varyantı)
             mapfile -t FOUND_A < <(find "${CRIME_DATA_DIR}" -maxdepth 8 -type f \
               \( -iname "sf_911_last_5_year.csv"      -o -iname "sf_911_last_5_year_y.csv" \
                -o -iname "sf_911_last_5_years.csv"    -o -iname "sf_911_last_5_years_y.csv" \
@@ -263,7 +267,6 @@ jobs:
               if [ -f "$p" ] && [ -z "${seen[$p]+x}" ]; then
                 seen[$p]=1
                 base="$(basename "$p")"
-                # Öncelik: *_y.* (etiketli özet), yoksa ilk bulunan
                 if [[ "$base" =~ ^sf_911_last_5_years?_y\.csv(\.gz)?$ ]]; then PICK="$p"; break; fi
                 if [ -z "$PICK" ]; then PICK="$p"; fi
               fi
@@ -288,7 +291,6 @@ jobs:
 
           python -u "$PYFILE"
 
-          # hızlı kontrol
           head -n 5 "$GRID" || true
 
       # ---------------------- 311 ENRICH (winsor+EMA sağlam) ----------------------
@@ -381,8 +383,8 @@ jobs:
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
-          set -euo pipefail
-          python -u update_train_daily.py
+            set -euo pipefail
+            python -u update_train_daily.py
 
       - name: (5) POI -> enrich GRID & EVENTS
         working-directory: ${{ github.workspace }}
