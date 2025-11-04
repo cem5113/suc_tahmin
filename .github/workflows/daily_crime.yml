@@ -19,14 +19,21 @@ env:
   WX_LOCATION: "paris"
   WX_UNIT: "metric"
   GEOID_LEN: "11"
+
+  # 🔽 artifact ve zip yolları
   ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
   ARTIFACT_DIR: artifact
+
+  # 🔽 çıktı/okuma için ana veri klasörü
   FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
   FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
-  FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
-  FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
-  FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
-  FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
+
+  # 🔽 GÜNLÜK dosyalar — ALT KLASÖRLE BİRLİKTE!
+  FR_GRID_DAILY_IN:  crime_prediction_data/fr_crime_grid_daily.csv
+  FR_GRID_DAILY_OUT: crime_prediction_data/fr_crime_grid_daily.csv
+  FR_EVENTS_DAILY_IN:  crime_prediction_data/fr_crime_events_daily.csv
+  FR_EVENTS_DAILY_OUT: crime_prediction_data/fr_crime_events_daily.csv
+
   NEIGH_FILE: neighbors.csv
 
 jobs:
@@ -175,13 +182,13 @@ jobs:
           fi
           echo "✅ 311 kaynağı: $SRC311"
 
-          # update_311_daily.py kendi içinde CRIME_DATA_DIR + AGG_311_NAME'i okuyacak
+          # update_311_daily.py CRIME_DATA_DIR + AGG_311_NAME kullanır
           python -u update_311_daily.py
 
           # Kolon kontrolü (grid dosyası var sayılarak)
           python - <<'PY'
           import os, pandas as pd
-          p=os.path.join(os.getenv("CRIME_DATA_DIR"), os.getenv("FR_GRID_DAILY_OUT","fr_crime_grid_daily.csv"))
+          p=os.path.join(os.getenv("CRIME_DATA_DIR"), os.getenv("FR_GRID_DAILY_OUT","crime_prediction_data/fr_crime_grid_daily.csv"))
           if os.path.exists(p):
               df=pd.read_csv(p, nrows=0)
               print("GRID columns:", list(df.columns))
@@ -300,6 +307,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      # 🔑 Daily dosyalarını önceki job'dan indir
       - name: Download daily grid/events from previous job
         uses: actions/download-artifact@v4
         with:
