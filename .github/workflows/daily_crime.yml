@@ -111,8 +111,8 @@ jobs:
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_311_DAILY_IN: ""                        
-          AGG_311_NAME: "sf_311_last_5_years.csv"   
+          FR_311_DAILY_IN: ""
+          AGG_311_NAME: "sf_311_last_5_years.csv"
         run: |
           set -e
           python -u update_311_daily.py
