@@ -248,50 +248,50 @@ jobs:
         run: |
           set -e
           python - <<'PY'
-import os, sys, pandas as pd
-from pathlib import Path
-base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
-grid_path = base / os.environ.get("GRID_FILE","fr_crime_grid_daily.csv")
-k    = int(os.environ.get("PATROL_TOP_K","25"))
-out_csv = base / os.environ.get("PATROL_OUT_CSV","fr_patrol_plan.csv")
-if not grid_path.exists():
-    print(f"❌ GRID bulunamadı: {grid_path}", file=sys.stderr); sys.exit(2)
-df = pd.read_csv(grid_path)
-if df.empty:
-    print("⚠️ GRID boş, plan üretilemedi.")
-    pd.DataFrame(columns=["GEOID","date","risk_score","Y_label","events_count"]).to_csv(out_csv, index=False)
-    sys.exit(0)
-need = ["GEOID","date"]
-for c in need:
-    if c not in df.columns:
-        print(f"❌ Zorunlu kolon yok: {c}", file=sys.stderr); sys.exit(3)
-df["date"] = pd.to_datetime(df["date"], errors="coerce")
-last_day = df["date"].dropna().max()
-if pd.isna(last_day):
-    print("❌ Tarih alanı hatalı.", file=sys.stderr); sys.exit(4)
-today = df[df["date"]==last_day].copy()
-def safe_num(name, default=0.0):
-    s = pd.to_numeric(today[name], errors="coerce").fillna(0) if name in today.columns else default
-    return s if hasattr(s, "values") else pd.Series(default, index=today.index)
-today["risk_score"] = (
-    safe_num("events_count")*1.0 +
-    safe_num("neighbor_crime_24h")*0.20 +
-    safe_num("neighbor_crime_72h")*0.10 +
-    safe_num("neighbor_crime_7d")*0.05 +
-    safe_num("n911_prev_1d")*0.10
-)
-agg_cols = {c:"max" for c in ["risk_score","events_count"] if c in today.columns}
-if "Y_label" in today.columns: agg_cols["Y_label"] = "max"
-topk = (today.sort_values("risk_score", ascending=False)
-             .groupby("GEOID", as_index=False)
-             .agg(agg_cols)
-             .sort_values("risk_score", ascending=False)
-             .head(k))
-topk.insert(1, "date", last_day.date())
-out_csv.parent.mkdir(parents=True, exist_ok=True)
-topk.to_csv(out_csv, index=False)
-print(f"✅ Wrote patrol CSV -> {out_csv} (rows={len(topk)})")
-PY
+          import os, sys, pandas as pd
+          from pathlib import Path
+          base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
+          grid_path = base / os.environ.get("GRID_FILE","fr_crime_grid_daily.csv")
+          k    = int(os.environ.get("PATROL_TOP_K","25"))
+          out_csv = base / os.environ.get("PATROL_OUT_CSV","fr_patrol_plan.csv")
+          if not grid_path.exists():
+              print(f"❌ GRID bulunamadı: {grid_path}", file=sys.stderr); sys.exit(2)
+          df = pd.read_csv(grid_path)
+          if df.empty:
+              print("⚠️ GRID boş, plan üretilemedi.")
+              pd.DataFrame(columns=["GEOID","date","risk_score","Y_label","events_count"]).to_csv(out_csv, index=False)
+              sys.exit(0)
+          need = ["GEOID","date"]
+          for c in need:
+              if c not in df.columns:
+                  print(f"❌ Zorunlu kolon yok: {c}", file=sys.stderr); sys.exit(3)
+          df["date"] = pd.to_datetime(df["date"], errors="coerce")
+          last_day = df["date"].dropna().max()
+          if pd.isna(last_day):
+              print("❌ Tarih alanı hatalı.", file=sys.stderr); sys.exit(4)
+          today = df[df["date"]==last_day].copy()
+          def safe_num(name, default=0.0):
+              s = pd.to_numeric(today[name], errors="coerce").fillna(0) if name in today.columns else default
+              return s if hasattr(s, "values") else pd.Series(default, index=today.index)
+          today["risk_score"] = (
+              safe_num("events_count")*1.0 +
+              safe_num("neighbor_crime_24h")*0.20 +
+              safe_num("neighbor_crime_72h")*0.10 +
+              safe_num("neighbor_crime_7d")*0.05 +
+              safe_num("n911_prev_1d")*0.10
+          )
+          agg_cols = {c:"max" for c in ["risk_score","events_count"] if c in today.columns}
+          if "Y_label" in today.columns: agg_cols["Y_label"] = "max"
+          topk = (today.sort_values("risk_score", ascending=False)
+                       .groupby("GEOID", as_index=False)
+                       .agg(agg_cols)
+                       .sort_values("risk_score", ascending=False)
+                       .head(k))
+          topk.insert(1, "date", last_day.date())
+          out_csv.parent.mkdir(parents=True, exist_ok=True)
+          topk.to_csv(out_csv, index=False)
+          print(f"✅ Wrote patrol CSV -> {out_csv} (rows={len(topk)})")
+          PY
 
       - name: Upload patrol artifacts
         uses: actions/upload-artifact@v4
