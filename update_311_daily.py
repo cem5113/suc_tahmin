@@ -10,17 +10,18 @@ enrich_with_311.py — Günlük 311 (GEOID×date) özelliklerini hem GRID'e hem 
 - [8] Kalite: dedup (id varsa), winsorize (opsiyonel), downcast
 
 ENV (varsayılanlar):
-  FR_311_PATH           (fr_311.csv)               # 311 ham olay verisi (tercih edilen kaynak)
-  FR_311_DAILY_IN       ("")                       # (opsiyonel) doğrudan günlük 311 dosyası (GEOID,date,n311_d)
-  FR_311_DATE_COL       (incident_datetime)        # 311 zaman kolonu (auto-detect var)
-  FR_311_GEOID_COL      (GEOID)                    # 311 geoid kolonu
-  FR_311_WINSOR_Q       (0.999)                    # 0→kapat; aksi winsor üst quantile
-  FR_311_EMA_ALPHAS     ("0.3,0.5")                # EMA α değerleri virgüllü
+  CRIME_DATA_DIR         (.)
+  FR_311_PATH            (fr_311.csv)               # 311 ham olay verisi (tercih edilen kaynak)
+  FR_311_DAILY_IN        ("")                       # (opsiyonel) doğrudan günlük 311 dosyası (GEOID,date,n311_d)
+  FR_311_DATE_COL        (incident_datetime)        # 311 zaman kolonu (auto-detect var)
+  FR_311_GEOID_COL       (GEOID)                    # 311 geoid kolonu
+  FR_311_WINSOR_Q        (0.999)                    # 0→kapat; aksi winsor üst quantile
+  FR_311_EMA_ALPHAS      ("0.3,0.5")                # EMA α değerleri virgüllü
 
-  FR_GRID_DAILY_IN      (fr_crime_grid_daily.csv)  # GRID giriş
-  FR_GRID_DAILY_OUT     (fr_crime_grid_daily.csv)  # GRID çıkış (üzerine yazar)
-  FR_EVENTS_DAILY_IN    (fr_crime_events_daily.csv)# EVENTS giriş
-  FR_EVENTS_DAILY_OUT   (fr_crime_events_daily.csv)# EVENTS çıkış (üzerine yazar)
+  FR_GRID_DAILY_IN       (fr_crime_grid_daily.csv)  # GRID giriş
+  FR_GRID_DAILY_OUT      (fr_crime_grid_daily.csv)  # GRID çıkış (üzerine yazar)
+  FR_EVENTS_DAILY_IN     (fr_crime_events_daily.csv)# EVENTS giriş
+  FR_EVENTS_DAILY_OUT    (fr_crime_events_daily.csv)# EVENTS çıkış (üzerine yazar)
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ import os
 from pathlib import Path
 import pandas as pd
 import numpy as np
+
+pd.options.mode.copy_on_write = True
 
 # ----------- ENV -----------
 CRIME_DATA_DIR = Path(os.getenv("CRIME_DATA_DIR", ".")).resolve()
@@ -47,7 +50,7 @@ EMA_ALPHAS  = [float(x) for x in os.getenv("FR_311_EMA_ALPHAS", "0.3,0.5").split
 
 def log(x): print(x, flush=True)
 
-# ----------- PATH RESOLVER (yeni) -----------
+# ----------- PATH RESOLVER (akıllı) -----------
 def _resolve_path(p: Path) -> Path:
     """
     Aday arama sırası:
@@ -56,32 +59,27 @@ def _resolve_path(p: Path) -> Path:
       3) CRIME_DATA_DIR / p
       4) CRIME_DATA_DIR / crime_prediction_data / p.name (sadece dosya adı verilmişse)
       5) CRIME_DATA_DIR / artifact / p.name
-    İlk bulunan döner.
+    İlk bulunan döner; yoksa CRIME_DATA_DIR/p (yazma hedefi) döner.
     """
     if p.is_absolute():
         return p
 
-    # 1) CWD relative
-    p1 = Path.cwd() / p
+    p1 = (Path.cwd() / p)
     if p1.exists():
         return p1.resolve()
 
-    # 2) CRIME_DATA_DIR / p
-    p2 = CRIME_DATA_DIR / p
+    p2 = (CRIME_DATA_DIR / p)
     if p2.exists():
         return p2.resolve()
 
-    # 3) CRIME_DATA_DIR/crime_prediction_data/<filename>
     p3 = CRIME_DATA_DIR / "crime_prediction_data" / p.name
     if p3.exists():
         return p3.resolve()
 
-    # 4) CRIME_DATA_DIR/artifact/<filename>
     p4 = CRIME_DATA_DIR / "artifact" / p.name
     if p4.exists():
         return p4.resolve()
 
-    # yoksa en mantıklı hedef olarak CRIME_DATA_DIR/p'yi döndür (yazma için)
     return p2.resolve()
 
 # ----------- I/O -----------
@@ -117,10 +115,14 @@ def _norm_geoid(s: pd.Series, L: int = 11) -> pd.Series:
     return x.str[:L].str.zfill(L)
 
 def autodetect_dt_col(df: pd.DataFrame, pref: str) -> str | None:
-    if pref in df.columns: return pref
-    for c in ["requested_datetime","closed_date","updated_datetime","created_date",
+    if pref in df.columns: 
+        return pref
+    # genişletilmiş liste
+    for c in ["requested_datetime","requested_date","opened_date","opened_datetime",
+              "closed_date","updated_datetime","created_date","created_datetime",
               "incident_datetime","datetime","timestamp","date"]:
-        if c in df.columns: return c
+        if c in df.columns: 
+            return c
     return None
 
 def ensure_date_col(df: pd.DataFrame) -> pd.DataFrame:
@@ -128,13 +130,14 @@ def ensure_date_col(df: pd.DataFrame) -> pd.DataFrame:
     if "date" in out.columns:
         out["date"] = _to_date(out["date"])
         return out
-    for c in ("event_date","dt","day","incident_datetime","datetime","timestamp","created_datetime"):
+    for c in ("event_date","dt","day","incident_datetime","datetime","timestamp","created_datetime",
+              "requested_datetime","requested_date","opened_date","opened_datetime","created_date"):
         if c in out.columns:
             out["date"] = _to_date(out[c])
             return out
     raise ValueError("date kolonu türetilemedi.")
 
-# ----------- 311 → günlük -----------
+# ----------- 311 → günlük (hamdan) -----------
 def load_311_daily_from_raw(df: pd.DataFrame) -> pd.DataFrame:
     # dedup (kalite) — varsa id sütunu
     for cid in ("request_id","service_request_id","id"):
@@ -165,31 +168,32 @@ def load_311_daily_from_raw(df: pd.DataFrame) -> pd.DataFrame:
                .size().rename(columns={"size":"n311_d"}))
     return daily
 
+# ----------- 311 → günlük (giriş seçimi + fallback) -----------
 def load_311_daily() -> pd.DataFrame:
     # 1) doğrudan günlük dosya
     if P_311_DAILY:
         p = Path(P_311_DAILY)
         d = _read_csv(p)
-        if d.empty:
-            return d
-        # normalize
-        if "GEOID" in d.columns:
-            d["GEOID"] = _norm_geoid(d["GEOID"])
-        d = ensure_date_col(d)
-        # sütun adı yakala
-        if "n311_d" not in d.columns:
-            cand = [c for c in d.columns if "311" in c.lower() and "daily" in c.lower()]
-            if cand:
-                d = d.rename(columns={cand[0]: "n311_d"})
-            elif "count" in d.columns:
-                d = d.rename(columns={"count":"n311_d"})
-            else:
-                # satır olayı ise say
-                d = (d.groupby(["GEOID","date"], dropna=False).size()
-                       .reset_index(name="n311_d"))
-        return d[["GEOID","date","n311_d"]].copy()
+        if not d.empty:
+            # normalize
+            if "GEOID" in d.columns:
+                d["GEOID"] = _norm_geoid(d["GEOID"])
+            d = ensure_date_col(d)
+            # sütun adı yakala
+            if "n311_d" not in d.columns:
+                cand = [c for c in d.columns if "311" in c.lower() and "daily" in c.lower()]
+                if cand:
+                    d = d.rename(columns={cand[0]: "n311_d"})
+                elif "count" in d.columns:
+                    d = d.rename(columns={"count":"n311_d"})
+                else:
+                    d = (d.groupby(["GEOID","date"], dropna=False)
+                           .size().reset_index(name="n311_d"))
+            return d[["GEOID","date","n311_d"]].copy()
+        else:
+            log("ℹ️ FR_311_DAILY_IN verisi bulunamadı/boş — ham 311'e düşülüyor.")
 
-    # 2) ham dosyadan üret
+    # 2) ham dosyadan üret (fallback)
     raw = _read_csv(P_311_RAW)
     if raw.empty:
         return raw
@@ -215,7 +219,7 @@ def make_311_features(daily: pd.DataFrame, calendar_dates: np.ndarray) -> pd.Dat
 
     # tüm GEOID'ler için tam takvim reindex
     geoids = daily["GEOID"].dropna().unique()
-    all_days = pd.to_datetime(pd.Series(calendar_dates)).dt.date.unique()
+    all_days = pd.to_datetime(pd.Series(calendar_dates), errors="coerce").dt.date.unique()
     idx = pd.MultiIndex.from_product([geoids, all_days], names=["GEOID","date"])
     g = (daily.set_index(["GEOID","date"])
               .reindex(idx, fill_value=0)
@@ -303,7 +307,7 @@ def main() -> int:
         cal_dates = e2["date"].values
     cal_dates = pd.to_datetime(pd.Series(cal_dates), errors="coerce").dt.date.dropna().unique()
 
-    # 2) 311 günlük yükle (ham veya günlük)
+    # 2) 311 günlük yükle (ham veya günlük; günlük yoksa otomatik ham fallback)
     d311 = load_311_daily()
     if d311.empty:
         log("ℹ️ Günlük 311 bulunamadı → sadece 0 kolonları eklenecek.")
@@ -331,12 +335,18 @@ def main() -> int:
     try:
         if not grid.empty:
             cols = ["GEOID","date","n311_d","n311_prev_1d","n311_roll_7d","n311_roll_30d","n311_trend_7v30"]
-            cols += [c for c in feats.columns if c.startswith("n311_ema_")] if not feats.empty else [f"n311_ema_a{int(a*10)}" for a in EMA_ALPHAS]
+            ema_cols = [c for c in (feats.columns if not feats.empty else []) if c.startswith("n311_ema_")]
+            if not ema_cols:
+                ema_cols = [f"n311_ema_a{int(a*10)}" for a in EMA_ALPHAS]
+            cols += ema_cols
             head_df = (grid2 if 'grid2' in locals() else grid)[[c for c in cols if c in (grid2 if 'grid2' in locals() else grid).columns]].head(8)
             log(head_df.to_string(index=False))
         if not ev.empty:
             cols = ["GEOID","date","n311_prev_1d","n311_roll_7d","n311_roll_30d","n311_trend_7v30"]
-            cols += [c for c in (feats.columns if not feats.empty else []) if c.startswith("n311_ema_")] if not feats.empty else [f"n311_ema_a{int(a*10)}" for a in EMA_ALPHAS]
+            ema_cols = [c for c in (feats.columns if not feats.empty else []) if c.startswith("n311_ema_")]
+            if not ema_cols:
+                ema_cols = [f"n311_ema_a{int(a*10)}" for a in EMA_ALPHAS]
+            cols += ema_cols
             head_df = (ev2 if 'ev2' in locals() else ev)[[c for c in cols if c in (ev2 if 'ev2' in locals() else ev).columns]].head(8)
             log(head_df.to_string(index=False))
     except Exception:
