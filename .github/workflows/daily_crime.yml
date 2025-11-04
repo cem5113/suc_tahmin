@@ -1,9 +1,13 @@
-name: Daily FR Grid/Events Enrichment
+name: Daily FR Grid/Events Enrichment → Patrol
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "30 04 * * *"   # 07:30 Europe/Istanbul
+  workflow_run:
+    workflows: ["Full Pipeline (FR)"]   # <-- full_pipeline.yml içindeki görünen workflow adı
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
@@ -16,16 +20,20 @@ concurrency:
 env:
   TZ: Europe/Istanbul
   CRIME_DATA_DIR: crime_prediction_data
-  # Girdi/Çıktı dosyaları (aynı isimle yerinde güncellenir)
+
+  # I/O (yerinde güncellenir)
   FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
   FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
   FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
   FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
-  # Komşuluk dosyası (repo kökü veya data altında olabilir)
+
+  # Komşuluk dosyası
   NEIGH_FILE: neighbors.csv
 
 jobs:
   enrich-fr-daily:
+    # Eğer workflow_run tetiklediyse ve başarısız olduysa koşma
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -57,7 +65,7 @@ jobs:
           FR_EVENTS_PATH:        ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
           FR_OUT_EVENTS:         ${{ env.CRIME_DATA_DIR }}/fr_crime_events_daily.csv
           FR_OUT_GRID:           ${{ env.CRIME_DATA_DIR }}/fr_crime_grid_daily.csv
-          FR_MIN_YEARS:          "5"     # en az 5 yıl pencere
+          FR_MIN_YEARS:          "5"
           FR_DATE_COL:           "incident_datetime"
           FR_GEOID_COL:          "GEOID"
           FR_ID_COL:             "id"
@@ -98,22 +106,11 @@ jobs:
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          # Eğer direkt günlük 311 dosyan var ise belirt (opsiyonel):
-          FR_311_DAILY_IN: ""
-          # Yoksa toplu dosyadan günlük üretilecek:
-          AGG_311_NAME: "sf_311_last_5_years.csv"
+          FR_311_DAILY_IN: ""                        # varsa direkt günlük 311 dosyanızı yazın
+          AGG_311_NAME: "sf_311_last_5_years.csv"   # yoksa buradan günlük üretilir
         run: |
           set -e
-          python -u enrich_with_311_daily.py
-
-      - name: Preview after 311
-        run: |
-          echo "---- GRID cols ----"
-          python - <<'PY'
-import pandas as pd, os
-p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
-df=pd.read_csv(p, nrows=0); print(list(df.columns))
-PY
+          python -u update_311_daily.py   # sizin son dosya adınız buydu
 
       # ───────────────────────── BUS → GRID/EVENTS ─────────────────────────
       - name: (3) Bus stops → enrich GRID & EVENTS
@@ -145,7 +142,6 @@ PY
       - name: (5) POI → enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
-          # POI kaynakları (en az biri mevcut olmalı)
           POI_GEOJSON_1: "${{ env.CRIME_DATA_DIR }}/sf_pois.geojson"
           POI_GEOJSON_2: "sf_pois.geojson"
           POI_CLEAN_CSV: "${{ env.CRIME_DATA_DIR }}/sf_pois_cleaned_with_geoid.csv"
@@ -196,7 +192,7 @@ PY
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
         run: |
           set -e
-          python -u enrich_with_neighbors_daily.py
+          python -u make_neighbors_fr.py
 
       - name: Final previews
         run: |
@@ -218,4 +214,83 @@ PY
           path: |
             ${{ env.CRIME_DATA_DIR }}/${{ env.FR_GRID_DAILY_OUT }}
             ${{ env.CRIME_DATA_DIR }}/${{ env.FR_EVENTS_DAILY_OUT }}
+          if-no-files-found: warn
+
+  # ───────────────────────────── PATROL (DEVRIYE) ─────────────────────────────
+  patrol-fr:
+    needs: [enrich-fr-daily]
+    runs-on: ubuntu-latest
+    env:
+      CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+      GRID_FILE:      ${{ env.FR_GRID_DAILY_OUT }}      # fr_crime_grid_daily.csv (enriched)
+      EVENTS_FILE:    ${{ env.FR_EVENTS_DAILY_OUT }}    # fr_crime_events_daily.csv (enriched)
+      PATROL_TOP_K:   "25"                              # en riskli 25 GEOID
+      PATROL_MIN_SPACING_M: "300"                       # opsiyonel: mekânsal seyreltme
+      PATROL_OUT_CSV: "fr_patrol_plan.csv"
+      PATROL_OUT_GEOJSON: "fr_patrol_plan.geojson"
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps (runtime only)
+        run: |
+          python -m pip install -U pip
+          pip install pandas numpy shapely geopandas
+
+      - name: Run patrol planner
+        run: |
+          set -e
+          python - <<'PY'
+import os, pandas as pd, numpy as np
+from pathlib import Path
+
+base = Path(os.environ["CRIME_DATA_DIR"])
+grid = pd.read_csv(base / os.environ["GRID_FILE"])
+k    = int(os.environ.get("PATROL_TOP_K","25"))
+out_csv = base / os.environ.get("PATROL_OUT_CSV","fr_patrol_plan.csv")
+
+# Basit örnek strateji:
+#  - Son gün (max date) için Y_label=1 (veya events_count) ve türetilmiş sinyallerle bir risk skoru oluştur.
+#  - En yüksek k GEOID'i seç ve kaydet.
+grid["date"] = pd.to_datetime(grid["date"], errors="coerce")
+last_day = grid["date"].max()
+today = grid[grid["date"]==last_day].copy()
+
+# Risk skoru (basit): events_count + 0.2*neighbor_24h + 0.1*neighbor_72h + 0.05*neighbor_7d + 0.1*n911_prev_1d
+def safe_num(s): return pd.to_numeric(today.get(s, 0), errors="coerce").fillna(0)
+today["risk_score"] = (
+    safe_num("events_count")*1.0 +
+    safe_num("neighbor_crime_24h")*0.20 +
+    safe_num("neighbor_crime_72h")*0.10 +
+    safe_num("neighbor_crime_7d") *0.05 +
+    safe_num("n911_prev_1d")      *0.10
+)
+
+topk = (today
+        .sort_values("risk_score", ascending=False)
+        .groupby("GEOID", as_index=False)
+        .agg({"risk_score":"max","Y_label":"max","events_count":"max"})
+        .sort_values("risk_score", ascending=False)
+        .head(k))
+
+# Çıktı: GEOID, date, risk_score, events_count, Y_label
+topk.insert(1, "date", last_day.date())
+topk.to_csv(out_csv, index=False)
+print(f"✅ Patrol CSV yazıldı → {out_csv}  (rows={len(topk)})")
+
+# (opsiyonel) geojson üretimi için centroids gerekir; sizde hazır centroid varsa burada birleştirin.
+PY
+
+      - name: Upload patrol artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fr-patrol-plan
+          path: |
+            ${{ env.CRIME_DATA_DIR }}/${{ env.PATROL_OUT_CSV }}
           if-no-files-found: warn
