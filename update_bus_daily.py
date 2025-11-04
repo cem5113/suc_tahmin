@@ -1,222 +1,246 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# update_bus_daily.py — daily_crime_03.csv + (sf_bus_stops_with_geoid.csv, blocks GeoJSON)
-#                      → daily_crime_04.csv (bus_stop_count, distance_to_bus, *_range)
+"""
+enrich_with_bus_daily.py
+- Otobüs durak verisini (GEOID eşleşmeli) hem GRID (GEOID×date) hem de EVENTS (olay satırları) dosyalarına ekler.
+- Günlük veri: saatlik YOK. Bus özellikleri GEOID seviyesinde sabittir, tüm günlere aynen taşınır.
+- Otomatik GEOID normalize (11 hane), mevcut kolonlardan akıllı agregasyon (count/sum/min).
+- Üzerine yazar (in-place), istersen ENV ile farklı OUT verebilirsin.
+
+ENV (varsayılanlar):
+  CRIME_DATA_DIR         (crime_prediction_data)
+
+  FR_GRID_DAILY_IN       (fr_crime_grid_daily.csv)
+  FR_GRID_DAILY_OUT      (fr_crime_grid_daily.csv)
+
+  FR_EVENTS_DAILY_IN     (fr_crime_events_daily.csv)
+  FR_EVENTS_DAILY_OUT    (fr_crime_events_daily.csv)
+
+  BUS_PATH               (sf_bus_stops_with_geoid.csv)
+  ARTIFACT_ZIP           (artifact/sf-crime-pipeline-output.zip)   # varsa açar
+  ARTIFACT_DIR           (artifact_unzipped)
+"""
 
 from __future__ import annotations
-import os
+import os, re, zipfile
 from pathlib import Path
-
-import numpy as np
 import pandas as pd
-import geopandas as gpd
-
-# KD-Tree: SciPy varsa onu, yoksa NumPy fallback
-try:
-    from scipy.spatial import cKDTree
-    _TREE_IMPL = "scipy"
-except Exception:
-    cKDTree = None
-    _TREE_IMPL = "numpy"
+import numpy as np
 
 pd.options.mode.copy_on_write = True
 
-# ========= helpers =========
+# ============================== Utils ==============================
 def log(msg: str): print(msg, flush=True)
-def ensure_parent(path: str): Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
-def normalize_geoid(s: pd.Series, L: int = DEFAULT_GEOID_LEN) -> pd.Series:
-    x = s.astype(str).str.extract(r"(\d+)", expand=False)
-    return x.str[:L].str.zfill(L)
+def safe_unzip(zip_path: Path, dest_dir: Path):
+    if not zip_path.exists():
+        return
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    log(f"📦 ZIP açılıyor: {zip_path} → {dest_dir}")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for m in zf.infolist():
+            out = dest_dir / m.filename
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if m.is_dir():
+                out.mkdir(parents=True, exist_ok=True); continue
+            with zf.open(m, "r") as src, open(out, "wb") as dst:
+                dst.write(src.read())
+    log("✅ ZIP çıkarma tamam.")
 
-def freedman_diaconis_bin_count(data: np.ndarray, max_bins: int = 10) -> int:
-    data = np.asarray(data)
-    if len(data) < 2 or np.all(data == data[0]):
-        return 1
-    q75, q25 = np.percentile(data, [75, 25])
-    iqr = q75 - q25
-    if iqr == 0:
-        return min(max_bins, max(2, int(np.sqrt(len(data)))))
-    bw = 2 * iqr / (len(data) ** (1 / 3))
-    if bw <= 0:
-        return min(max_bins, max(2, int(np.sqrt(len(data)))))
-    return max(2, min(max_bins, int(np.ceil((data.max() - data.min()) / bw))))
+def _digits_only(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.extract(r"(\d+)", expand=False).fillna("")
 
-def safe_save_csv(df: pd.DataFrame, path: str):
-    ensure_parent(path)
-    tmp = path + ".tmp"
+def _key_11(series: pd.Series) -> pd.Series:
+    return _digits_only(series).str.replace(" ", "", regex=False).str.zfill(11).str[:11]
+
+def _find_geoid_col(df: pd.DataFrame) -> str | None:
+    cands = ["GEOID","geoid","geo_id","GEOID10","geoid10","GeoID",
+             "tract","TRACT","tract_geoid","TRACT_GEOID","geography_id","GEOID2"]
+    low = {c.lower(): c for c in df.columns}
+    for n in cands:
+        if n.lower() in low: return low[n.lower()]
+    for c in df.columns:
+        if "geoid" in c.lower(): return c
+    return None
+
+def _read_csv(p: Path) -> pd.DataFrame:
+    if not p.exists():
+        log(f"ℹ️ Dosya yok: {p}")
+        return pd.DataFrame()
+    df = pd.read_csv(p, low_memory=False)
+    log(f"📖 Okundu: {p}  ({len(df):,}×{df.shape[1]})")
+    return df
+
+def _safe_write_csv(df: pd.DataFrame, p: Path):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # hafif downcast
+    for c in df.select_dtypes(include=["float64"]).columns:
+        df[c] = pd.to_numeric(df[c], downcast="float")
+    for c in df.select_dtypes(include=["int64","Int64"]).columns:
+        df[c] = pd.to_numeric(df[c], downcast="integer")
+    tmp = p.with_suffix(p.suffix + ".tmp")
     df.to_csv(tmp, index=False)
-    os.replace(tmp, path)
-    log(f"💾 Kaydedildi: {path} (satır={len(df):,}, sütun={df.shape[1]})")
+    tmp.replace(p)
+    log(f"💾 Yazıldı: {p}  ({len(df):,}×{df.shape[1]})")
 
-# ========= config (indirimsiz) =========
-BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")); BASE_DIR.mkdir(parents=True, exist_ok=True)
+def _ensure_date(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+        return out
+    for c in ("event_date","dt","day","incident_datetime","datetime","timestamp","created_datetime"):
+        if c in out.columns:
+            out["date"] = pd.to_datetime(out[c], errors="coerce").dt.date
+            return out
+    # EVENTS’te sadece incident_datetime olabilir; yoksa daily değil demektir.
+    return out
 
-# IO
-DAILY_IN   = Path(os.getenv("DAILY_IN",  str(BASE_DIR / "daily_crime_03.csv")))
-DAILY_OUT  = Path(os.getenv("DAILY_OUT", str(BASE_DIR / "daily_crime_04.csv")))
+# ============================== Config ==============================
+BASE_DIR     = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data"))
+ARTIFACT_ZIP = Path(os.getenv("ARTIFACT_ZIP", "artifact/sf-crime-pipeline-output.zip"))
+ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifact_unzipped"))
 
-# Canonical BUS cache (GEOID eşlenmiş duraklar)
-BUS_CANON  = Path(os.getenv("BUS_CANON_RAW", str(BASE_DIR / "sf_bus_stops_with_geoid.csv")))
+GRID_IN   = Path(os.getenv("FR_GRID_DAILY_IN",  "fr_crime_grid_daily.csv"))
+GRID_OUT  = Path(os.getenv("FR_GRID_DAILY_OUT", "fr_crime_grid_daily.csv"))
+EV_IN     = Path(os.getenv("FR_EVENTS_DAILY_IN","fr_crime_events_daily.csv"))
+EV_OUT    = Path(os.getenv("FR_EVENTS_DAILY_OUT","fr_crime_events_daily.csv"))
 
-# Blocks GeoJSON (centroid → en yakın durak mesafesi için)
-BLOCKS_CANDIDATES = [
-    Path(os.getenv("SF_BLOCKS_GEOJSON", str(BASE_DIR / "sf_census_blocks_with_population.geojson"))),
-    Path("sf_census_blocks_with_population.geojson"),
+BUS_PATH_ENV = os.getenv("BUS_PATH", "sf_bus_stops_with_geoid.csv")
+BUS_PATHS = [
+    ARTIFACT_DIR / BUS_PATH_ENV,
+    BASE_DIR / BUS_PATH_ENV,
+    Path(BUS_PATH_ENV),
 ]
 
-# ========= 1) crime oku =========
-if not DAILY_IN.exists() or not DAILY_IN.is_file():
-    raise FileNotFoundError(f"❌ Girdi yok: {DAILY_IN}")
-crime = pd.read_csv(DAILY_IN, low_memory=False)
-if "GEOID" not in crime.columns:
-    raise KeyError("❌ daily_crime_03.csv içinde 'GEOID' yok.")
-crime["GEOID"] = normalize_geoid(crime["GEOID"], DEFAULT_GEOID_LEN)
-crime_geoids = pd.Series(crime["GEOID"].unique(), name="GEOID")
-log(f"📥 daily_crime_03.csv okundu — satır={len(crime):,}, uniq GEOID={crime_geoids.size:,}")
+# ============================== Core ==============================
+def aggregate_bus_by_geoid(bus: pd.DataFrame) -> pd.DataFrame:
+    """Bus girişinde satır=durak ise GEOID bazında özet çıkar.
+       Aşağıdaki kolonları varsa akıllıca toplar:
+       - sayım:  bus_stop_count (yoksa üret)
+       - bayrak/sayım: bus_within_XXXm  → sum
+       - mesafe: distance_to_bus_m      → min
+    """
+    b_geoid = _find_geoid_col(bus)
+    if not b_geoid:
+        raise RuntimeError("Otobüs verisinde GEOID kolonu tespit edilemedi.")
+    bus["_key"] = _key_11(bus[b_geoid])
 
-# ========= 2) bus cache oku (indirimsiz) =========
-if not BUS_CANON.exists() or not BUS_CANON.is_file():
-    raise FileNotFoundError(f"❌ BUS cache yok: {BUS_CANON}\n"
-                            f"Bu dosya aylık işte üretilmeli: sf_bus_stops_with_geoid.csv")
-bus = pd.read_csv(BUS_CANON, low_memory=False)
+    feat_candidates = [
+        "bus_stop_count", "distance_to_bus_m",
+        "bus_within_250m","bus_within_300m","bus_within_500m","bus_within_600m",
+        "bus_within_750m","bus_within_900m","bus_within_1000m",
+    ]
+    present = [c for c in feat_candidates if c in bus.columns]
 
-# beklenen: en azından stop_lat/stop_lon ya da lat/lon ve GEOID (tercihen)
-lat_col = next((c for c in ["stop_lat","latitude","lat","y"] if c in bus.columns), None)
-lon_col = next((c for c in ["stop_lon","longitude","long","lon","x"] if c in bus.columns), None)
-if lat_col is None or lon_col is None:
-    raise KeyError("❌ BUS cache içinde lat/lon benzeri kolonlar yok (stop_lat/stop_lon vb.).")
+    if not present:
+        # en azından her GEOID için durak say
+        agg = (bus.groupby("_key", as_index=False)
+                  .size().rename(columns={"size":"bus_stop_count"}))
+        return agg.rename(columns={"_key":"GEOID"})
 
-bus["stop_lat"] = pd.to_numeric(bus[lat_col], errors="coerce")
-bus["stop_lon"] = pd.to_numeric(bus[lon_col], errors="coerce")
-bus = bus.dropna(subset=["stop_lat","stop_lon"]).copy()
+    agg_dict = {}
+    for c in present:
+        if re.search(r"(count|within)", c, flags=re.I):
+            agg_dict[c] = "sum"
+        elif re.search(r"(dist|distance)", c, flags=re.I):
+            agg_dict[c] = "min"
+        else:
+            agg_dict[c] = "sum"
 
-if "GEOID" in bus.columns:
-    bus["GEOID"] = normalize_geoid(bus["GEOID"], DEFAULT_GEOID_LEN)
+    bus_num = bus.copy()
+    for c in present:
+        bus_num[c] = pd.to_numeric(bus_num[c], errors="coerce")
 
-log(f"🚌 BUS cache okundu — satır={len(bus):,}, GEOID kolonlu={ 'GEOID' in bus.columns }")
+    agg = (bus_num.groupby("_key", as_index=False).agg(agg_dict))
+    # güvenlik: stop sayısı yoksa ekle
+    if "bus_stop_count" not in agg.columns:
+        cnt = (bus.groupby("_key", as_index=False)
+                 .size().rename(columns={"size":"bus_stop_count"}))
+        agg = agg.merge(cnt, on="_key", how="outer")
 
-# ========= 3) Blocks GeoJSON bul =========
-blocks_path = next((p for p in BLOCKS_CANDIDATES if p and p.exists() and p.is_file()), None)
-if blocks_path is None:
-    raise FileNotFoundError("❌ Blocks GeoJSON bulunamadı (sf_census_blocks_with_population.geojson).")
+    agg = agg.rename(columns={"_key":"GEOID"})
+    agg["GEOID"] = agg["GEOID"].astype("string")
+    # tip düzeltmeleri
+    if "distance_to_bus_m" in agg.columns:
+        agg["distance_to_bus_m"] = pd.to_numeric(agg["distance_to_bus_m"], errors="coerce")
+    for c in [col for col in agg.columns if c.startswith("bus_within_")] + ["bus_stop_count"]:
+        if c in agg.columns:
+            agg[c] = pd.to_numeric(agg[c], errors="coerce").fillna(0).astype("Int64")
+    return agg
 
-gdf_blocks = gpd.read_file(blocks_path)
-gcol = "GEOID" if "GEOID" in gdf_blocks.columns else next(
-    (c for c in gdf_blocks.columns if str(c).upper().startswith("GEOID")), None
-)
-if not gcol:
-    raise KeyError("❌ Blocks GeoJSON içinde GEOID benzeri kolon yok.")
-gdf_blocks["GEOID"] = normalize_geoid(gdf_blocks[gcol], DEFAULT_GEOID_LEN)
+def enrich_one(df: pd.DataFrame, bus_agg: pd.DataFrame, is_grid: bool) -> pd.DataFrame:
+    """GEOID merge; GRID ise date kolonunu korur."""
+    if df.empty: return df
+    c_geoid = _find_geoid_col(df)
+    if not c_geoid:
+        raise RuntimeError("Hedef tabloda GEOID kolonu bulunamadı.")
+    out = df.copy()
 
-# CRS → WGS84
-if gdf_blocks.crs is None:
-    gdf_blocks.set_crs("EPSG:4326", inplace=True)
-elif str(gdf_blocks.crs).lower() not in ("epsg:4326","wgs84","wgs 84"):
-    gdf_blocks = gdf_blocks.to_crs(epsg=4326)
+    # GRID: date kolonunu normalize et (sadece görünürlük)
+    if is_grid:
+        out = _ensure_date(out)
 
-# ========= 4) BUS → GEOID sayımı =========
-if "GEOID" not in bus.columns or bus["GEOID"].isna().all():
-    # GEOID yoksa: nokta → polygon sjoin ile atayıp sonra say
-    gdf_bus = gpd.GeoDataFrame(
-        bus,
-        geometry=gpd.points_from_xy(bus["stop_lon"], bus["stop_lat"]),
-        crs="EPSG:4326"
-    )
-    try:
-        # En doğrusu: durak poligon içinde mi?
-        gdf_bus = gpd.sjoin(gdf_bus, gdf_blocks[["GEOID","geometry"]], how="left", predicate="within")
-    except Exception:
-        # WGS84'te 'max_distance' derece olur → metrik CRS'e geçip metre kullan
-        gdf_bus_m = gdf_bus.to_crs(3857)
-        gdf_blocks_m = gdf_blocks.to_crs(3857)[["GEOID","geometry"]]
-        # 1000 m eşik (yakın poligon seçimi için mantıklı)
-        gdf_bus = gpd.sjoin_nearest(gdf_bus_m, gdf_blocks_m, how="left", max_distance=1000).to_crs(4326)
+    # hedef GEOID -> resmi (tek) GEOID string(11)
+    out.insert(0, "GEOID", _key_11(out[c_geoid]).astype("string"))
+    # orijinal GEOID benzer kolonları kaldır
+    drop_candidates = [c for c in out.columns if c != "GEOID" and "geoid" in c.lower()]
+    out.drop(columns=drop_candidates, inplace=True, errors="ignore")
 
-    gdf_bus = gdf_bus.drop(columns=["index_right"], errors="ignore")
-    bus_geo = pd.DataFrame(gdf_bus.drop(columns=["geometry"], errors="ignore"))
-else:
-    bus_geo = bus.copy()
+    out = out.merge(bus_agg, on="GEOID", how="left")
 
-bus_geo["GEOID"] = normalize_geoid(bus_geo["GEOID"], DEFAULT_GEOID_LEN)
-bus_count = (
-    bus_geo.dropna(subset=["GEOID"])
-           .groupby("GEOID", as_index=False)
-           .agg(bus_stop_count=("stop_lat", "size"))
-)
+    # doldur
+    if "distance_to_bus_m" in out.columns:
+        out["distance_to_bus_m"] = pd.to_numeric(out["distance_to_bus_m"], errors="coerce")
+    for c in ["bus_stop_count"] + [col for col in out.columns if col.startswith("bus_within_")]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype("Int64")
 
-# ========= 5) distance_to_bus (m) =========
-# Block centroid’lerini METRİK CRS’te al (EPSG:3857)
-gdf_blocks_xy = gdf_blocks[["GEOID","geometry"]].copy().to_crs(3857)
-gdf_blocks_xy["cx"] = gdf_blocks_xy.geometry.centroid.x
-gdf_blocks_xy["cy"] = gdf_blocks_xy.geometry.centroid.y
+    return out
 
-# Durakları METRİK CRS’e geçir
-_bus_pts = bus_geo.dropna(subset=["stop_lat","stop_lon"]).copy()
-gdf_bus_xy = gpd.GeoDataFrame(
-    _bus_pts[["stop_lat","stop_lon"]],
-    geometry=gpd.points_from_xy(_bus_pts["stop_lon"], _bus_pts["stop_lat"]),
-    crs="EPSG:4326"
-).to_crs(3857)
+# ============================== Run ==============================
+def main() -> int:
+    # 0) artifact varsa aç
+    safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
 
-if len(gdf_bus_xy) == 0:
-    bus_dist = gdf_blocks_xy[["GEOID"]].copy()
-    bus_dist["distance_to_bus"] = np.nan
-else:
-    centroids = np.vstack([gdf_blocks_xy["cx"].values, gdf_blocks_xy["cy"].values]).T
-    bus_coords = np.vstack([gdf_bus_xy.geometry.x.values, gdf_bus_xy.geometry.y.values]).T
-    if cKDTree is not None:
-        tree = cKDTree(bus_coords)
-        distances, _ = tree.query(centroids, k=1)
+    # 1) girişleri oku
+    grid = _read_csv(BASE_DIR / GRID_IN) if not GRID_IN.is_absolute() else _read_csv(GRID_IN)
+    ev   = _read_csv(BASE_DIR / EV_IN)   if not EV_IN.is_absolute()  else _read_csv(EV_IN)
+
+    bus_path = next((p for p in BUS_PATHS if Path(p).exists()), None)
+    if not bus_path:
+        raise FileNotFoundError(f"❌ Otobüs dosyası yok: {BUS_PATH_ENV} (artifact/BASE/local)")
+    bus = _read_csv(Path(bus_path))
+
+    # 2) GEOID bazında otobüs özetlerini hazırla
+    bus_agg = aggregate_bus_by_geoid(bus)
+
+    # 3) enrich & yaz
+    if not grid.empty:
+        grid2 = enrich_one(grid, bus_agg, is_grid=True)
+        _safe_write_csv(grid2, BASE_DIR / GRID_OUT if not GRID_OUT.is_absolute() else GRID_OUT)
     else:
-        # NumPy fallback — O(N×M) ama SF için makul
-        diff = centroids[:, None, :] - bus_coords[None, :, :]
-        distances = np.sqrt((diff ** 2).sum(axis=2)).min(axis=1)
-    bus_dist = gdf_blocks_xy[["GEOID"]].copy()
-    bus_dist["distance_to_bus"] = distances.astype(float)
+        log("ℹ️ GRID dosyası bulunamadı/boş, atlandı.")
 
-# ========= 6) feature tablosu + binler =========
-bus_feat = bus_dist.merge(bus_count, on="GEOID", how="left")
-bus_feat["bus_stop_count"] = bus_feat["bus_stop_count"].fillna(0).astype(int)
-bus_feat["GEOID"] = normalize_geoid(bus_feat["GEOID"], DEFAULT_GEOID_LEN)
+    if not ev.empty:
+        ev2 = enrich_one(ev, bus_agg, is_grid=False)
+        _safe_write_csv(ev2, BASE_DIR / EV_OUT if not EV_OUT.is_absolute() else EV_OUT)
+    else:
+        log("ℹ️ EVENTS dosyası bulunamadı/boş, atlandı.")
 
-# Sadece crime’da olan GEOID’leri tut
-bus_feat = bus_feat.merge(crime_geoids.to_frame(), on="GEOID", how="right")
+    # 4) kısa önizleme
+    try:
+        cols = ["GEOID","bus_stop_count","distance_to_bus_m","bus_within_300m","bus_within_600m","bus_within_900m"]
+        if not grid.empty:
+            log("— GRID preview —")
+            log(grid2[[c for c in cols if c in grid2.columns]].head(10).to_string(index=False))
+        if not ev.empty:
+            log("— EVENTS preview —")
+            log(ev2[[c for c in cols if c in ev2.columns]].head(10).to_string(index=False))
+    except Exception:
+        pass
 
-# Binleme (opsiyonel)
-d = bus_feat["distance_to_bus"].replace([np.inf,-np.inf], np.nan).dropna()
-if len(d) >= 2 and d.max() > d.min():
-    n_bins = freedman_diaconis_bin_count(d.to_numpy(), max_bins=10)
-    # qcut ile kantil bazlı kenarlar; uygun değilse duplicates drop
-    _, edges = pd.qcut(d, q=n_bins, retbins=True, duplicates="drop")
-    labels = [f"{int(round(edges[i]))}–{int(round(edges[i+1]))}m" for i in range(len(edges)-1)]
-    bus_feat["distance_to_bus_range"] = pd.cut(bus_feat["distance_to_bus"], bins=edges,
-                                               labels=labels, include_lowest=True)
-else:
-    bus_feat["distance_to_bus_range"] = pd.Series(["0–0m"] * len(bus_feat), index=bus_feat.index)
+    log("✅ enrich_with_bus_daily.py tamam.")
+    return 0
 
-cnt = bus_feat["bus_stop_count"].fillna(0)
-if cnt.nunique() > 1:
-    n_c_bins = freedman_diaconis_bin_count(cnt.to_numpy(), max_bins=8)
-    _, c_edges = pd.qcut(cnt, q=n_c_bins, retbins=True, duplicates="drop")
-    c_labels = [f"{int(round(c_edges[i]))}–{int(round(c_edges[i+1]))}" for i in range(len(c_edges)-1)]
-    bus_feat["bus_stop_count_range"] = pd.cut(cnt, bins=c_edges, labels=c_labels, include_lowest=True)
-else:
-    bus_feat["bus_stop_count_range"] = pd.Series([f"{int(cnt.min())}–{int(cnt.max())}"] * len(cnt), index=cnt.index)
-
-bus_feat = bus_feat.sort_values("GEOID").drop_duplicates("GEOID", keep="first")
-assert bus_feat["GEOID"].is_unique, "BUS: GEOID unique olmalı"
-
-# ========= 7) crime ile merge =========
-before = crime.shape
-crime = crime.merge(bus_feat, on="GEOID", how="left", validate="many_to_one")
-crime["bus_stop_count"] = crime["bus_stop_count"].fillna(0).astype(int)
-log(f"🔗 CRIME ⨯ BUS: {before} → {crime.shape} (KDTree={_TREE_IMPL})")
-
-# ========= 8) yaz =========
-safe_save_csv(crime, str(DAILY_OUT))
-try:
-    log(crime.head(5).to_string(index=False))
-except Exception:
-    pass
+if __name__ == "__main__":
+    raise SystemExit(main())
