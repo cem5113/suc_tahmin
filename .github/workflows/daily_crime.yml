@@ -71,16 +71,25 @@ jobs:
           echo "🗂 ls crime_prediction_data:"
           ls -lah crime_prediction_data || true
 
-      # (1) sf_crime_y.csv → daily_crime_00.csv
+      # (1) sf_crime(_y).csv → daily_crime_00.csv
       - name: (1) update_crime_daily.py → daily_crime_00.csv
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN:      ${{ env.GEOID_LEN }}
-          SF_DAILY_IN:    "crime_prediction_data/sf_crime_y.csv"  # << REVİZE
-          SF_DAILY_OUT:   "daily_crime_00.csv"                     # sadece dosya adı
+          SF_DAILY_OUT:   "daily_crime_00.csv"
           SF_DAILY_TZ:    America/Los_Angeles
         run: |
-          set -e
+          set -euo pipefail
+          IN_A="crime_prediction_data/sf_crime_y.csv"
+          IN_B="crime_prediction_data/sf_crime.csv"
+          if   [ -f "$IN_A" ]; then export SF_DAILY_IN="$IN_A";
+          elif [ -f "$IN_B" ]; then export SF_DAILY_IN="$IN_B";
+          else
+            echo "❌ Girdi yok: $IN_A / $IN_B" >&2
+            echo "Tree (maxdepth 3):"; find . -maxdepth 3 -type f -name "sf_crime*.csv" -print || true
+            exit 1
+          fi
+          echo "✅ SF_DAILY_IN=$SF_DAILY_IN"
           python -u update_crime_daily.py
           echo "---- HEAD daily_crime_00.csv ----"
           head -n 3 "${CRIME_DATA_DIR}/daily_crime_00.csv" || true
