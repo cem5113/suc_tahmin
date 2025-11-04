@@ -14,6 +14,10 @@ concurrency:
   group: daily-crime-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 env:
   # Kök: repo çalışma alanı
   CRIME_DATA_DIR: ${{ github.workspace }}
@@ -115,7 +119,6 @@ jobs:
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
         run: |
           set -euo pipefail
-
           echo "📂 CWD: $(pwd)"
           echo "📦 CRIME_DATA_DIR=${CRIME_DATA_DIR}"
           mkdir -p "${CRIME_DATA_DIR}/crime_prediction_data"
@@ -148,7 +151,7 @@ jobs:
           echo "---- GRID head ----";   head -n 5 "${FR_OUT_GRID}"   || true
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
-      # ---------------------- 911 ENRICH — SADE: sadece yerel arama ----------------------
+      # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
       - name: (1) 911 → enrich GRID & EVENTS (local search only)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
@@ -173,7 +176,6 @@ jobs:
           fi
 
           echo "🔎 911 dosyası yerelde aranıyor..."
-          # Aynı repoda üretildiği için sadece yerel/artefact altını ara
           mapfile -t FOUND < <(find "${CRIME_DATA_DIR}" -maxdepth 8 -type f \
             \( -iname "sf_911_last_5_year.csv" -o -iname "sf_911_last_5_year_y.csv" \
              -o -iname "sf_911_last_5_years.csv" -o -iname "sf_911_last_5_years_y.csv" \
@@ -196,7 +198,6 @@ jobs:
           echo "✅ 911 kaynağı: $PICK"
           export FR_911_PATH="$PICK"
 
-          PYFILE=""
           if   [ -f "./update_911_daily.py" ];        then PYFILE="./update_911_daily.py"
           elif [ -f "./scripts/update_911_daily.py" ]; then PYFILE="./scripts/update_911_daily.py"
           else echo "❌ update_911_daily.py yok."; exit 66; fi
@@ -287,13 +288,13 @@ jobs:
 
       - name: (6) Police & Government -> enrich GRID & EVENTS
         env:
-          POLICE_FILE:               "sf_police_stations.csv"
-          GOV_FILE:                  "sf_government_buildings.csv"
-          BLOCKS_CSV:                "sf_blocks_centroids.csv"   # ← BUNU EKLİYORSUN
+          POLICE_FILE: "sf_police_stations.csv"
+          GOV_FILE: "sf_government_buildings.csv"
+          BLOCKS_CSV: "sf_blocks_centroids.csv"   # ← BUNU EKLİYORSUN
         run: |
           set -euo pipefail
           python -u update_police_gov_daily.py
-          
+
       - name: (7) Weather (date-merge) -> enrich GRID & EVENTS
         env:
           WEATHER_FILE: "sf_weather_5years.csv"
