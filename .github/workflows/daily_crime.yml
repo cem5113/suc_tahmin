@@ -5,7 +5,8 @@ on:
   schedule:
     - cron: "30 04 * * *"  # 07:30 Europe/Istanbul
   workflow_run:
-    workflows: ["Full FR Crime Pipeline"]   # FR full pipeline 'name:' ile birebir aynı olmalı
+    workflows:
+      - "Full FR Crime Pipeline"   # upstream workflow 'name:' ile birebir aynı olmalı
     types: [completed]
     branches: [main]
 
@@ -32,7 +33,7 @@ env:
 
 jobs:
   enrich-fr-daily:
-    # Eğer workflow_run tetiklendiyse ve upstream başarısızsa çalışmasın
+    # Upstream workflow_run tetiklendi ise sadece 'success' sonrasında çalış
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
@@ -77,8 +78,8 @@ jobs:
           echo "---- EVENTS head ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_events_daily.csv" || true
 
-      # (1) 911 → GRID/EVENTS
-      - name: (1) 911 → enrich GRID & EVENTS
+      # (1) 911 -> GRID/EVENTS
+      - name: (1) 911 -> enrich GRID & EVENTS
         env:
           FR_911_PATH: "${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv"
           FR_911_DATE_COL: "incident_datetime"
@@ -93,16 +94,16 @@ jobs:
           echo "---- After 911 (GRID head) ----"
           head -n 5 "${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}" || true
 
-      # (2) 311 → GRID/EVENTS
-      - name: (2) 311 → enrich GRID & EVENTS
+      # (2) 311 -> GRID/EVENTS
+      - name: (2) 311 -> enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_311_DAILY_IN: ""                        # varsa doğrudan günlük 311 dosyası
-          AGG_311_NAME: "sf_311_last_5_years.csv"   # yoksa buradan günlük üretilir
+          FR_311_DAILY_IN: ""                        # varsa dogrudan gunluk 311 dosyasi
+          AGG_311_NAME: "sf_311_last_5_years.csv"   # yoksa buradan gunluk uretilir
         run: |
           set -e
           python -u update_311_daily.py
@@ -113,8 +114,8 @@ p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
 df=pd.read_csv(p, nrows=0); print(list(df.columns))
 PY
 
-      # (3) Bus stops → GRID/EVENTS
-      - name: (3) Bus stops → enrich GRID & EVENTS
+      # (3) Bus stops -> GRID/EVENTS
+      - name: (3) Bus stops -> enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           BUS_CANON_RAW: "sf_bus_stops_with_geoid.csv"
@@ -126,8 +127,8 @@ PY
           set -e
           python -u update_bus_fr_daily.py
 
-      # (4) Train stops → GRID/EVENTS
-      - name: (4) Train stops → enrich GRID & EVENTS
+      # (4) Train stops -> GRID/EVENTS
+      - name: (4) Train stops -> enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           TRAIN_STOPS_NAME: "sf_train_stops_with_geoid.csv"
@@ -139,8 +140,8 @@ PY
           set -e
           python -u update_train_fr_daily.py
 
-      # (5) POI → GRID/EVENTS
-      - name: (5) POI → enrich GRID & EVENTS
+      # (5) POI -> GRID/EVENTS
+      - name: (5) POI -> enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           POI_GEOJSON_1: "${{ env.CRIME_DATA_DIR }}/sf_pois.geojson"
@@ -155,8 +156,8 @@ PY
           set -e
           python -u update_poi_fr_daily.py
 
-      # (6) Police & Government → GRID/EVENTS
-      - name: (6) Police & Government → enrich GRID & EVENTS
+      # (6) Police & Government -> GRID/EVENTS
+      - name: (6) Police & Government -> enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           POLICE_FILE: "sf_police_stations.csv"
@@ -169,8 +170,8 @@ PY
           set -e
           python -u update_police_gov_daily.py
 
-      # (7) Weather (date-merge) → GRID/EVENTS
-      - name: (7) Weather (date-merge) → enrich GRID & EVENTS
+      # (7) Weather (date-merge) -> GRID/EVENTS
+      - name: (7) Weather (date-merge) -> enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           WEATHER_FILE: "sf_weather_5years.csv"
@@ -183,7 +184,7 @@ PY
           python -u update_weather_fr_daily.py
 
       # (8) Neighbor windows (1/3/7d)
-      - name: (8) Neighbor windows (1/3/7d) → enrich GRID & EVENTS
+      - name: (8) Neighbor windows (1/3/7d) -> enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           NEIGH_FILE: "${{ env.NEIGH_FILE }}"
@@ -267,8 +268,8 @@ today["risk_score"] = (
     safe_num("events_count")*1.0 +
     safe_num("neighbor_crime_24h")*0.20 +
     safe_num("neighbor_crime_72h")*0.10 +
-    safe_num("neighbor_crime_7d") *0.05 +
-    safe_num("n911_prev_1d")      *0.10
+    safe_num("neighbor_crime_7d")*0.05 +
+    safe_num("n911_prev_1d")*0.10
 )
 
 topk = (today
