@@ -206,17 +206,24 @@ def make_311_features(g_daily: pd.DataFrame, cal_dates: pd.DataFrame) -> pd.Data
     merged = merged.sort_values(["GEOID","date"]).reset_index(drop=True)
     m = merged.set_index(["GEOID","date"]).sort_index()
 
-    # EMA — hizalama + güvenli atama
+    # === 🔧 FIX: EMA hesapları (group_keys=False) + direct values atama ===
     for a in EMA_ALPHAS:
-        ema = (m["n311"].groupby(level=0)
-               .apply(lambda s: s.ewm(alpha=a, adjust=False).mean()))
-        m[f"n311_ema_a{int(a*10)}"] = ema.reindex(m.index).to_numpy()
+        col = f"n311_ema_a{int(a*10)}"
+        ema = (
+            m["n311"]
+            .groupby(level=0, group_keys=False)              # ← ekstra seviye ekleme
+            .apply(lambda s: s.ewm(alpha=a, adjust=False).mean())
+        )
+        # Aynı sırada olduğundan doğrudan values ile atıyoruz
+        m[col] = ema.values
 
-    # Basit pencereler
+    # Basit pencereler (değişmedi)
     m["n311_prev_1d"] = (m["n311"].groupby(level=0).shift(1)).fillna(0.0)
-    m["n311_sum_3d"]  = (m["n311"].groupby(level=0)
-                         .rolling(window=3, min_periods=1).sum()
-                         .reset_index(level=0, drop=True))
+    m["n311_sum_3d"]  = (
+        m["n311"].groupby(level=0)
+        .rolling(window=3, min_periods=1).sum()
+        .reset_index(level=0, drop=True)
+    )
 
     return m.reset_index()
 
