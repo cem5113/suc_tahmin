@@ -1,291 +1,262 @@
-# update_population.py — GEOID (11 hane, tract) zenginleştirme → sf_crime_03.csv
+# update_311_fr.py
 from __future__ import annotations
-import os, re, zipfile, csv
+
+import os, re
 from pathlib import Path
+from typing import Optional, List
+
 import pandas as pd
+import geopandas as gpd
 
-pd.options.mode.copy_on_write = True
+# =========================
+# CONFIG
+# =========================
+BASE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
+Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
 
-# ============================== Utils ==============================
-def log(msg: str): print(msg, flush=True)
+# Giriş/Çıkış (fr_crime_01 varsa onu kullan; yoksa fr_crime)
+FR_BASE_IN_ENV = os.getenv("FR_BASE_IN", "")  # opsiyonel override
+FR_BASE_01     = Path(BASE_DIR) / "fr_crime_01.csv"
+FR_BASE_RAW    = Path(BASE_DIR) / "fr_crime.csv"
+FR_BASE_IN     = Path(FR_BASE_IN_ENV) if FR_BASE_IN_ENV else (FR_BASE_01 if FR_BASE_01.exists() else FR_BASE_RAW)
 
-def safe_unzip(zip_path: Path, dest_dir: Path):
-    if not zip_path.exists():
-        log(f"ℹ️ Artifact ZIP yok: {zip_path}")
-        return
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    log(f"📦 ZIP açılıyor: {zip_path} → {dest_dir}")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        for m in zf.infolist():
-            out = dest_dir / m.filename
-            out.parent.mkdir(parents=True, exist_ok=True)
-            if m.is_dir():
-                out.mkdir(parents=True, exist_ok=True); continue
-            with zf.open(m, "r") as src, open(out, "wb") as dst:
-                dst.write(src.read())
-    log("✅ ZIP çıkarma tamam.")
+FR_OUT_PATH    = Path(BASE_DIR) / "fr_crime_02.csv"
 
-# --- GEOID temizleyici: scientific notation & float görünümünü düzelt ---
-def _clean_geoid_scalar(x: str) -> str:
-    if x is None:
-        return ""
-    s = str(x).strip()
-    # Bilimsel gösterim / float (ör: 6.0755980501E10, 60755980501.0)
+# 311 özet (yerelde hazır GEOID-bazlı)
+_311_SUMMARY_CANDS = [
+    Path(BASE_DIR) / "sf_311_last_5_years.csv",
+]
+
+# GEOID poligonları (lat/lon → GEOID için)
+BLOCKS_CANDIDATES = [
+    Path(BASE_DIR) / "sf_census_blocks_with_population.geojson",
+    Path("./sf_census_blocks_with_population.geojson"),
+]
+
+DEFAULT_GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
+
+# =========================
+# HELPERS
+# =========================
+def log(msg: str):
+    print(msg, flush=True)
+
+def ensure_parent(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+def safe_save_csv(df: pd.DataFrame, path: Path):
+    ensure_parent(path)
+    df.to_csv(path, index=False)
+
+def normalize_geoid(s: pd.Series, target_len: int = DEFAULT_GEOID_LEN) -> pd.Series:
+    s = s.astype(str).str.extract(r"(\d+)", expand=False)
+    return s.str[:int(target_len)].str.zfill(int(target_len))
+
+def to_date(s) -> pd.Series:
+    return pd.to_datetime(s, errors="coerce").dt.date
+
+def pick_existing(paths: List[Path]) -> Optional[Path]:
+    for p in paths:
+        if p.exists():
+            return p
+    return None
+
+# ---------------- time utils ----------------
+hr_pat = re.compile(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
+_TS_CANDS = ["datetime","timestamp","occurred_at","reported_at","requested_datetime","date_time"]
+_HOUR_CANDS = ["hour","event_hour","hr","Hour"]
+
+def hour_from_range(s: str) -> Optional[int]:
+    m = hr_pat.match(str(s))
+    return int(m.group(1)) % 24 if m else None
+
+def hour_to_range(h: int) -> str:
+    h = int(h) % 24
+    a = (h // 3) * 3
+    b = min(a + 3, 24)
+    return f"{a:02d}-{b:02d}"
+
+# =========================
+# LOAD 311 SUMMARY (no update)
+# =========================
+def load_311_summary() -> pd.DataFrame:
+    p = pick_existing(_311_SUMMARY_CANDS)
+    if p is None:
+        raise FileNotFoundError("Yerelde 311 özet dosyası bulunamadı (sf_311_last_5_years*.csv).")
+    log(f"📥 311 özeti yükleniyor: {p}")
+    df = pd.read_csv(p, low_memory=False, dtype={"GEOID":"string"})
+
+    # kolon adları normalizasyonu
+    if "311_request_count" not in df.columns:
+        # bazı pipeline'larda 'count' adıyla olabilir
+        for c in ["count","requests","n"]:
+            if c in df.columns:
+                df = df.rename(columns={c:"311_request_count"})
+                break
+
+    # hour_range / event_hour / hr_key kesinleştir
+    if "hour_range" not in df.columns and "event_hour" in df.columns:
+        df["hour_range"] = df["event_hour"].apply(hour_to_range)
+
+    if "event_hour" not in df.columns and "hour_range" in df.columns:
+        df["event_hour"] = df["hour_range"].apply(hour_from_range).astype("Int64")
+
+    if "GEOID" in df.columns:
+        df["GEOID"] = normalize_geoid(df["GEOID"], DEFAULT_GEOID_LEN)
+    if "date" in df.columns:
+        df["date"] = to_date(df["date"])
+
+    # hr_key
+    if "event_hour" in df.columns:
+        df["hr_key"] = ((pd.to_numeric(df["event_hour"], errors="coerce").fillna(0).astype(int)) // 3) * 3
+    elif "hour_range" in df.columns:
+        df["hr_key"] = df["hour_range"].apply(hour_from_range).fillna(0).astype(int)
+    else:
+        df["hr_key"] = 0
+
+    # sade kolon kümesi
+    keep = ["GEOID","date","hour_range","hr_key","311_request_count"]
+    present = [c for c in keep if c in df.columns]
+    df = df[present].dropna(subset=["GEOID"]).copy()
+
+    # anahtar eşsizliği
+    if {"GEOID","date","hr_key"}.issubset(df.columns):
+        df = (df.sort_values(["GEOID","date","hr_key"])
+                .drop_duplicates(subset=["GEOID","date","hr_key"], keep="last"))
+    log(f"📊 311 özet: {len(df)} satır")
+    return df
+
+# =========================
+# GEOID for fr_crime (from lat/lon if needed)
+# =========================
+def load_blocks() -> gpd.GeoDataFrame:
+    bp = pick_existing(BLOCKS_CANDIDATES)
+    if bp is None:
+        raise FileNotFoundError("Nüfus blokları GeoJSON yok: sf_census_blocks_with_population.geojson")
+    gdf = gpd.read_file(bp)
+    if "GEOID" not in gdf.columns:
+        cand = [c for c in gdf.columns if str(c).upper().startswith("GEOID")]
+        if not cand:
+            raise ValueError("GeoJSON içinde GEOID yok.")
+        gdf = gdf.rename(columns={cand[0]:"GEOID"})
+    gdf["GEOID"] = normalize_geoid(gdf["GEOID"], DEFAULT_GEOID_LEN)
+    if gdf.crs is None:
+        gdf.set_crs("EPSG:4326", inplace=True)
+    elif gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(4326)
+    return gdf[["GEOID","geometry"]].copy()
+
+def ensure_fr_geoid(fr: pd.DataFrame) -> pd.DataFrame:
+    if "GEOID" in fr.columns and fr["GEOID"].notna().any():
+        fr["GEOID"] = normalize_geoid(fr["GEOID"], DEFAULT_GEOID_LEN)
+        return fr
+    # lat/lon alternatif isimler
+    alt = {"lat":"latitude","y":"latitude","lon":"longitude","long":"longitude","x":"longitude"}
+    for k,v in alt.items():
+        if k in fr.columns and v not in fr.columns:
+            fr[v] = fr[k]
+    if not {"latitude","longitude"}.issubset(fr.columns):
+        raise ValueError("fr_crime tablosunda GEOID yok ve lat/lon bulunamadı.")
+
+    # BBOX kaba filtre (SF)
+    min_lon, min_lat, max_lon, max_lat = (-123.2, 37.6, -122.3, 37.9)
+    fr = fr[(pd.to_numeric(fr["latitude"],  errors="coerce").between(min_lat, max_lat)) &
+            (pd.to_numeric(fr["longitude"], errors="coerce").between(min_lon, max_lon))].copy()
+
+    blocks = load_blocks()
+    gdf = gpd.GeoDataFrame(
+        fr,
+        geometry=gpd.points_from_xy(pd.to_numeric(fr["longitude"]), pd.to_numeric(fr["latitude"])),
+        crs="EPSG:4326"
+    )
+    joined = gpd.sjoin(gdf, blocks, how="left", predicate="within")
+    out = pd.DataFrame(joined.drop(columns=["geometry","index_right"], errors="ignore"))
+    out["GEOID"] = normalize_geoid(out["GEOID"], DEFAULT_GEOID_LEN)
+    out = out.dropna(subset=["GEOID"]).copy()
+    return out
+
+# =========================
+# TIME KEYS for fr_crime
+# =========================
+def ensure_fr_time_keys(fr: pd.DataFrame) -> pd.DataFrame:
+    fr = fr.copy()
+    ts_col = next((c for c in _TS_CANDS if c in fr.columns), None)
+    if ts_col:
+        fr[ts_col] = pd.to_datetime(fr[ts_col], errors="coerce")
+        fr["date"] = fr[ts_col].dt.date
+        if any(c in fr.columns for c in _HOUR_CANDS):
+            hcol = next(c for c in _HOUR_CANDS if c in fr.columns)
+            hour = pd.to_numeric(fr[hcol], errors="coerce").fillna(fr[ts_col].dt.hour).astype(int)
+        else:
+            hour = fr[ts_col].dt.hour.fillna(0).astype(int)
+    else:
+        if "date" in fr.columns:
+            fr["date"] = to_date(fr["date"])
+        else:
+            log("⚠️ Zaman kolonu yok → 'date' boş kalacak (gevşek join).")
+            fr["date"] = pd.NaT
+        if any(c in fr.columns for c in _HOUR_CANDS):
+            hcol = next(c for c in _HOUR_CANDS if c in fr.columns)
+            hour = pd.to_numeric(fr[hcol], errors="coerce").fillna(0).astype(int)
+        else:
+            hour = pd.Series([0]*len(fr), index=fr.index)
+
+    fr["event_hour"] = (hour % 24).astype("int16")
+    fr["hr_key"] = ((fr["event_hour"].astype(int) // 3) * 3).astype("int16")
+    return fr
+
+# =========================
+# MAIN
+# =========================
+def main():
+    log(f"📁 Giriş: {FR_BASE_IN}")
+    if not FR_BASE_IN.exists():
+        raise FileNotFoundError(f"Girdi bulunamadı: {FR_BASE_IN}")
+    base = pd.read_csv(FR_BASE_IN, low_memory=False)
+    log(f"📊 fr_base: {len(base)} satır, {len(base.columns)} sütun")
+
+    # 311 özetini yükle (GEOID bazlı, hazır)
+    df311 = load_311_summary()
+
+    # fr_crime tarafında GEOID & zaman anahtarları
+    base = ensure_fr_geoid(base)
+    base = ensure_fr_time_keys(base)
+
+    # 311 tarafı: join için minimal kolonlar
+    cols_311 = ["GEOID","date","hour_range","hr_key","311_request_count"]
+    df311 = df311[[c for c in cols_311 if c in df311.columns]].copy()
+
+    # birleştirme mantığı
+    keys_full    = ["GEOID","date","hr_key"]
+    keys_geoidhr = ["GEOID","hr_key"]
+    keys_geoid   = ["GEOID"]
+
+    if base["date"].notna().any() and {"date","hr_key"}.issubset(base.columns) and {"date","hr_key"}.issubset(df311.columns):
+        merged = base.merge(df311, on=keys_full, how="left")
+        join_mode = "GEOID + date + hr_key"
+    elif "hr_key" in base.columns and "hr_key" in df311.columns:
+        merged = base.merge(df311.drop(columns=["date"], errors="ignore"), on=keys_geoidhr, how="left")
+        join_mode = "GEOID + hr_key"
+    else:
+        merged = base.merge(df311.drop(columns=["date","hr_key"], errors="ignore").drop_duplicates("GEOID"),
+                            on=keys_geoid, how="left")
+        join_mode = "GEOID"
+
+    # NA → 0
+    if "311_request_count" in merged.columns:
+        merged["311_request_count"] = pd.to_numeric(merged["311_request_count"], errors="coerce").fillna(0).astype("int32")
+    else:
+        merged["311_request_count"] = 0
+
+    # Kaydet
+    safe_save_csv(merged, FR_OUT_PATH)
+    log(f"🔗 Join modu: {join_mode}")
+    log(f"✅ fr_crime + 311 birleşti → {FR_OUT_PATH} ({len(merged)} satır)")
+
     try:
-        if re.fullmatch(r"[0-9]+(\.[0-9]+)?([eE][+\-]?[0-9]+)?", s):
-            as_int = int(float(s))
-            return str(as_int)
+        print(merged.head(5).to_string(index=False))
     except Exception:
         pass
-    # Genel durum: rakam dışını at
-    return re.sub(r"\D+", "", s)
 
-def _digits_only(s: pd.Series) -> pd.Series:
-    return s.astype(str).map(_clean_geoid_scalar).fillna("")
-
-def _mode_len(series: pd.Series) -> int:
-    if series.empty: return 11
-    L = series.astype(str).str.len()
-    m = L.mode(dropna=True)
-    return int(m.iloc[0]) if not m.empty else int(L.dropna().median())
-
-def _key(series: pd.Series, L: int) -> pd.Series:
-    # Yalnızca rakamları al; kısa ise zfill, uzun ise kırp
-    s = _digits_only(series)
-    return s.str.zfill(L).str[:L]
-
-def _find_geoid_col(df: pd.DataFrame) -> str | None:
-    cands = ["GEOID","geoid","geo_id","GEOID10","geoid10","GeoID",
-             "tract","TRACT","tract_geoid","TRACT_GEOID",
-             "geography_id","GEOID2"]
-    low = {c.lower(): c for c in df.columns}
-    for n in cands:
-        if n.lower() in low: return low[n.lower()]
-    for c in df.columns:
-        if "geoid" in c.lower(): return c
-    return None
-
-def _find_population_col(df: pd.DataFrame, forced: str | None = None) -> str | None:
-    if forced and forced in df.columns:
-        return forced
-    cands = ["population","pop","total_population","B01003_001E","estimate","total","value"]
-    low = {c.lower(): c for c in df.columns}
-    for n in cands:
-        if n.lower() in low: return low[n.lower()]
-    for c in df.columns:
-        if re.fullmatch(r"(pop.*|.*population.*|value)", c, flags=re.I): return c
-    return None
-
-def _num(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(
-        s.astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
-        errors="coerce"
-    )
-
-# ============================== Opsiyonel: Crosswalk ==============================
-def _detect_crosswalk_cols(df: pd.DataFrame):
-    """
-    Crosswalk CSV için muhtemel kolon setleri:
-      - 'geoid_from','geoid_to'
-      - 'tract2010','tract2020'
-      - 'geoid10','geoid20'
-    Dönüş: (src_col, dst_col) veya (None,None)
-    """
-    candidates = [
-        ("geoid_from","geoid_to"), ("tract2010","tract2020"),
-        ("geoid10","geoid20"), ("GEOID10","GEOID20"), ("from","to")
-    ]
-    cols = set(df.columns)
-    for a,b in candidates:
-        if a in cols and b in cols:
-            return a,b
-    # zayıf sezgi: içinde 2010/2020 geçen ilk iki kolon
-    c2010 = [c for c in df.columns if "2010" in c]
-    c2020 = [c for c in df.columns if "2020" in c]
-    if c2010 and c2020:
-        return c2010[0], c2020[0]
-    return None, None
-
-def _apply_crosswalk_if_provided(pp: pd.DataFrame, key_col: str, join_len: int) -> pd.DataFrame:
-    """
-    Env: CROSSWALK_CSV varsa pp['_key'] değerlerini dönüştürür.
-    Crosswalk haritası tract→tract düzeyinde olmalı (11 hane).
-    """
-    path = os.getenv("CROSSWALK_CSV", "").strip()
-    if not path:
-        return pp
-    p = Path(path)
-    if not p.exists():
-        log(f"ℹ️ CROSSWALK_CSV bulunamadı: {p}")
-        return pp
-    try:
-        cw = pd.read_csv(p, dtype=str, low_memory=False)
-    except Exception as e:
-        log(f"⚠️ Crosswalk okunamadı: {e}")
-        return pp
-    src_col, dst_col = _detect_crosswalk_cols(cw)
-    if not src_col or not dst_col:
-        log("⚠️ Crosswalk kolonları tespit edilemedi (örn. geoid10/geoid20).")
-        return pp
-
-    cw["_src"] = _key(cw[src_col], join_len)
-    cw["_dst"] = _key(cw[dst_col], join_len)
-    cw_map = dict(zip(cw["_src"], cw["_dst"]))
-    before_unique = pp["_key"].nunique()
-    pp = pp.copy()
-    pp["_key"] = pp["_key"].map(lambda x: cw_map.get(x, x))
-    after_unique = pp["_key"].nunique()
-    log(f"[info] Crosswalk uygulandı: uniq_keys {before_unique:,} → {after_unique:,}")
-    return pp
-
-# ============================== Config ==============================
-BASE_DIR      = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")); BASE_DIR.mkdir(parents=True, exist_ok=True)
-ARTIFACT_ZIP  = Path(os.getenv("ARTIFACT_ZIP", "artifact/sf-crime-pipeline-output.zip"))
-ARTIFACT_DIR  = Path(os.getenv("ARTIFACT_DIR", "artifact_unzipped"))
-CRIME_OUTPUT  = str(BASE_DIR / "sf_crime_03.csv")
-
-# Birleşim anahtar uzunluğu (tract için 11)
-JOIN_LEN      = int(os.getenv("JOIN_LEN", "11"))
-
-# SF'ye filtre için prefiks; boş ise filtre uygulanmaz
-SF_PREFIX     = os.getenv("SF_PREFIX_FILTER", "06075").strip()
-
-# İsteğe bağlı: nüfus kolonunu zorla
-FORCE_POP_COL = os.getenv("POPULATION_COL", "").strip() or None
-
-# ZIP varsa aç
-safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
-
-# Aday dosyalar (öncelik: artifact_unzipped)
-CRIME_CANDS = [
-    ARTIFACT_DIR / "fr_crime_02.csv",
-    ARTIFACT_DIR / "fr_crime.csv",
-    BASE_DIR / "sf_crime_02.csv",
-    BASE_DIR / "sf_crime.csv",
-    Path("sf_crime_02.csv"),
-    Path("sf_crime.csv"),
-]
-POP_CANDS = [
-    Path(os.getenv("POPULATION_PATH")) if os.getenv("POPULATION_PATH") else None,
-    ARTIFACT_DIR / "sf_population.csv",
-    BASE_DIR / "sf_population.csv",
-    Path("sf_population.csv"),
-]
-
-def pick(paths):
-    for p in paths:
-        if p and Path(p).exists(): return str(p)
-    return None
-
-crime_path = pick(CRIME_CANDS)
-pop_path   = pick(POP_CANDS)
-if not crime_path: raise FileNotFoundError("❌ CRIME CSV bulunamadı (fr_crime_02.csv / sf_crime_02.csv / fr_crime.csv / sf_crime.csv).")
-if not pop_path:   raise FileNotFoundError("❌ POPULATION CSV bulunamadı (sf_population.csv).")
-log(f"📥 crime: {crime_path}")
-log(f"📥 population: {pop_path}")
-
-# ============================== Read (STRING!) ==============================
-crime = pd.read_csv(crime_path, low_memory=False, dtype=str)
-pop   = pd.read_csv(pop_path,   low_memory=False, dtype=str)
-
-crime_geoid_col = _find_geoid_col(crime)
-if not crime_geoid_col: raise RuntimeError("Suç veri setinde GEOID kolonu yok.")
-pop_geoid_col = _find_geoid_col(pop)
-if not pop_geoid_col:  raise RuntimeError("Nüfus CSV’de GEOID kolonu yok.")
-pop_val_col   = _find_population_col(pop, FORCE_POP_COL)
-if not pop_val_col:    raise RuntimeError("Nüfus CSV’de nüfus değer kolonu yok (population/B01003_001E/estimate/...).")
-
-crime_len = _mode_len(_digits_only(crime[crime_geoid_col]))
-pop_len   = _mode_len(_digits_only(pop[pop_geoid_col]))
-log(f"[info] crime GEO len≈{crime_len} | pop GEO len≈{pop_len} | join_len={JOIN_LEN} (tract)")
-log(f"[info] pop_val_col={pop_val_col!r}")
-
-# ============================== Prepare POP ==============================
-pp0 = pop[[pop_geoid_col, pop_val_col]].copy()
-pp0["_key"] = _key(pp0[pop_geoid_col], JOIN_LEN)
-pp0["population"] = _num(pp0[pop_val_col]).fillna(0)
-
-# Teşhis: Prefiks dağılımı (ilk 5 hane)
-try:
-    pref_counts = (pp0["_key"].str[:5].value_counts().head(12))
-    log("[diag] POP _key ilk5 prefiks (top-12):")
-    for k, v in pref_counts.items():
-        log(f"   • {k}: {v}")
-except Exception as _e:
-    log(f"[diag] Prefiks sayımı atlandı: {_e}")
-
-pp = pp0
-
-# Opsiyonel: SF prefiksi ile filtre (gürültüyü azaltır)
-if SF_PREFIX:
-    before = len(pp)
-    pp = pp[pp["_key"].str.startswith(SF_PREFIX)]
-    log(f"[info] POP SF filtresi: prefix={SF_PREFIX} | {before:,} → {len(pp):,}")
-    # Otomatik geri dönüş: eğer filtre hepsini sildiyse, filtreyi kaldır (pp0'a dön)
-    if len(pp) == 0 and before > 0:
-        log("⚠️ SF_PREFIX filtresi tüm nüfusu eledi. Otomatik olarak filtresiz moda dönüyorum.")
-        pp = pp0.copy()
-
-# Crosswalk (opsiyonel): varsa uygula (2010↔2020 dönüşümü)
-pp = _apply_crosswalk_if_provided(pp, key_col="_key", join_len=JOIN_LEN)
-
-# Pop seviyesi tract üstü ise 11'e aggregate (sum)
-pop_len_checked = _mode_len(_digits_only(pop[pop_geoid_col]))
-if pop_len_checked > JOIN_LEN:
-    pp = pp.groupby("_key", as_index=False)["population"].sum()
-else:
-    pp = pp[["_key","population"]].drop_duplicates("_key", keep="last")
-
-# ============================== Prepare CRIME ==============================
-cc = crime.copy()
-cc["_key"] = _key(cc[crime_geoid_col], JOIN_LEN)
-
-# --- Teşhis: Anahtar kümeleri ve kesişim ---
-left_keys  = set(cc["_key"].unique())
-right_keys = set(pp["_key"].unique())
-inter      = left_keys & right_keys
-log(f"[debug] left_keys={len(left_keys):,} | right_keys={len(right_keys):,} | intersection={len(inter):,}")
-
-if len(inter) == 0:
-    samp_left  = list(sorted(left_keys))[:5]
-    samp_right = list(sorted(right_keys))[:5]
-    log(f"[debug] örnek left keys:  {samp_left}")
-    log(f"[debug] örnek right keys: {samp_right}")
-    log("⚠️ Hiç eşleşme yok: Muhtemelen GEOID scientific-notation / vintaj (2010↔2020) farkı veya SF dışı pop kaynağı.")
-
-# ============================== Merge & GEOID Temizliği ==============================
-out = cc.merge(pp, how="left", on="_key")
-
-# Tüm GEOID türevlerini at ve en başa 11 hanelik string GEOID koy
-geoid_like_cols = [c for c in out.columns if c.lower().startswith("geoid")]
-out.drop(columns=[c for c in geoid_like_cols if c != "_key"], errors="ignore", inplace=True)
-
-# Tek resmi GEOID sütunu:
-out.insert(0, "GEOID", out["_key"].astype("string"))
-out.drop(columns=["_key"], inplace=True)
-
-# Tip güvenliği: GEOID -> string (11 hane)
-out["GEOID"] = out["GEOID"].astype("string")
-
-# Ek güvence: tüm GEOID'ler 11 hane mi?
-bad = out["GEOID"].fillna("").str.fullmatch(r"\d{11}") == False
-if bad.any():
-    n_bad = int(bad.sum())
-    log(f"⚠️ Uyarı: {n_bad} satırda GEOID 11 hane değil (örn: {out.loc[bad, 'GEOID'].head(3).tolist()})")
-
-# ============================== Save ==============================
-Path(CRIME_OUTPUT).parent.mkdir(parents=True, exist_ok=True)
-# CSV yazarken sayıları tırnak içine alma; ama GEOID zaten string olduğu için .0 olmaz.
-out.to_csv(CRIME_OUTPUT, index=False, na_rep="")
-
-# ============================== Summary Logs ==============================
-log(f"✅ Kaydedildi → {CRIME_OUTPUT}")
-try:
-    null_rate = out["population"].isna().mean()
-    match_rate = 1.0 - null_rate
-    log(f"📊 satır: crime={len(crime):,} | pop={len(pp):,} | out={len(out):,}")
-    log(f"🔗 match_rate={match_rate:.2%} | population NaN oranı={null_rate:.2%}")
-    with pd.option_context("display.max_columns", 60, "display.width", 1600):
-        log(out[["GEOID","population"]].head(10).to_string(index=False))
-except Exception as e:
-    log(f"ℹ️ Önizleme atlandı: {e}")
+if __name__ == "__main__":
+    main()
