@@ -1,68 +1,86 @@
-name: Daily FR Grid/Events Enrichment + Patrol
+name: Daily Crime
 
 on:
-  # Upstream workflow doğrudan çağırabilsin
-  workflow_call:
-    inputs:
-      reason:
-        description: "Upstream çağrı nedeni"
-        required: false
-        type: string
-
-  # Manuel çalıştırma
-  workflow_dispatch:
-
-  # Her gün 07:30 (Europe/Istanbul)
-  schedule:
-    - cron: "30 04 * * *"
+  workflow_run:
+    workflows: ["Full SF Crime Pipeline"]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: fr-daily-grid-events-${{ github.ref }}
+  group: daily-crime-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  TZ: Europe/Istanbul
-  CRIME_DATA_DIR: crime_prediction_data
-
-  # I/O (yerinde güncellenecek dosya adları)
-  FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
-  FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
-  FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
-  FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
-
-  # Komşuluk dosyası
-  NEIGH_FILE: neighbors.csv
 jobs:
-  enrich-fr-daily:
-    # Upstream workflow_run tetiklendi ise sadece 'success' sonrasında çalış
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+  run_fr:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    env:
+      CRIME_DATA_DIR: crime_prediction_data
+      WX_LOCATION: "paris"
+      WX_UNIT: "metric"
+      GEOID_LEN: "11"
+
+      # artifact indirilecek yerler
+      ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
+      ARTIFACT_DIR: artifact
+      FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
+      FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
+
+      # GÜNLÜK I/O dosya adları (ADIMLAR BUNLARA BAKIYOR)
+      FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
+      FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
+      FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
+      FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
+
+      # komşuluk dosyası
+      NEIGH_FILE: neighbors.csv
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - name: Debug trigger
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "from workflow=${{ github.event.workflow_run.name }}"
+          echo "conclusion=${{ github.event.workflow_run.conclusion }}"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+
+      - name: Ensure data dir (FR)
+        run: mkdir -p "${CRIME_DATA_DIR}"
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install Python deps
+      - name: Install deps (quick)
         run: |
-          python -m pip install -U pip
-          pip install pandas numpy scikit-learn pyproj shapely geopandas fiona rtree
+          python -m pip install -U pip wheel setuptools
+          [ -f requirements.txt ] && pip install -r requirements.txt || true
+          python -m pip install -U pyarrow pandas
+          # günlük zenginleştirme adımları için
+          python -m pip install numpy scikit-learn pyproj shapely geopandas fiona rtree
 
-      - name: Show working tree
+      - name: Download upstream artifact (triggering run)
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          run_id: ${{ github.event.workflow_run.id }}
+          name: sf-crime-pipeline-output
+          path: artifact
+
+      - name: Unzip artifact if present (optional)
+        shell: bash
         run: |
-          echo "CWD: $PWD"
-          ls -lah
-          echo "Data dir:"
-          ls -lah "${CRIME_DATA_DIR}" || true
+          set -euo pipefail
+          if [ -f "${{ env.ARTIFACT_ZIP }}" ]; then
+            command -v unzip >/dev/null 2>&1 || { sudo apt-get update -y >/dev/null && sudo apt-get install -y unzip >/dev/null; }
+            unzip -o "${{ env.ARTIFACT_ZIP }}" -d "${{ env.ARTIFACT_DIR }}"
+          else
+            echo "No artifact ZIP file found (this is fine)."
+          fi
 
       # (0) Daily + Y_label (GRID & EVENTS üret)
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
@@ -223,8 +241,9 @@ PY
             ${{ env.CRIME_DATA_DIR }}/${{ env.FR_EVENTS_DAILY_OUT }}
           if-no-files-found: warn
 
+  # İKİNCİ JOB — doğru needs: run_fr
   patrol-fr:
-    needs: [enrich-fr-daily]
+    needs: [run_fr]
     runs-on: ubuntu-latest
     env:
       CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -236,11 +255,9 @@ PY
       PATROL_OUT_GEOJSON: "fr_patrol_plan.geojson"
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
