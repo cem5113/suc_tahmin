@@ -117,10 +117,10 @@ jobs:
           set -e
           python -u update_311_daily.py
           python - <<'PY'
-import pandas as pd, os
-p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
-df=pd.read_csv(p, nrows=0); print(list(df.columns))
-PY
+          import pandas as pd, os
+          p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
+          df=pd.read_csv(p, nrows=0); print(list(df.columns))
+          PY
 
       - name: (3) Bus stops -> enrich GRID & EVENTS
         env:
