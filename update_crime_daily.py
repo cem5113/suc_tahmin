@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-update_crime_fr_daily.py
+update_crime_daily.py
 Olay bazlı kaynak (FR_EVENTS_PATH) -> (1) olay-bazlı günlük çıktı (events_daily)
                               -> (2) GEOID x date full-grid günlük çıktı (grid_daily)
 
