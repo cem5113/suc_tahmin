@@ -1,23 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-update_crime_daily.py  —  Event-level → (1) events_daily  (2) GEOID×date grid_daily
-
-ENV:
-- CRIME_DATA_DIR : kök (default: crime_prediction_data)
-- FR_EVENTS_PATH : olay bazlı giriş (default: sf_crime.csv)
-- FR_OUT_EVENTS  : olay-bazlı günlük çıktı (default: fr_crime_events_daily.csv)
-- FR_OUT_GRID    : GEOID×date grid çıktı (default: fr_crime_grid_daily.csv)
-- FR_MIN_YEARS   : min yıl (default: 5)
-- FR_DATE_COL    : zaman sütunu ipucu (default: incident_datetime)
-- FR_GEOID_COL   : geoid sütunu (default: GEOID)
-- FR_ID_COL      : olay id sütunu (default: id)
-"""
+# update_crime_daily.py — Event-level → (1) events_daily  (2) GEOID×date grid_daily
+# REVIZE: artifact ZIP açma + aday yol keşfi + "en güncel dosyayı seç" + tazelik logu
 
 from __future__ import annotations
-import os
+import os, zipfile
 from pathlib import Path
-from datetime import timedelta
+from datetime import datetime, date, timedelta
 import pandas as pd
 import numpy as np
 import shutil
@@ -27,10 +16,16 @@ warnings.simplefilter("ignore", FutureWarning)
 pd.options.mode.copy_on_write = True
 
 # ----------------------- ENV / PATHS -----------------------
-BASE_DIR    = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).expanduser().resolve()
-EVENTS_PATH = Path(os.getenv("FR_EVENTS_PATH", "sf_crime.csv"))
-OUT_EVENTS  = Path(os.getenv("FR_OUT_EVENTS",  "fr_crime_events_daily.csv"))
-OUT_GRID    = Path(os.getenv("FR_OUT_GRID",    "fr_crime_grid_daily.csv"))
+BASE_DIR     = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).expanduser().resolve()
+
+# Artifact (ZIP) desteği — isteğe bağlı
+ARTIFACT_ZIP = Path(os.getenv("ARTIFACT_ZIP", "artifact/sf-crime-pipeline-output.zip"))
+ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifact_unzipped"))
+
+# Girdi/çıktı ENV (override edebilir)
+EVENTS_PATH  = Path(os.getenv("FR_EVENTS_PATH", "sf_crime.csv"))
+OUT_EVENTS   = Path(os.getenv("FR_OUT_EVENTS",  "fr_crime_events_daily.csv"))
+OUT_GRID     = Path(os.getenv("FR_OUT_GRID",    "fr_crime_grid_daily.csv"))
 
 DATE_COL  = os.getenv("FR_DATE_COL", "incident_datetime")
 GEOID_COL = os.getenv("FR_GEOID_COL", "GEOID")
@@ -43,6 +38,32 @@ MIN_DAYS  = max(1, MIN_YEARS * 365)
 def _abs(p: Path) -> Path:
     p = p.expanduser()
     return (p if p.is_absolute() else (BASE_DIR / p)).resolve()
+
+def _is_within_directory(directory: Path, target: Path) -> bool:
+    try:
+        directory = directory.resolve()
+        target = target.resolve()
+        return str(target).startswith(str(directory))
+    except Exception:
+        return False
+
+def _safe_unzip(zip_path: Path, dest_dir: Path):
+    if not zip_path.exists():
+        print(f"ℹ️ Artifact ZIP yok: {zip_path}")
+        return
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    print(f"📦 ZIP açılıyor: {zip_path} → {dest_dir}")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for m in zf.infolist():
+            out = dest_dir / m.filename
+            if not _is_within_directory(dest_dir, out.parent):
+                raise RuntimeError(f"Zip path outside target dir engellendi: {m.filename}")
+            if m.is_dir():
+                out.mkdir(parents=True, exist_ok=True); continue
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(m, "r") as src, open(out, "wb") as dst:
+                dst.write(src.read())
+    print("✅ ZIP çıkarma tamam.")
 
 def _read_table(p: Path) -> pd.DataFrame:
     p = _abs(p)
@@ -57,7 +78,7 @@ def _read_table(p: Path) -> pd.DataFrame:
             df = pd.read_csv(p, low_memory=False, compression="gzip")
         else:
             df = pd.read_csv(p, low_memory=False)
-        print(f"📖 Okundu: {p}  ({len(df):,}×{df.shape[1]})")
+        print(f"📖 Okundu: {p}  ({len(df):,}×{df.shape[1]})  mtime={datetime.fromtimestamp(p.stat().st_mtime)}")
         return df
     except Exception as e:
         print(f"⚠️ Okunamadı: {p} → {e}")
@@ -87,7 +108,6 @@ def _detect_dt_col(df: pd.DataFrame, hint: str = "incident_datetime") -> str | N
     for c in cand:
         if c in df.columns:
             return c
-    # birleşik tarih+saat
     if "incident_date" in df.columns and "incident_time" in df.columns:
         return "incident_date+incident_time"
     return None
@@ -95,7 +115,6 @@ def _detect_dt_col(df: pd.DataFrame, hint: str = "incident_datetime") -> str | N
 def _ensure_date(df: pd.DataFrame, dt_col_hint: str) -> pd.Series:
     use = _detect_dt_col(df, dt_col_hint)
     if use is None:
-        # son çare: sadece 'date' varsa parse et
         if "date" in df.columns:
             return pd.to_datetime(df["date"], errors="coerce").dt.date
         raise ValueError("Tarih/saat sütunu bulunamadı (FR_DATE_COL ile belirtin).")
@@ -109,22 +128,93 @@ def _ensure_date(df: pd.DataFrame, dt_col_hint: str) -> pd.Series:
         dt = pd.to_datetime(df[use], errors="coerce", utc=True)
     return dt.dt.date
 
+# ---- Aday yol üretimi (artifact → BASE_DIR → yerel) + en güncel dosyayı seç
+def _build_event_candidates() -> list[Path]:
+    return [
+        ARTIFACT_DIR / "sf_crime.csv",
+        ARTIFACT_DIR / "fr_crime.csv",
+        BASE_DIR / "sf_crime.csv",
+        BASE_DIR / "fr_crime.csv",
+        Path("sf_crime.csv"),
+        Path("fr_crime.csv"),
+    ]
+
+def _existing(paths: list[Path]) -> list[Path]:
+    uniq = []
+    seen = set()
+    for p in paths:
+        ap = _abs(p)
+        if ap.exists() and str(ap) not in seen:
+            uniq.append(ap); seen.add(str(ap))
+    return uniq
+
+def _pick_latest(paths: list[Path]) -> Path | None:
+    ex = _existing(paths)
+    if not ex:
+        return None
+    # En güncel mtime’a göre seç
+    ex.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return ex[0]
+
+def _max_event_date(df: pd.DataFrame) -> date | None:
+    dc = _detect_dt_col(df, DATE_COL)
+    col = "date" if "date" in df.columns else dc
+    if col is None: 
+        return None
+    try:
+        if col == "incident_date+incident_time":
+            dt = pd.to_datetime(
+                df["incident_date"].astype(str).str.strip() + " " +
+                df["incident_time"].astype(str).str.strip(),
+                errors="coerce", utc=True
+            )
+        else:
+            dt = pd.to_datetime(df[col], errors="coerce", utc=True)
+        return dt.dt.date.max()
+    except Exception:
+        return None
+
 # ----------------------- Main -----------------------
 def main() -> int:
     print("📂 CWD:", Path.cwd())
     print("🔧 BASE_DIR       :", BASE_DIR)
-    print("🔧 FR_EVENTS_PATH :", _abs(EVENTS_PATH))
-    print("🔧 FR_OUT_EVENTS  :", _abs(OUT_EVENTS))
-    print("🔧 FR_OUT_GRID    :", _abs(OUT_GRID))
+    print("🔧 OUT_EVENTS     :", _abs(OUT_EVENTS))
+    print("🔧 OUT_GRID       :", _abs(OUT_GRID))
     print("🔧 FR_MIN_YEARS   :", MIN_YEARS)
     print("🔧 FR_DATE_COL    :", DATE_COL)
     print("🔧 FR_GEOID_COL   :", GEOID_COL)
     print("🔧 FR_ID_COL      :", ID_COL)
 
-    ev = _read_table(EVENTS_PATH)
+    # 0) ZIP varsa aç
+    _safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
+
+    # 1) Girdi keşfi: ENV yol geçerliyse onu, değilse adaylardan en günceli
+    preferred = _abs(EVENTS_PATH)
+    ev_path: Path | None = None
+    if preferred.exists():
+        ev_path = preferred
+        print(f"🔎 Girdi (ENV): {ev_path}  mtime={datetime.fromtimestamp(ev_path.stat().st_mtime)}")
+    else:
+        cand = _build_event_candidates()
+        ev_path = _pick_latest(cand)
+        if ev_path:
+            print(f"🔎 Girdi (auto-picked latest): {ev_path}  mtime={datetime.fromtimestamp(ev_path.stat().st_mtime)}")
+        else:
+            print("❌ Olası girdi bulunamadı.")
+            return 1
+
+    # 2) Oku
+    ev = _read_table(ev_path)
     if ev.empty:
         print("❌ Olay verisi boş. Çıkılıyor.")
         return 1
+
+    # 3) Tazelik kontrolü (İstanbul günü)
+    today_tr = datetime.now().date()  # Avrupa/İstanbul makine TZ ≈ runner UTC; yine de tarihe bakıyoruz
+    dmax = _max_event_date(ev)
+    print(f"📆 Maks olay tarihi: {dmax}")
+    if dmax and dmax < today_tr - timedelta(days=1):
+        print(f"⚠️ Uyarı: Olay verisi eski görünüyor (maks={dmax}, today={today_tr}).")
 
     # GEOID normalize (varsa / yoksa otomatik bul)
     if GEOID_COL in ev.columns:
@@ -163,7 +253,6 @@ def main() -> int:
     if GEOID_COL in events_daily.columns and events_daily[GEOID_COL].notna().any():
         geoids = sorted(events_daily.loc[events_daily[GEOID_COL] != "", GEOID_COL].unique().tolist())
     else:
-        # yedek kaynaklardan dene
         for c in [
             "crime_prediction_data/sf_crime_grid_full_labeled.csv",
             "crime_prediction_data/sf_crime_grid_full_labeled.parquet",
@@ -195,10 +284,7 @@ def main() -> int:
         print("⚠️ Kullanılabilir tarih bulunamadı → grid atlandı.")
         return 0
 
-    if (dmax - dmin).days + 1 < MIN_DAYS:
-        desired_start = dmax - timedelta(days=MIN_DAYS - 1)
-    else:
-        desired_start = dmin
+    desired_start = (dmax - timedelta(days=MIN_DAYS - 1)) if (dmax - dmin).days + 1 < MIN_DAYS else dmin
     all_days = pd.date_range(start=desired_start, end=dmax, freq="D").date
     print(f"📅 Tarih aralığı: {desired_start} → {dmax} ({len(all_days)} gün)")
 
