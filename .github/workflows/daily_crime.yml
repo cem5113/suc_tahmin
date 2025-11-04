@@ -42,10 +42,10 @@ env:
   FR_911_WINSOR_Q: "0"
   FR_CAT_TOPK: "8"
 
-  # 311 varsayılanları
+  # 311 varsayılanları (boş kalmasın)
   FR_311_DATE_COL: "created_date"
   FR_311_GEOID_COL: "GEOID"
-  FR_311_WINSOR_Q: "0.999"
+  FR_311_WINSOR_Q: "0"      # boş gelirse 0 (kapalı) → kod içinde 0.999'a çekmek isterseniz ENV'de değiştirin
   FR_311_EMA_ALPHAS: "0.3,0.6"
 
 jobs:
@@ -156,6 +156,7 @@ jobs:
           echo "---- GRID head ----";   head -n 5 "${FR_OUT_GRID}"   || true
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
+      # ---------------------- 911 ENRICH (revize arama desenleri) ----------------------
       - name: (1) 911 → enrich GRID & EVENTS (robust recursive find)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
@@ -177,40 +178,54 @@ jobs:
           fi
 
           echo "🔎 911 dosyası aranıyor..."
-          mapfile -t FOUND_A < <(find "${CRIME_DATA_DIR}" -maxdepth 4 -type f \
-            \( -iname "sf_911_last_5_year_y.csv" -o -iname "sf_911_last_5_year.csv" \) 2>/dev/null | sort)
-          if [ -n "${FR_OUTPUT_DIR:-}" ] && [ -d "${FR_OUTPUT_DIR}" ]; then
-            mapfile -t FOUND_B < <(find "${FR_OUTPUT_DIR}" -maxdepth 4 -type f \
-              \( -iname "sf_911_last_5_year_y.csv" -o -iname "sf_911_last_5_year.csv" \) 2>/dev/null | sort)
+
+          # Manuel override destekle
+          if [ -n "${FR_911_PATH:-}" ] && [ -f "${FR_911_PATH}" ]; then
+            PICK="${FR_911_PATH}"
           else
-            FOUND_B=()
-          fi
-          mapfile -t FOUND_C < <(find "${CRIME_DATA_DIR}/artifact" -maxdepth 6 -type f \
-            \( -iname "sf_911_last_5_year_y.csv" -o -iname "sf_911_last_5_year.csv" \) 2>/dev/null | sort || true)
+            # Aranacak desenler: year/years, csv/csv.gz/parquet (+ _y varyantı)
+            mapfile -t FOUND_A < <(find "${CRIME_DATA_DIR}" -maxdepth 8 -type f \
+              \( -iname "sf_911_last_5_year.csv"      -o -iname "sf_911_last_5_year_y.csv" \
+               -o -iname "sf_911_last_5_years.csv"    -o -iname "sf_911_last_5_years_y.csv" \
+               -o -iname "sf_911_last_5_year.csv.gz"  -o -iname "sf_911_last_5_years.csv.gz" \
+               -o -iname "sf_911_last_5_year.parquet" -o -iname "sf_911_last_5_years.parquet" \) 2>/dev/null | sort)
 
-          ALL=("${FOUND_A[@]}" "${FOUND_B[@]}" "${FOUND_C[@]}")
-          PICK=""
-          declare -A seen
-          for p in "${ALL[@]}"; do
-            [ -z "${p}" ] && continue
-            if [ -f "$p" ] && [ -z "${seen[$p]+x}" ]; then
-              seen[$p]=1
-              base="$(basename "$p")"
-              if [[ "$base" == "sf_911_last_5_year_y.csv" ]]; then PICK="$p"; break; fi
-              if [ -z "$PICK" ]; then PICK="$p"; fi
+            if [ -n "${FR_OUTPUT_DIR:-}" ] && [ -d "${FR_OUTPUT_DIR}" ]; then
+              mapfile -t FOUND_B < <(find "${FR_OUTPUT_DIR}" -maxdepth 8 -type f \
+                \( -iname "sf_911_last_5_year.csv"      -o -iname "sf_911_last_5_year_y.csv" \
+                 -o -iname "sf_911_last_5_years.csv"    -o -iname "sf_911_last_5_years_y.csv" \
+                 -o -iname "sf_911_last_5_year.csv.gz"  -o -iname "sf_911_last_5_years.csv.gz" \
+                 -o -iname "sf_911_last_5_year.parquet" -o -iname "sf_911_last_5_years.parquet" \) 2>/dev/null | sort)
+            else
+              FOUND_B=()
             fi
-          done
 
-          if [ -z "$PICK" ]; then
-            echo "ℹ️ 911 verisi bulunamadı → adım atlanıyor."; exit 0
+            mapfile -t FOUND_C < <(find "${CRIME_DATA_DIR}/artifact" -maxdepth 10 -type f \
+              \( -iname "sf_911_last_5_year.csv"      -o -iname "sf_911_last_5_year_y.csv" \
+               -o -iname "sf_911_last_5_years.csv"    -o -iname "sf_911_last_5_years_y.csv" \
+               -o -iname "sf_911_last_5_year.csv.gz"  -o -iname "sf_911_last_5_years.csv.gz" \
+               -o -iname "sf_911_last_5_year.parquet" -o -iname "sf_911_last_5_years.parquet" \) 2>/dev/null | sort || true)
+
+            ALL=("${FOUND_A[@]}" "${FOUND_B[@]}" "${FOUND_C[@]}")
+            PICK=""
+            declare -A seen
+            for p in "${ALL[@]}"; do
+              [ -z "${p}" ] && continue
+              if [ -f "$p" ] && [ -z "${seen[$p]+x}" ]; then
+                seen[$p]=1
+                base="$(basename "$p")"
+                # Öncelik: *_y.* (etiketli özet), yoksa ilk bulunan
+                if [[ "$base" =~ ^sf_911_last_5_years?_y\.csv(\.gz)?$ ]]; then PICK="$p"; break; fi
+                if [ -z "$PICK" ]; then PICK="$p"; fi
+              fi
+            done
+          fi
+
+          if [ -z "${PICK:-}" ]; then
+            echo "ℹ️ 911 verisi bulunamadı → adım atlanıyor."
+            exit 0
           fi
           echo "✅ 911 kaynağı: $PICK"
-
-          # İkinci emniyet: boş gelirse default
-          export FR_911_DATE_COL="${FR_911_DATE_COL:-incident_datetime}"
-          export FR_911_GEOID_COL="${FR_911_GEOID_COL:-GEOID}"
-          export FR_911_WINSOR_Q="${FR_911_WINSOR_Q:-0}"
-          export FR_CAT_TOPK="${FR_CAT_TOPK:-8}"
 
           export FR_911_PATH="$PICK"
 
@@ -227,6 +242,7 @@ jobs:
           # hızlı kontrol
           head -n 5 "$GRID" || true
 
+      # ---------------------- 311 ENRICH (winsor+EMA sağlam) ----------------------
       - name: (2) 311 → enrich GRID & EVENTS (robust path + robust script)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
@@ -270,12 +286,6 @@ jobs:
 
           echo "✅ 311 kaynağı: $PICK"
           export FR_311_DAILY_IN="$PICK"
-
-          # İkinci emniyet: boş gelirse default
-          export FR_311_DATE_COL="${FR_311_DATE_COL:-created_date}"
-          export FR_311_GEOID_COL="${FR_311_GEOID_COL:-GEOID}"
-          export FR_311_WINSOR_Q="${FR_311_WINSOR_Q:-0.999}"
-          export FR_311_EMA_ALPHAS="${FR_311_EMA_ALPHAS:-0.3,0.6}"
 
           if [ -f "./update_311_daily.py" ]; then
             PYFILE="./update_311_daily.py"
@@ -463,6 +473,7 @@ jobs:
           df = pd.read_csv(grid_path)
           if df.empty:
               print("⚠️ GRID boş, plan üretilemedi.")
+              import pandas as pd
               pd.DataFrame(columns=["GEOID","date","risk_score","Y_label","events_count"]).to_csv(out_csv, index=False)
               sys.exit(0)
           need = ["GEOID","date"]
@@ -476,6 +487,7 @@ jobs:
           today = df[df["date"]==last_day].copy()
           def safe_num(name, default=0.0):
               s = pd.to_numeric(today[name], errors="coerce").fillna(0) if name in today.columns else default
+              import pandas as pd
               return s if hasattr(s, "values") else pd.Series(default, index=today.index)
           today["risk_score"] = (
               safe_num("events_count")*1.0 +
