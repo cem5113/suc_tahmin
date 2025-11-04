@@ -1,11 +1,11 @@
-name: Daily FR Grid/Events Enrichment → Patrol
+name: Daily FR Grid/Events Enrichment + Patrol
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 04 * * *"   # 07:30 Europe/Istanbul
+    - cron: "30 04 * * *"  # 07:30 Europe/Istanbul
   workflow_run:
-    workflows: ["Full Pipeline (FR)"]   # <-- full_pipeline.yml içindeki görünen workflow adı
+    workflows: ["Full FR Crime Pipeline"]   # FR full pipeline 'name:' ile birebir aynı olmalı
     types: [completed]
     branches: [main]
 
@@ -21,7 +21,7 @@ env:
   TZ: Europe/Istanbul
   CRIME_DATA_DIR: crime_prediction_data
 
-  # I/O (yerinde güncellenir)
+  # I/O (yerinde güncellenecek dosya adları)
   FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
   FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
   FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
@@ -32,7 +32,7 @@ env:
 
 jobs:
   enrich-fr-daily:
-    # Eğer workflow_run tetiklediyse ve başarısız olduysa koşma
+    # Eğer workflow_run tetiklendiyse ve upstream başarısızsa çalışmasın
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
@@ -53,22 +53,22 @@ jobs:
 
       - name: Show working tree
         run: |
-          echo "📂 CWD: $PWD"
+          echo "CWD: $PWD"
           ls -lah
-          echo "📂 Data dir:"
+          echo "Data dir:"
           ls -lah "${CRIME_DATA_DIR}" || true
 
-      # ───────────────────── (0) Daily + Y_label ─────────────────────
+      # (0) Daily + Y_label (GRID & EVENTS üret)
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
         env:
-          CRIME_DATA_DIR:        ${{ env.CRIME_DATA_DIR }}
-          FR_EVENTS_PATH:        ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
-          FR_OUT_EVENTS:         ${{ env.CRIME_DATA_DIR }}/fr_crime_events_daily.csv
-          FR_OUT_GRID:           ${{ env.CRIME_DATA_DIR }}/fr_crime_grid_daily.csv
-          FR_MIN_YEARS:          "5"
-          FR_DATE_COL:           "incident_datetime"
-          FR_GEOID_COL:          "GEOID"
-          FR_ID_COL:             "id"
+          CRIME_DATA_DIR:  ${{ env.CRIME_DATA_DIR }}
+          FR_EVENTS_PATH:  ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
+          FR_OUT_EVENTS:   ${{ env.CRIME_DATA_DIR }}/fr_crime_events_daily.csv
+          FR_OUT_GRID:     ${{ env.CRIME_DATA_DIR }}/fr_crime_grid_daily.csv
+          FR_MIN_YEARS:    "5"
+          FR_DATE_COL:     "incident_datetime"
+          FR_GEOID_COL:    "GEOID"
+          FR_ID_COL:       "id"
         run: |
           set -e
           python -u update_crime_fr_daily.py
@@ -77,7 +77,7 @@ jobs:
           echo "---- EVENTS head ----"
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_events_daily.csv" || true
 
-      # ───────────────────────── 911 → GRID/EVENTS ─────────────────────────
+      # (1) 911 → GRID/EVENTS
       - name: (1) 911 → enrich GRID & EVENTS
         env:
           FR_911_PATH: "${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv"
@@ -90,15 +90,10 @@ jobs:
         run: |
           set -e
           python -u enrich_with_911.py
-
-      - name: Preview after 911
-        run: |
-          echo "---- GRID (head) ----"
+          echo "---- After 911 (GRID head) ----"
           head -n 5 "${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}" || true
-          echo "---- EVENTS (head) ----"
-          head -n 5 "${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}" || true
 
-      # ───────────────────────── 311 → GRID/EVENTS ─────────────────────────
+      # (2) 311 → GRID/EVENTS
       - name: (2) 311 → enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
@@ -106,13 +101,19 @@ jobs:
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_311_DAILY_IN: ""                        # varsa direkt günlük 311 dosyanızı yazın
+          FR_311_DAILY_IN: ""                        # varsa doğrudan günlük 311 dosyası
           AGG_311_NAME: "sf_311_last_5_years.csv"   # yoksa buradan günlük üretilir
         run: |
           set -e
-          python -u update_311_daily.py   # sizin son dosya adınız buydu
+          python -u update_311_daily.py
+          echo "---- After 311 (GRID cols) ----"
+          python - <<'PY'
+import pandas as pd, os
+p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
+df=pd.read_csv(p, nrows=0); print(list(df.columns))
+PY
 
-      # ───────────────────────── BUS → GRID/EVENTS ─────────────────────────
+      # (3) Bus stops → GRID/EVENTS
       - name: (3) Bus stops → enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
@@ -125,7 +126,7 @@ jobs:
           set -e
           python -u update_bus_fr_daily.py
 
-      # ───────────────────────── TRAIN → GRID/EVENTS ───────────────────────
+      # (4) Train stops → GRID/EVENTS
       - name: (4) Train stops → enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
@@ -138,7 +139,7 @@ jobs:
           set -e
           python -u update_train_fr_daily.py
 
-      # ───────────────────────── POI → GRID/EVENTS ─────────────────────────
+      # (5) POI → GRID/EVENTS
       - name: (5) POI → enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
@@ -154,7 +155,7 @@ jobs:
           set -e
           python -u update_poi_fr_daily.py
 
-      # ─────────────────── POLICE & GOV → GRID/EVENTS ──────────────────────
+      # (6) Police & Government → GRID/EVENTS
       - name: (6) Police & Government → enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
@@ -168,7 +169,7 @@ jobs:
           set -e
           python -u update_police_gov_daily.py
 
-      # ───────────────────────── WEATHER → GRID/EVENTS ─────────────────────
+      # (7) Weather (date-merge) → GRID/EVENTS
       - name: (7) Weather (date-merge) → enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
@@ -181,8 +182,8 @@ jobs:
           set -e
           python -u update_weather_fr_daily.py
 
-      # ───────────────────────── NEIGHBORS → GRID/EVENTS ───────────────────
-      - name: (8) Neighbor windows (1/3/7d, shift(1)) → enrich GRID & EVENTS
+      # (8) Neighbor windows (1/3/7d)
+      - name: (8) Neighbor windows (1/3/7d) → enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR: "${{ env.CRIME_DATA_DIR }}"
           NEIGH_FILE: "${{ env.NEIGH_FILE }}"
@@ -216,18 +217,18 @@ PY
             ${{ env.CRIME_DATA_DIR }}/${{ env.FR_EVENTS_DAILY_OUT }}
           if-no-files-found: warn
 
-  # ───────────────────────────── PATROL (DEVRIYE) ─────────────────────────────
   patrol-fr:
     needs: [enrich-fr-daily]
     runs-on: ubuntu-latest
     env:
       CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-      GRID_FILE:      ${{ env.FR_GRID_DAILY_OUT }}      # fr_crime_grid_daily.csv (enriched)
-      EVENTS_FILE:    ${{ env.FR_EVENTS_DAILY_OUT }}    # fr_crime_events_daily.csv (enriched)
-      PATROL_TOP_K:   "25"                              # en riskli 25 GEOID
-      PATROL_MIN_SPACING_M: "300"                       # opsiyonel: mekânsal seyreltme
+      GRID_FILE:      ${{ env.FR_GRID_DAILY_OUT }}
+      EVENTS_FILE:    ${{ env.FR_EVENTS_DAILY_OUT }}
+      PATROL_TOP_K:   "25"
+      PATROL_MIN_SPACING_M: "300"
       PATROL_OUT_CSV: "fr_patrol_plan.csv"
       PATROL_OUT_GEOJSON: "fr_patrol_plan.geojson"
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -247,7 +248,7 @@ PY
         run: |
           set -e
           python - <<'PY'
-import os, pandas as pd, numpy as np
+import os, pandas as pd
 from pathlib import Path
 
 base = Path(os.environ["CRIME_DATA_DIR"])
@@ -255,15 +256,13 @@ grid = pd.read_csv(base / os.environ["GRID_FILE"])
 k    = int(os.environ.get("PATROL_TOP_K","25"))
 out_csv = base / os.environ.get("PATROL_OUT_CSV","fr_patrol_plan.csv")
 
-# Basit örnek strateji:
-#  - Son gün (max date) için Y_label=1 (veya events_count) ve türetilmiş sinyallerle bir risk skoru oluştur.
-#  - En yüksek k GEOID'i seç ve kaydet.
 grid["date"] = pd.to_datetime(grid["date"], errors="coerce")
 last_day = grid["date"].max()
 today = grid[grid["date"]==last_day].copy()
 
-# Risk skoru (basit): events_count + 0.2*neighbor_24h + 0.1*neighbor_72h + 0.05*neighbor_7d + 0.1*n911_prev_1d
-def safe_num(s): return pd.to_numeric(today.get(s, 0), errors="coerce").fillna(0)
+def safe_num(col):
+    return pd.to_numeric(today.get(col, 0), errors="coerce").fillna(0)
+
 today["risk_score"] = (
     safe_num("events_count")*1.0 +
     safe_num("neighbor_crime_24h")*0.20 +
@@ -279,12 +278,9 @@ topk = (today
         .sort_values("risk_score", ascending=False)
         .head(k))
 
-# Çıktı: GEOID, date, risk_score, events_count, Y_label
 topk.insert(1, "date", last_day.date())
 topk.to_csv(out_csv, index=False)
-print(f"✅ Patrol CSV yazıldı → {out_csv}  (rows={len(topk)})")
-
-# (opsiyonel) geojson üretimi için centroids gerekir; sizde hazır centroid varsa burada birleştirin.
+print(f"Wrote patrol CSV -> {out_csv} (rows={len(topk)})")
 PY
 
       - name: Upload patrol artifacts
