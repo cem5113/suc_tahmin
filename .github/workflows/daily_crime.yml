@@ -138,7 +138,7 @@ jobs:
           echo "---- GRID head ----";   head -n 5 "${FR_OUT_GRID}"   || true
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
-      - name: (1) 911 → enrich GRID & EVENTS (robust path + robust script)
+      - name: (1) 911 → enrich GRID & EVENTS (robust recursive find)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
@@ -147,7 +147,6 @@ jobs:
         run: |
           set -euo pipefail
       
-          # --- grid & events var mı?
           GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
           EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
@@ -155,39 +154,54 @@ jobs:
             exit 0
           fi
       
-          # --- 911 kaynak adayları (Y öncelikli)
-          CANDIDATES=(
-            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
-            "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+          echo "🔎 911 dosyası aranıyor..."
+          # 1) CRIME_DATA_DIR altında, 4 seviye derine kadar ara (Y öncelikli isim)
+          mapfile -t FOUND_A < <(find "${CRIME_DATA_DIR}" -maxdepth 4 -type f \
+            \( -iname "sf_911_last_5_year_y.csv" -o -iname "sf_911_last_5_year.csv" \) 2>/dev/null | sort)
       
-            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year_y.csv"
-            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year.csv"
+          # 2) FR_OUTPUT_DIR varsa onun altında da ara (çoğu zaman nested oluyor)
+          if [ -n "${FR_OUTPUT_DIR:-}" ] && [ -d "${FR_OUTPUT_DIR}" ]; then
+            mapfile -t FOUND_B < <(find "${FR_OUTPUT_DIR}" -maxdepth 4 -type f \
+              \( -iname "sf_911_last_5_year_y.csv" -o -iname "sf_911_last_5_year.csv" \) 2>/dev/null | sort)
+          else
+            FOUND_B=()
+          fi
       
-            "${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_911_last_5_year_y.csv"
-            "${CRIME_DATA_DIR}/crime_prediction_data/crime_prediction_data/sf_911_last_5_year.csv"
+          # 3) artifact klasöründe olma ihtimaline karşı ekstra tarama
+          mapfile -t FOUND_C < <(find "${CRIME_DATA_DIR}/artifact" -maxdepth 6 -type f \
+            \( -iname "sf_911_last_5_year_y.csv" -o -iname "sf_911_last_5_year.csv" \) 2>/dev/null | sort || true)
       
-            "${FR_OUTPUT_DIR}/sf_911_last_5_year_y.csv"
-            "${FR_OUTPUT_DIR}/sf_911_last_5_year.csv"
-      
-            "${FR_OUTPUT_DIR}/crime_prediction_data/sf_911_last_5_year_y.csv"
-            "${FR_OUTPUT_DIR}/crime_prediction_data/sf_911_last_5_year.csv"
-      
-            "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year_y.csv"
-            "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year.csv"
-          )
-      
+          # Hepsini birleştir (sırayı koru, uniq)
+          ALL=("${FOUND_A[@]}" "${FOUND_B[@]}" "${FOUND_C[@]}")
+          # uniq
           PICK=""
-          TRIED=()
-          for p in "${CANDIDATES[@]}"; do
-            TRIED+=("$p")
-            if [ -f "$p" ]; then
-              PICK="$p"
-              break
+          declare -A seen
+          for p in "${ALL[@]}"; do
+            [ -z "${p}" ] && continue
+            if [ -f "$p" ] && [ -z "${seen[$p]+x}" ]; then
+              seen[$p]=1
+              # Y versiyonuna ağırlık: önce Y olanı seç, değilse ilk bulunan
+              base="$(basename "$p")"
+              if [[ "$base" == "sf_911_last_5_year_y.csv" ]]; then
+                PICK="$p"
+                break
+              fi
+              # Y bulunmadıysa yine de ilk bulduğumuzu aday olarak tut
+              if [ -z "$PICK" ]; then
+                PICK="$p"
+              fi
             fi
           done
       
           if [ -z "$PICK" ]; then
-            echo "ℹ️ 911 verisi yok (aradım: ${TRIED[*]}) → adım atlanıyor."
+            echo "ℹ️ 911 verisi bulunamadı. Taradığım bazı yollar:"
+            echo "   - CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+            echo "   - FR_OUTPUT_DIR =${FR_OUTPUT_DIR:-<yok>}"
+            echo "📁 CRIME_DATA_DIR/ altında olası ağaç (ilk 120 satır):"
+            find "${CRIME_DATA_DIR}" -maxdepth 4 -type f -name "sf_911_last_5_year*.csv" | sed -n '1,120p' || true
+            echo "📁 artifact/ altında olası ağaç (ilk 120 satır):"
+            find "${CRIME_DATA_DIR}/artifact" -maxdepth 6 -type f -name "sf_911_last_5_year*.csv" | sed -n '1,120p' || true
+            echo "→ Adım atlanıyor."
             exit 0
           fi
       
@@ -196,22 +210,21 @@ jobs:
           export FR_911_DATE_COL="incident_datetime"
           export FR_911_GEOID_COL="GEOID"
       
-          # --- script yol çözümlemesi
+          # Script yol çözümleme
           if [ -f "./update_911_daily.py" ]; then
             PYFILE="./update_911_daily.py"
           elif [ -f "./scripts/update_911_daily.py" ]; then
             PYFILE="./scripts/update_911_daily.py"
           else
-            echo "❌ update_911_daily.py bulunamadı. Repo kökünü listeliyorum:"
-            ls -la .
-            echo "📁 scripts/ dizini:"
-            ls -la ./scripts || true
+            echo "❌ update_911_daily.py bulunamadı."
+            echo "Repo kök içeriği:"; ls -la .
+            echo "scripts/ içeriği:";  ls -la ./scripts || true
             exit 66
           fi
       
           python -u "$PYFILE"
       
-          # kısa kontrol
+          # Kısa kontrol
           head -n 5 "$GRID" || true
       
       - name: (2) 311 → enrich GRID & EVENTS (robust path + robust script)
