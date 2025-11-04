@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-enrich_with_poi_daily.py
+enrich_with_poi_daily.py  (REVIZE - tür-bilinçli fill + doğru centroid CRS)
+
+Ne yapar?
 - POI (OSM) → GEOID eşle (blocks geojson ile), türleri çıkar, dinamik risk sözlüğü üret (opsiyonel),
-  GEOID seviyesinde özet + 300/600/900m buffer sayıları / risk toplamları üret.
+  GEOID seviyesinde özet + 300/600/900m buffer sayıları / risk toplamları üretir.
 - Sonra bunları hem GRID (GEOID×date) hem de EVENTS (olay satırları) dosyalarına merge eder.
 - Günlük akış: saatlik YOK. POI özellikleri GEOID seviyesinde sabit → tüm günlere/olaylara aynen taşınır.
 
@@ -36,6 +38,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from sklearn.neighbors import BallTree
+from pandas.api.types import is_numeric_dtype, is_categorical_dtype
 
 pd.options.mode.copy_on_write = True
 
@@ -104,12 +107,12 @@ EV_IN     = Path(os.getenv("FR_EVENTS_DAILY_IN","fr_crime_events_daily.csv"))
 EV_OUT    = Path(os.getenv("FR_EVENTS_DAILY_OUT","fr_crime_events_daily.csv"))
 
 POI_GEOJSON  = os.getenv("POI_GEOJSON",  "sf_pois.geojson")
-BLOCKS_GJSON = os.getenv("BLOCKS_GEOJSON","sf_census_blocks_with_population.geojson")
-POI_CLEAN_CSV= os.getenv("POI_CLEAN_CSV","sf_pois_cleaned_with_geoid.csv")
-POI_RISK_JSON= os.getenv("POI_RISK_JSON","risky_pois_dynamic.json")
+BLOCKS_GEOJSON = os.getenv("BLOCKS_GEOJSON","sf_census_blocks_with_population.geojson")
+POI_CLEAN_CSV  = os.getenv("POI_CLEAN_CSV","sf_pois_cleaned_with_geoid.csv")
+POI_RISK_JSON  = os.getenv("POI_RISK_JSON","risky_pois_dynamic.json")
 
-POI_PATHS   = [ARTIFACT_DIR / POI_GEOJSON, BASE_DIR / POI_GEOJSON, Path(POI_GEOJSON)]
-BLOCKS_PATHS= [ARTIFACT_DIR / BLOCKS_GJSON, BASE_DIR / BLOCKS_GJSON, Path(BLOCKS_GJSON)]
+POI_PATHS       = [ARTIFACT_DIR / POI_GEOJSON, BASE_DIR / POI_GEOJSON, Path(POI_GEOJSON)]
+BLOCKS_PATHS    = [ARTIFACT_DIR / BLOCKS_GEOJSON, BASE_DIR / BLOCKS_GEOJSON, Path(BLOCKS_GEOJSON)]
 POI_CLEAN_PATHS = [BASE_DIR / POI_CLEAN_CSV, ARTIFACT_DIR / POI_CLEAN_CSV, Path(POI_CLEAN_CSV)]
 
 # ============================== Geo helpers ==============================
@@ -231,15 +234,39 @@ def compute_dynamic_poi_risk(poi_df: pd.DataFrame, crime_points: pd.DataFrame, r
         return {t: 1.5 for t in avg}
     return {t: round(3 * (x - vmin) / (vmax - vmin), 2) for t, x in avg.items()}
 
+# ============================== Yardımcı: tür-bilinçli doldurma ==============================
+def _fillna_typed(df: pd.DataFrame, fills: dict[str, float | int | str]) -> pd.DataFrame:
+    """Kategorik sütunlara doğrudan 0/0.0 yazmamak için tür-bilinçli doldurma."""
+    out = df.copy()
+    for c in out.columns:
+        if c in fills:
+            val = fills[c]
+            s = out[c]
+            if is_numeric_dtype(s):
+                out[c] = pd.to_numeric(s, errors="coerce").fillna(val)
+            elif is_categorical_dtype(s):
+                # kategorik: val string değilse stringe çevir
+                sval = str(val)
+                if sval not in s.cat.categories:
+                    s = s.cat.add_categories([sval])
+                out[c] = s.fillna(sval)
+            else:
+                out[c] = s.fillna(val if isinstance(val, str) else str(val))
+    return out
+
 # ============================== GEOID-level + buffer ==============================
 def geoid_poi_features(blocks: gpd.GeoDataFrame, poi_df: pd.DataFrame, poi_risk: dict,
                        radii=(300,600,900)) -> pd.DataFrame:
-    # GEOID centroidleri
+    # GEOID centroidleri (projeksiyonda hesapla → geri döndür)
     bl = blocks.copy()
     bl["GEOID"] = _geoid11(bl["GEOID"])
-    centroids = bl.dissolve(by="GEOID", as_index=False, dropna=False)["geometry"].centroid
-    cent = gpd.GeoDataFrame({"GEOID": bl.dissolve(by="GEOID", as_index=False)["GEOID"]},
-                             geometry=centroids, crs="EPSG:4326")
+    bl = _ensure_crs(bl, "EPSG:4326")
+    bl_m = bl.to_crs(3857)
+    centroids_m = bl_m.dissolve(by="GEOID", as_index=False, dropna=False)["geometry"].centroid
+    cent = gpd.GeoDataFrame(
+        {"GEOID": bl_m.dissolve(by="GEOID", as_index=False)["GEOID"]},
+        geometry=centroids_m, crs=bl_m.crs
+    ).to_crs(4326)
     cent["cent_lat"] = cent.geometry.y
     cent["cent_lon"] = cent.geometry.x
 
@@ -254,7 +281,7 @@ def geoid_poi_features(blocks: gpd.GeoDataFrame, poi_df: pd.DataFrame, poi_risk:
 
     # dominant type
     def _mode(arr):
-        arr = [a for a in arr if pd.notna(a) and a != ""]
+        arr = [a for a in arr if pd.notna(a) and str(a) != ""]
         if not arr: return "No_POI"
         return Counter(arr).most_common(1)[0][0]
 
@@ -266,39 +293,44 @@ def geoid_poi_features(blocks: gpd.GeoDataFrame, poi_df: pd.DataFrame, poi_risk:
         "poi_dominant_type": grp["poi_subcategory"].agg(_mode).values
     })
 
-    # range etiketleri (quantile)
-    def _mklabel(series, bins=5):
-        vals = pd.to_numeric(series, errors="coerce").dropna().values
-        if vals.size == 0:
-            qs = [0,0]
-        else:
-            qs = np.quantile(vals, [0, 1/bins])
-        return lambda x: f"Q1 ({qs[0]:.1f}-{qs[1]:.1f})" if pd.isna(x) else None
-    # (basit: range kolonları doldurulacak)
-    base["poi_total_count_range"] = pd.cut(base["poi_total_count"],
-                                           bins=5, labels=[f"Q{i}" for i in range(1,6)], duplicates="drop")
-    base["poi_risk_score_range"] = pd.cut(base["poi_risk_score"],
-                                          bins=5, labels=[f"Q{i}" for i in range(1,6)], duplicates="drop")
+    # range etiketleri
+    base["poi_total_count_range"] = pd.cut(
+        base["poi_total_count"], bins=5,
+        labels=[f"Q{i}" for i in range(1,6)], duplicates="drop"
+    )
+    base["poi_risk_score_range"] = pd.cut(
+        base["poi_risk_score"], bins=5,
+        labels=[f"Q{i}" for i in range(1,6)], duplicates="drop"
+    )
 
     # buffer (BallTree haversine)
     poi_rad  = np.radians(dfp[["lat","lon"]].values)
     cent_rad = np.radians(cent[["cent_lat","cent_lon"]].values)
-    tree = BallTree(poi_rad, metric="haversine")
-    poi_risk_vec = dfp["__risk__"].to_numpy()
-
-    buf = cent[["GEOID"]].copy()
-    for r_m in radii:
-        idxs = tree.query_radius(cent_rad, r=r_m/6371000.0, count_only=False)
-        buf[f"poi_count_{r_m}m"] = np.array([len(ix) for ix in idxs], dtype=int)
-        buf[f"poi_risk_{r_m}m"]  = np.array([poi_risk_vec[ix].sum() if len(ix) else 0.0 for ix in idxs], dtype=float)
+    if len(poi_rad) == 0:
+        # hiç POI yoksa sıfırla
+        buf = cent[["GEOID"]].copy()
+        for r_m in radii:
+            buf[f"poi_count_{r_m}m"] = 0
+            buf[f"poi_risk_{r_m}m"]  = 0.0
+    else:
+        tree = BallTree(poi_rad, metric="haversine")
+        poi_risk_vec = dfp["__risk__"].to_numpy()
+        buf = cent[["GEOID"]].copy()
+        for r_m in radii:
+            idxs = tree.query_radius(cent_rad, r=r_m/6371000.0, count_only=False)
+            buf[f"poi_count_{r_m}m"] = np.array([len(ix) for ix in idxs], dtype=int)
+            buf[f"poi_risk_{r_m}m"]  = np.array([poi_risk_vec[ix].sum() if len(ix) else 0.0 for ix in idxs], dtype=float)
 
     out = cent[["GEOID"]].merge(base, on="GEOID", how="left").merge(buf, on="GEOID", how="left")
-    # fillna
-    fills = {"poi_total_count":0, "poi_risk_score":0.0, "poi_dominant_type":"No_POI"}
-    for c in out.columns:
-        if c.startswith("poi_count_"): fills[c] = 0
-        if c.startswith("poi_risk_"):  fills[c] = 0.0
-    out = out.fillna(fills)
+
+    # tür-bilinçli doldurma (Categorical hatası yaşamamak için)
+    fills = {"poi_total_count":0, "poi_risk_score":0.0, "poi_dominant_type":"No_POI",
+             "poi_total_count_range":"Q1", "poi_risk_score_range":"Q1"}
+    for r_m in radii:
+        fills[f"poi_count_{r_m}m"] = 0
+        fills[f"poi_risk_{r_m}m"]  = 0.0
+    out = _fillna_typed(out, fills)
+
     # tipler
     for c in [x for x in out.columns if x.startswith("poi_count_")]:
         out[c] = pd.to_numeric(out[c], downcast="integer")
@@ -315,7 +347,6 @@ def enrich_df_with_poi(df: pd.DataFrame, geoid_poi: pd.DataFrame, is_grid: bool)
         out = _ensure_date(out)
     # GEOID tek ve 11 hane
     if "GEOID" not in out.columns:
-        # başka bir geoid kolonu varsa al
         cand = [c for c in out.columns if "geoid" in c.lower()]
         if not cand: raise RuntimeError("Hedef tabloda GEOID kolonu yok.")
         out.insert(0, "GEOID", _geoid11(out[cand[0]]).astype("string"))
@@ -341,20 +372,19 @@ def main() -> int:
     grid = _read_csv(BASE_DIR / GRID_IN) if not GRID_IN.is_absolute() else _read_csv(GRID_IN)
     ev   = _read_csv(BASE_DIR / EV_IN)   if not EV_IN.is_absolute()  else _read_csv(EV_IN)
 
-    poi_path   = next((p for p in POI_PATHS if Path(p).exists()), None)
-    blocks_path= next((p for p in BLOCKS_PATHS if Path(p).exists()), None)
-    if not poi_path:   raise FileNotFoundError(f"❌ POI GeoJSON yok: {POI_GEOJSON} (artifact/BASE/local)")
-    if not blocks_path:raise FileNotFoundError(f"❌ Blocks GeoJSON yok: {BLOCKS_GJSON} (artifact/BASE/local)")
+    poi_path    = next((p for p in POI_PATHS if Path(p).exists()), None)
+    blocks_path = next((p for p in BLOCKS_PATHS if Path(p).exists()), None)
+    if not poi_path:    raise FileNotFoundError(f"❌ POI GeoJSON yok: {POI_GEOJSON} (artifact/BASE/local)")
+    if not blocks_path: raise FileNotFoundError(f"❌ Blocks GeoJSON yok: {BLOCKS_GEOJSON} (artifact/BASE/local)")
 
     blocks = _read_geojson(Path(blocks_path))
     if "GEOID" not in blocks.columns: raise ValueError("Blocks içinde GEOID yok.")
     blocks["GEOID"] = _geoid11(blocks["GEOID"])
 
     # 2) POI clean yükle/üret
-    poi_clean = load_or_build_poi_clean(blocks, Path(poi_path), [BASE_DIR / POI_CLEAN_CSV, ARTIFACT_DIR / POI_CLEAN_CSV])
+    poi_clean = load_or_build_poi_clean(blocks, Path(poi_path), POI_CLEAN_PATHS)
 
-    # 3) Dinamik POI risk sözlüğü (opsiyonel; EVENTS’te koordinat varsa daha iyi)
-    #    Yoksa boş sözlük → riskler 0 olur.
+    # 3) Dinamik POI risk sözlüğü (opsiyonel)
     crime_points = ev if not ev.empty else grid
     try:
         risk_dict = compute_dynamic_poi_risk(poi_clean, crime_points, radius_m=300)
