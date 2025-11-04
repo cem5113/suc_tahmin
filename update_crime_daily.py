@@ -10,16 +10,19 @@ import pandas as pd
 
 # ========= Ayarlar (ENV ile değiştirilebilir) =========
 CRIME_BASE = Path(os.getenv("CRIME_DATA_DIR", ".")).expanduser()
-IN_PATH   = Path(os.getenv("SF_DAILY_IN",  os.getenv("FR_DAILY_IN",  "sf_crime_y.csv")))            # olay bazlı giriş
-OUT_PATH  = Path(os.getenv("SF_DAILY_OUT", os.getenv("FR_DAILY_OUT", "daily_crime_00.csv")))      # günlük çıktı
-LOCAL_TZ  = os.getenv("SF_DAILY_TZ", os.getenv("FR_DAILY_TZ", "America/Los_Angeles"))
+IN_PATH    = Path(os.getenv("SF_DAILY_IN",  os.getenv("FR_DAILY_IN",  "sf_crime_y.csv")))   # olay bazlı giriş
+OUT_PATH   = Path(os.getenv("SF_DAILY_OUT", os.getenv("FR_DAILY_OUT", "daily_crime_00.csv")))  # günlük çıktı
+LOCAL_TZ   = os.getenv("SF_DAILY_TZ", os.getenv("FR_DAILY_TZ", "America/Los_Angeles"))
 
 # Opsiyonel: tarih penceresi (YYYY-MM-DD)
 FORCE_START = os.getenv("SF_DAILY_START", os.getenv("FR_DAILY_START", "")).strip()
 FORCE_END   = os.getenv("SF_DAILY_END",   os.getenv("FR_DAILY_END",   "")).strip()
 
 # Zaman kolonu adayları (ilk bulunan kullanılır); ayrıca date+time fallback'ı var
-DT_CANDS = ["datetime", "incident_datetime", "occurred_at", "timestamp", "event_time", "t0", "t", "dt", "date", "incident_date"]
+DT_CANDS = [
+    "datetime", "incident_datetime", "created_datetime", "occurred_at",
+    "timestamp", "event_time", "t0", "t", "dt", "date", "incident_date"
+]
 
 # Adet sayımı için aday kolon (varsa sum, yoksa satır sayısı)
 COUNT_CANDS = ["crime_count", "count", "n"]
@@ -54,12 +57,67 @@ def _resolve_in_out(in_p: Path, out_p: Path) -> tuple[Path, Path]:
 
     return in_p, out_p
 
-def _read_csv(p: Path) -> pd.DataFrame:
+def _autofind_input(p: Path) -> Path:
+    """
+    IN_PATH bulunamazsa otomatik alternatifleri sırayla dener:
+    - verilen ad
+    - y→csv / csv→y değişimi
+    - crime_prediction_data/ öneki (tek ve çift kat)
+    - CRIME_BASE + yukarıdakiler
+    Bulunursa ilk eşleşeni döndürür; yoksa orijinali döndürür.
+    """
+    names = []
+    s = str(p)
+
+    # 1) Verilen
+    names.append(s)
+
+    # 2) y/csv swap
+    if s.endswith("sf_crime_y.csv"):
+        names.append(s.replace("sf_crime_y.csv", "sf_crime.csv"))
+    elif s.endswith("sf_crime.csv"):
+        names.append(s.replace("sf_crime.csv", "sf_crime_y.csv"))
+
+    # 3) crime_prediction_data önekleri
+    base = "crime_prediction_data"
+    if not s.startswith(f"{base}/"):
+        names.append(f"{base}/{s}")
+        names.append(f"{base}/{base}/{s}")
+
+    # 4) swap + önek kombinasyonları
+    swaps = []
+    for n in list(names):
+        if n.endswith("sf_crime_y.csv"):
+            swaps.append(n.replace("sf_crime_y.csv", "sf_crime.csv"))
+        elif n.endswith("sf_crime.csv"):
+            swaps.append(n.replace("sf_crime.csv", "sf_crime_y.csv"))
+    names.extend(swaps)
+
+    # 5) CRIME_BASE ile mutlaklaştırılan varyantlar
+    cands: list[Path] = []
+    for n in names:
+        cands.append(Path(n))
+        cands.append(CRIME_BASE / n)
+
+    seen = set()
+    for cand in cands:
+        c = _abs(cand)
+        if c in seen:
+            continue
+        seen.add(c)
+        if c.exists() and c.is_file():
+            return cand
+    return p
+
+def _read_any(p: Path) -> pd.DataFrame:
     p = _abs(p)
     if not p.exists():
         print(f"❌ Girdi bulunamadı: {p}")
         return pd.DataFrame()
-    df = pd.read_csv(p, low_memory=False)
+    if p.suffix.lower() == ".parquet":
+        df = pd.read_parquet(p)
+    else:
+        df = pd.read_csv(p, low_memory=False)
     print(f"📖 Okundu: {p}  ({len(df):,} satır, {df.shape[1]} sütun)")
     return df
 
@@ -88,7 +146,7 @@ def _to_local_date_from_any(df: pd.DataFrame, dcol: str, tz: str) -> pd.Series:
     df[dcol] bir datetime, tarih stringi veya sadece 'date' (yyyy-mm-dd) olabilir.
     Eğer sadece 'date' varsa TZ dönüşümü yapmadan tarihi döndürür.
     Eğer 'date' + 'time' kolonları varsa ikisini birleştirir.
-    Çıktı: YYYY-MM-DD string (plain str)
+    Çıktı: YYYY-MM-DD string
     """
     # date + time birleşimi
     if dcol in ("date", "incident_date") and "time" in df.columns:
@@ -205,8 +263,16 @@ def _save_csv(df: pd.DataFrame, p: Path) -> None:
 
 # ========= CLI =========
 def main() -> int:
+    # IN için otomatik bul
+    in_guess = _autofind_input(IN_PATH)
+    if in_guess != IN_PATH:
+        print(f"🔎 IN otomatik bulundu → {in_guess}")
+        IN = in_guess
+    else:
+        IN = IN_PATH
+
     # CWD ve path çözümlemesi
-    in_path_resolved, out_path_resolved = _resolve_in_out(IN_PATH, OUT_PATH)
+    in_path_resolved, out_path_resolved = _resolve_in_out(IN, OUT_PATH)
 
     print("📂 CWD:", Path.cwd())
     print("🔧 CRIME_BASE:", _abs(CRIME_BASE))
@@ -216,9 +282,14 @@ def main() -> int:
     if FORCE_START or FORCE_END:
         print(f"🔧 FORCE window: start={FORCE_START or 'auto'} end={FORCE_END or 'auto'}")
 
-    src = _read_csv(in_path_resolved)
+    src = _read_any(in_path_resolved)
     if src.empty:
         return 0
+
+    # Hızlı doğrulama: kritik kolonlar
+    must_have = {"GEOID"}
+    if not must_have.issubset(set(src.columns)):
+        print(f"⚠️ Uyarı: Giriş verisinde eksik kolon(lar): {must_have - set(src.columns)}")
 
     daily = build_daily(src)
     _save_csv(daily, out_path_resolved)
