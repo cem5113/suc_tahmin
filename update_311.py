@@ -87,7 +87,7 @@ PAGE_LIMIT      = int(os.getenv("SF_SODA_PAGE_LIMIT", "50000"))
 MAX_PAGES       = int(os.getenv("SF_SODA_MAX_PAGES", "100"))
 SLEEP_SEC       = float(os.getenv("SF_SODA_THROTTLE_SEC", "0.25"))
 SODA_TIMEOUT    = int(os.getenv("SF_SODA_TIMEOUT", "90"))
-SODA_RETRIES    = int(os.getenv("SF_SODA_RETRIES", "5"))
+SODA_RETRIES    = int(os.getenv("SODA_RETRIES", os.getenv("SF_SODA_RETRIES", "5")))  # mevcutla uyum
 
 # Chunk modu
 CHUNK_DAYS              = int(os.getenv("SF311_CHUNK_DAYS", "31"))
@@ -99,6 +99,25 @@ FIVE_YEARS     = 5 * 365
 TODAY          = datetime.utcnow().date()
 DEFAULT_START  = TODAY - timedelta(days=FIVE_YEARS)
 BACKFILL_DAYS  = int(os.getenv("BACKFILL_DAYS", "0"))  # ← bug fix
+
+# ---- Artifact / summary adayları (YENİ) --------------------------------------
+ARTIFACT_DIR = os.getenv("ARTIFACT_DIR", "artifact")  # actions/download-artifact ile inen klasör
+ARTIFACT_SUMMARY_CANDIDATES = [
+    os.path.join(ARTIFACT_DIR, "sf_311_last_5_years.csv"),
+    os.path.join(ARTIFACT_DIR, "crime_prediction_data", "sf_311_last_5_years.csv"),
+]
+
+# Repo workspace (checkout) altındaki potansiyel summary yolları
+WORKSPACE = os.getenv("GITHUB_WORKSPACE", "")
+REPO_SUMMARY_CANDIDATES = [
+    os.path.join(SAVE_DIR, "sf_311_last_5_years.csv"),
+    os.path.join(".", "sf_311_last_5_years.csv"),
+]
+if WORKSPACE:
+    REPO_SUMMARY_CANDIDATES += [
+        os.path.join(WORKSPACE, "crime_prediction_data", "sf_311_last_5_years.csv"),
+        os.path.join(WORKSPACE, "sf_311_last_5_years.csv"),
+    ]
 
 # ================== SOCRATA ==================
 def socrata_get(session: requests.Session, url, params):
@@ -226,6 +245,24 @@ def _load_raw_seed_from_base(base_csv_path: str) -> pd.DataFrame:
 
     log_shape(df, "Base CSV (ham seed)")
     return df[keep + ["GEOID"] if "GEOID" in df.columns else keep].copy()
+
+# ---- (YENİ) Özet dosya algılama ------------------------------------------------
+def _looks_like_311_summary(df: pd.DataFrame) -> bool:
+    cols = {c.lower() for c in df.columns}
+    return {"geoid", "date", "hour_range", "311_request_count"}.issubset(cols)
+
+def find_existing_summary_csv() -> str | None:
+    """Önce artifact, sonra repo main altında 311 özet dosyasını ara."""
+    for cand in ARTIFACT_SUMMARY_CANDIDATES + REPO_SUMMARY_CANDIDATES:
+        if os.path.exists(cand):
+            try:
+                df = pd.read_csv(cand, nrows=5)
+                if _looks_like_311_summary(df):
+                    print(f"🔎 Özet 311 bulundu: {os.path.abspath(cand)}")
+                    return cand
+            except Exception:
+                pass
+    return None
 
 # ================== DOSYA YOLLARI ==================
 RAW_CANDIDATES = [
@@ -389,6 +426,110 @@ def download_by_date_chunks(start_date):
 def main():
     print("🔎 CWD:", os.getcwd())
     print("🔎 Tercih edilen SAVE_DIR:", os.path.abspath(SAVE_DIR))
+
+    # 0) KISA YOL (YENİ): Özet 311 CSV (artifact → repo) varsa İLK ONU KULLAN
+    existing_summary = find_existing_summary_csv()
+    if existing_summary is not None:
+        agg_path = os.path.join(SAVE_DIR, AGG_BASENAME)
+        agg_alias_path = os.path.join(SAVE_DIR, AGG_ALIAS)
+
+        try:
+            os.makedirs(SAVE_DIR, exist_ok=True)
+            summary_df = pd.read_csv(existing_summary, dtype={"GEOID": str}, low_memory=False)
+            save_atomic(summary_df, agg_path)
+            if AGG_ALIAS and AGG_ALIAS != AGG_BASENAME:
+                save_atomic(summary_df, agg_alias_path)
+            print(f"📁 Özet (artifact/repo) doğrudan yazıldı: {os.path.abspath(agg_path)}")
+        except Exception as e:
+            print(f"⚠️ Mevcut özet kopyalanamadı: {e}")
+
+        # Doğrudan merge adımı
+        try:
+            crime_01_path = os.path.join(SAVE_DIR, "sf_crime_01.csv")
+            if not os.path.exists(crime_01_path):
+                print(f"ℹ️ {crime_01_path} yok. 911 adımı üretilmeden 311 merge atlandı.")
+                return
+
+            print("🔗 sf_crime_01 ile birleştiriliyor... (hazır özet)")
+            crime = pd.read_csv(crime_01_path, dtype={"GEOID": str}, low_memory=False)
+            summary = pd.read_csv(agg_path, dtype={"GEOID": str}, low_memory=False)
+
+            # GEOID uzunluk eşlemesi
+            def _mode_len(s: pd.Series) -> int:
+                s2 = s.dropna().astype(str).str.extract(r"(\d+)")[0]
+                return int(s2.str.len().mode().iat[0]) if len(s2) else DEFAULT_GEOID_LEN
+            tgt_len = min(_mode_len(crime["GEOID"]), _mode_len(summary["GEOID"]))
+            def _left(series, n):
+                s = series.astype(str).str.extract(r"(\d+)")[0]
+                return s.str[:n]
+            crime["GEOID"]   = _left(crime["GEOID"],   tgt_len)
+            summary["GEOID"] = _left(summary["GEOID"], tgt_len)
+
+            # hour_range / date anahtarları
+            if "date" not in crime.columns and "datetime" in crime.columns:
+                crime["date"] = pd.to_datetime(crime["datetime"], errors="coerce").dt.date
+            elif "date" in crime.columns:
+                crime["date"] = pd.to_datetime(crime["date"], errors="coerce").dt.date
+
+            if "hour_range" not in crime.columns and "event_hour" in crime.columns:
+                hr = (pd.to_numeric(crime["event_hour"], errors="coerce").fillna(0).astype(int) // 3) * 3
+                crime["hour_range"] = hr.astype(str).str.zfill(2) + "-" + (hr + 3).astype(str).str.zfill(2)
+
+            if {"date","hour_range"}.issubset(crime.columns):
+                keys = ["GEOID","date","hour_range"]
+                _before = crime.shape
+                merged = crime.merge(
+                    summary[["GEOID","date","hour_range","311_request_count"]],
+                    on=keys, how="left"
+                )
+                log_merge_delta(_before, merged.shape, "crime ⨯ 311 (tarihli)")
+                print("🔗 Join modu: DATE-BASED (GEOID, date, hour_range)")
+            else:
+                # Takvim bazlı fallback
+                _smap = {12:"Winter",1:"Winter",2:"Winter",
+                         3:"Spring",4:"Spring",5:"Spring",
+                         6:"Summer",7:"Summer",8:"Summer",
+                         9:"Fall",10:"Fall",11:"Fall"}
+                _dt = pd.to_datetime(summary["date"], errors="coerce")
+                summary["day_of_week"] = _dt.dt.weekday
+                summary["month"] = _dt.dt.month
+                summary["season"] = summary["month"].map(_smap)
+                hrp = summary["hour_range"].astype(str).str.extract(r"(\d{1,2})")
+                summary["hr_key"] = pd.to_numeric(hrp[0], errors="coerce").fillna(0).astype(int)
+
+                if "day_of_week" not in crime.columns:
+                    crime["day_of_week"] = 0
+                if "season" not in crime.columns:
+                    if "month" in crime.columns:
+                        crime["season"] = pd.to_numeric(crime["month"], errors="coerce").map(_smap).fillna("Summer")
+                    else:
+                        crime["season"] = "Summer"
+                if "hr_key" not in crime.columns and "event_hour" in crime.columns:
+                    crime["hr_key"] = (pd.to_numeric(crime["event_hour"], errors="coerce").fillna(0).astype(int) // 3) * 3
+
+                cal_keys = ["GEOID","hr_key","day_of_week","season"]
+                cal_agg = summary.groupby(cal_keys, as_index=False)["311_request_count"].median()
+                _before = crime.shape
+                merged = crime.merge(cal_agg, on=cal_keys, how="left")
+                log_merge_delta(_before, merged.shape, "crime ⨯ 311 (takvim)")
+                print("🔗 Join modu: CALENDAR-BASED (GEOID, hr_key, day_of_week, season)")
+
+            if "311_request_count" in merged.columns:
+                merged["311_request_count"] = pd.to_numeric(merged["311_request_count"], errors="coerce").fillna(0).astype(int)
+            else:
+                merged["311_request_count"] = 0
+
+            log_shape(merged, "CRIME⨯311 (kayıt öncesi)")
+            save_atomic(merged, os.path.join(SAVE_DIR, "sf_crime_02.csv"))
+            print("✅ Suç + 311 birleştirmesi tamamlandı. (artifact/repo özet kullanıldı)")
+            try:
+                print(merged.head(5).to_string(index=False))
+            except Exception:
+                pass
+
+            return  # ← erken çıkış; aşağıdaki ham/seed/API akışına gerek yok
+        except Exception as e:
+            print(f"⚠️ Hazır özetle merge sırasında hata: {e} → normal akışa dönülüyor…")
 
     # 1) Mevcut ham dosya veya base’den seed
     raw_path = resolve_existing_raw_path()
