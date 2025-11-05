@@ -153,48 +153,51 @@ jobs:
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
       # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
+      # (0) 911 artifact'ını indir
+      - name: Download 911 artifact (sf-crime-pipeline-output)
+        uses: actions/download-artifact@v4
+        with:
+          name: sf-crime-pipeline-output
+          path: artifact   # -> artifact/sf_911_last_5_year*.csv burada olacak
+      
+      # (1) 911 → enrich GRID & EVENTS
       - name: (1) 911 → enrich GRID & EVENTS
         env:
-          # Gerekli ENV
+          CRIME_DATA_DIR:      ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:       ${{ env.FR_OUTPUT_DIR }}
           FR_EVENTS_DAILY_OUT: ${{ env.FR_EVENTS_DAILY_OUT }}
           FR_GRID_DAILY_OUT:   ${{ env.FR_GRID_DAILY_OUT }}
-          CRIME_DATA_DIR:      ${{ env.CRIME_DATA_DIR }}
-          # (Opsiyonel) Dışarıdan elle FR_911 vermek istersen job/env'de tanımlayabilirsin
-          FR_911:              ${{ env.FR_911 }}
         run: |
           set -euo pipefail
-
-          echo "== 911 kaynağı seçimi =="
+      
+          echo "== 911 kaynağı seçimi (artifact + main) =="
           CANDIDATES=(
-            "${FR_911:-}"
+            "${GITHUB_WORKSPACE}/artifact/sf_911_last_5_year.csv"
+            "${GITHUB_WORKSPACE}/artifact/sf_911_last_5_year_y.csv"
             "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
             "sf_911_last_5_year.csv"
           )
-
+      
           PICK=""
           for p in "${CANDIDATES[@]}"; do
-            if [ -n "${p}" ] && [ -f "${p}" ]; then
-              PICK="${p}"
-              break
-            fi
+            if [ -f "$p" ]; then PICK="$p"; break; fi
           done
-
-          if [ -n "${PICK}" ]; then
-            export FR_911="${PICK}"
-            echo "✅ 911 source: ${FR_911}"
+      
+          if [ -n "$PICK" ]; then
+            export FR_911="$PICK"
+            echo "✅ 911 source: $FR_911"
           else
-            echo "❌ 911 kaynağı bulunamadı (sf_911_last_5_year.csv)."
-            echo "   İstersen FR_911=/path/to/sf_911_last_5_year.csv olarak env ver."
-            # Burada continue/exit tercihine göre davran:
-            # exit 1
+            echo "❌ 911 kaynağı bulunamadı (sf_911_last_5_year*.csv)."
+            ls -l "${GITHUB_WORKSPACE}/artifact" || true
+            exit 1
           fi
-
+      
           python -u update_911_daily.py
-
+      
           EVENTS_FILE="${FR_OUTPUT_DIR%/}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
           GRID_FILE="${FR_OUTPUT_DIR%/}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
-
+      
           for f in "${EVENTS_FILE}" "${GRID_FILE}"; do
             if [ -f "${f}" ]; then
               echo ""; echo "📄 $(basename "${f}") — $(wc -l < "${f}") satır"
@@ -202,7 +205,7 @@ jobs:
               echo "🧭 columns:"
               F="${f}" python - <<'PY'
               import os, pandas as pd
-              f = os.environ.get("F", "")
+              f = os.environ.get("F","")
               try:
                   df = pd.read_csv(f, nrows=0)
                   print(",".join(df.columns))
@@ -213,7 +216,6 @@ jobs:
               echo "⚠️ Dosya yok: ${f}"
             fi
           done
-
           
       # ---------------------- 311 ENRICH (yerel arama) ----------------------
       - name: (2) 311 → enrich GRID & EVENTS (local search)
