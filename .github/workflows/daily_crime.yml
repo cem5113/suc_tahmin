@@ -19,29 +19,26 @@ defaults:
     shell: bash
 
 env:
-  # Kök: repo çalışma alanı
-  CRIME_DATA_DIR: ${{ github.workspace }}
+  # Kök dizinler
+  CRIME_DATA_DIR: ${{ github.workspace }}/crime_prediction_data
+  FR_OUTPUT_DIR:  ${{ github.workspace }}/crime_prediction_data
 
   WX_LOCATION: "paris"
   WX_UNIT: "metric"
   GEOID_LEN: "11"
 
-  # Artifact klasörü (varsa)
+  # Artifact konumları (opsiyonel ZIP + klasör)
   ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
   ARTIFACT_DIR: artifact
 
-  # Ana çıktı/okuma dizini
-  FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
-  FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
+  # Günlük çıktı dosya adları (SADECE DOSYA ADI)
+  FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
+  FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
+  FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
+  FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
 
-  # Günlük dosyalar — alt klasörle birlikte
-  FR_GRID_DAILY_IN:  crime_prediction_data/fr_crime_grid_daily.csv
-  FR_GRID_DAILY_OUT: crime_prediction_data/fr_crime_grid_daily.csv
-  FR_EVENTS_DAILY_IN:  crime_prediction_data/fr_crime_events_daily.csv
-  FR_EVENTS_DAILY_OUT: crime_prediction_data/fr_crime_events_daily.csv
-
-  # (Fix) Top-level env içinde başka env'e referans verilemez ⇒ github.workspace kullan
-  NEIGH_FILE: ${{ github.workspace }}/neighbors.csv
+  # Top-level env içinde başka env'e referans verilmez → workspace kullan
+  NEIGH_FILE: ${{ github.workspace }}/crime_prediction_data/neighbors.csv
 
   # 911 varsayılanları
   FR_911_DATE_COL: "incident_datetime"
@@ -93,7 +90,8 @@ jobs:
           python -m pip install -U pip wheel setuptools pyarrow pandas
           pip install numpy scikit-learn pyproj shapely geopandas fiona rtree
 
-      - name: Download upstream artifact (only when triggered by run)
+      # Upstream workflow_run tetiklendiyse artefaktı indir (klasör halinde)
+      - name: Download upstream artifact (folder)
         if: ${{ github.event_name == 'workflow_run' }}
         uses: dawidd6/action-download-artifact@v6
         with:
@@ -101,6 +99,7 @@ jobs:
           name: sf-crime-pipeline-output
           path: artifact
 
+      # ZIP varsa aç (opsiyonel)
       - name: Unzip artifact if present (optional)
         run: |
           set -euo pipefail
@@ -116,19 +115,19 @@ jobs:
           echo "== artifact contents =="
           find artifact -maxdepth 6 -type f | sed -n '1,200p' || true
 
-      # --- (0) Build FR daily: sf_crime.csv konumunu otomatik bul ---
+      # (0) Günlük GRID & EVENTS üretimi (sf_crime.csv otomatik bulunur)
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
         run: |
           set -euo pipefail
           echo "📂 CWD: $(pwd)"
           echo "📦 CRIME_DATA_DIR=${CRIME_DATA_DIR}"
-          mkdir -p "${CRIME_DATA_DIR}/crime_prediction_data"
+          mkdir -p "${CRIME_DATA_DIR}"
           ls -la "${CRIME_DATA_DIR}" || true
 
-          # sf_crime.csv aday yollar
+          # sf_crime.csv aday yolları
           C1="${CRIME_DATA_DIR}/sf_crime.csv"
           C2="${CRIME_DATA_DIR}/crime_prediction_data/sf_crime.csv"
-          C3="${CRIME_DATA_DIR}/artifact/sf_crime.csv"
+          C3="${ARTIFACT_DIR}/sf_crime.csv"
           if   [ -f "$C1" ]; then export FR_EVENTS_PATH="$C1"
           elif [ -f "$C2" ]; then export FR_EVENTS_PATH="$C2"
           elif [ -f "$C3" ]; then export FR_EVENTS_PATH="$C3"
@@ -136,8 +135,8 @@ jobs:
             echo "❌ sf_crime.csv yok (aradım: $C1 $C2 $C3)"; exit 1
           fi
 
-          export FR_OUT_EVENTS="${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_events_daily.csv"
-          export FR_OUT_GRID="${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_grid_daily.csv"
+          export FR_OUT_EVENTS="${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT}"
+          export FR_OUT_GRID="${FR_OUTPUT_DIR}/${FR_GRID_DAILY_OUT}"
           export FR_MIN_YEARS="5"
           export FR_DATE_COL="incident_datetime"
           export FR_GEOID_COL="GEOID"
@@ -152,7 +151,7 @@ jobs:
           echo "---- GRID head ----";   head -n 5 "${FR_OUT_GRID}"   || true
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
-      # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
+      # 01) 911 enrich — iki çıktı da
       - name: 01) 911 (events + grid)
         env:
           ARTIFACT_ZIP:  ${{ env.ARTIFACT_ZIP }}
@@ -163,13 +162,14 @@ jobs:
         run: |
           set -euo pipefail
           python -u update_911_fr.py
-      
-          EVENTS_FILE="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
-          GRID_FILE="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
-      
+
+          EVENTS_FILE="${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT}"
+          GRID_FILE="${FR_OUTPUT_DIR}/${FR_GRID_DAILY_OUT}"
+
           for f in "$EVENTS_FILE" "$GRID_FILE"; do
             if [ -f "$f" ]; then
-              echo ""; echo "📄 $(basename "$f") — $(wc -l < "$f") satır"
+              echo ""
+              echo "📄 $(basename "$f") — $(wc -l < "$f") satır"
               head -n 5 "$f" || true
               echo "🧭 columns:"
               F="$f" python - <<'PY'
@@ -186,22 +186,22 @@ jobs:
             fi
           done
 
-      # ---------------------- 311 ENRICH (yerel arama) ----------------------
+      # 02) 311 enrich — yerel arama
       - name: (2) 311 → enrich GRID & EVENTS (local search)
         env:
-          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
-          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
-          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
-          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_311_DATE_COL:  "${{ env.FR_311_DATE_COL }}"
-          FR_311_GEOID_COL: "${{ env.FR_311_GEOID_COL }}"
-          FR_311_WINSOR_Q:  "${{ env.FR_311_WINSOR_Q }}"
-          FR_311_EMA_ALPHAS: "${{ env.FR_311_EMA_ALPHAS }}"
+          FR_GRID_DAILY_IN:  ${{ env.FR_GRID_DAILY_IN }}
+          FR_GRID_DAILY_OUT: ${{ env.FR_GRID_DAILY_OUT }}
+          FR_EVENTS_DAILY_IN:  ${{ env.FR_EVENTS_DAILY_IN }}
+          FR_EVENTS_DAILY_OUT: ${{ env.FR_EVENTS_DAILY_OUT }}
+          FR_311_DATE_COL:  ${{ env.FR_311_DATE_COL }}
+          FR_311_GEOID_COL: ${{ env.FR_311_GEOID_COL }}
+          FR_311_WINSOR_Q:  ${{ env.FR_311_WINSOR_Q }}
+          FR_311_EMA_ALPHAS: ${{ env.FR_311_EMA_ALPHAS }}
         run: |
           set -euo pipefail
 
-          GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
-          EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
+          GRID="${FR_OUTPUT_DIR}/${FR_GRID_DAILY_OUT}"
+          EVTS="${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT}"
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
             echo "⚠️ daily grid/events yok → 311 enrich atlanıyor."
             exit 0
@@ -209,8 +209,8 @@ jobs:
 
           CANDIDATES=( \
             "${CRIME_DATA_DIR}/sf_311_last_5_years.csv" \
-            "${CRIME_DATA_DIR}/crime_prediction_data/sf_311_last_5_years.csv" \
-            "${CRIME_DATA_DIR}/artifact/sf_311_last_5_years.csv" \
+            "${FR_OUTPUT_DIR}/sf_311_last_5_years.csv" \
+            "${ARTIFACT_DIR}/sf_311_last_5_years.csv" \
           )
           PICK=""
           for p in "${CANDIDATES[@]}"; do
@@ -235,7 +235,7 @@ jobs:
 
           python - <<'PY'
           import os, pandas as pd
-          p=os.path.join(os.getenv("CRIME_DATA_DIR"), os.getenv("FR_GRID_DAILY_OUT","crime_prediction_data/fr_crime_grid_daily.csv"))
+          p=os.path.join(os.environ["FR_OUTPUT_DIR"], os.environ["FR_GRID_DAILY_OUT"])
           if os.path.exists(p):
               df=pd.read_csv(p, nrows=0)
               print("GRID columns:", list(df.columns))
@@ -273,22 +273,15 @@ jobs:
           python - <<'PY'
           import pandas as pd, geopandas as gpd, os
           from pathlib import Path
-
           BASE = Path(os.environ["CRIME_DATA_DIR"])
           INP  = BASE/"sf_census_blocks_with_population.geojson"
           OUT  = BASE/"sf_blocks_centroids.csv"
-
           print(f"INPUT={INP}")
           gdf = gpd.read_file(INP).to_crs("EPSG:4326")
           if "GEOID" not in gdf.columns:
               raise ValueError("BLOCKS GeoJSON içinde GEOID yok")
-
           def g11(s: pd.Series)->pd.Series:
-              return (
-                s.astype(str).str.extract(r"(\d+)",expand=False)
-                .fillna("").str.replace(" ","",regex=False).str.zfill(11).str[:11]
-              )
-
+              return s.astype(str).str.extract(r"(\d+)",expand=False).fillna("").str.replace(" ","",regex=False).str.zfill(11).str[:11]
           gdf["GEOID"]=g11(gdf["GEOID"])
           cent = gdf.dissolve(by="GEOID")["geometry"].centroid
           df=pd.DataFrame({"GEOID":cent.index,"centroid_lat":cent.y,"centroid_lon":cent.x})
@@ -330,8 +323,8 @@ jobs:
           set -euo pipefail
 
           POP="${CRIME_DATA_DIR}/${POP_FILE}"
-          GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
-          EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
+          GRID="${FR_OUTPUT_DIR}/${FR_GRID_DAILY_OUT}"
+          EVTS="${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT}"
 
           if [ ! -f "$POP" ]; then
             echo "ℹ️ population yok → atlanıyor ($POP)"
@@ -342,28 +335,18 @@ jobs:
           import os, pandas as pd
           base = os.environ["CRIME_DATA_DIR"]
           pop_path = os.path.join(base, os.environ["POP_FILE"])
-          grid_path = os.path.join(base, os.environ["FR_GRID_DAILY_OUT"])
-          evt_path  = os.path.join(base, os.environ["FR_EVENTS_DAILY_OUT"])
-
+          grid_path = os.path.join(os.environ["FR_OUTPUT_DIR"], os.environ["FR_GRID_DAILY_OUT"])
+          evt_path  = os.path.join(os.environ["FR_OUTPUT_DIR"], os.environ["FR_EVENTS_DAILY_OUT"])
           pop = pd.read_csv(pop_path)
-          # normalize
-          pop["GEOID"] = (
-              pop["GEOID"].astype(str).str.extract(r"(\d+)",expand=False)
-              .str.zfill(11).str[:11]
-          )
-
+          pop["GEOID"] = pop["GEOID"].astype(str).str.extract(r"(\d+)",expand=False).str.zfill(11).str[:11]
           def enrich(pth):
               if not os.path.exists(pth): return
               df = pd.read_csv(pth)
               if "GEOID" not in df.columns: return
-              df["GEOID"] = (
-                  df["GEOID"].astype(str).str.extract(r"(\d+)",expand=False)
-                  .str.zfill(11).str[:11]
-              )
+              df["GEOID"] = df["GEOID"].astype(str).str.extract(r"(\d+)",expand=False).str.zfill(11).str[:11]
               df = df.merge(pop[["GEOID","population"]], on="GEOID", how="left")
               df.to_csv(pth,index=False)
               print("✅ enriched:",pth)
-
           enrich(grid_path)
           enrich(evt_path)
           PY
@@ -371,12 +354,12 @@ jobs:
       - name: Final previews
         run: |
           set -euo pipefail
-          echo "==== GRID (top 3 rows) ====";   head -n 3 "${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"   || true
-          echo "==== EVENTS (top 3 rows) ===="; head -n 3 "${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}" || true
+          echo "==== GRID (top 3 rows) ====";   head -n 3 "${FR_OUTPUT_DIR}/${FR_GRID_DAILY_OUT}"   || true
+          echo "==== EVENTS (top 3 rows) ===="; head -n 3 "${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT}" || true
           echo "==== GRID column list ===="
           python - <<'PY'
           import pandas as pd, os
-          p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
+          p=os.path.join(os.environ["FR_OUTPUT_DIR"], os.environ["FR_GRID_DAILY_OUT"])
           if os.path.exists(p):
               df=pd.read_csv(p, nrows=0); print("\n".join(df.columns))
           else:
@@ -388,8 +371,8 @@ jobs:
         with:
           name: fr-daily-grid-events
           path: |
-            ${{ env.CRIME_DATA_DIR }}/${{ env.FR_GRID_DAILY_OUT }}
-            ${{ env.CRIME_DATA_DIR }}/${{ env.FR_EVENTS_DAILY_OUT }}
+            ${{ env.FR_OUTPUT_DIR }}/${{ env.FR_GRID_DAILY_OUT }}
+            ${{ env.FR_OUTPUT_DIR }}/${{ env.FR_EVENTS_DAILY_OUT }}
           if-no-files-found: warn
 
   patrol-fr:
