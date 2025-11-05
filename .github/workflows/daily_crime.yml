@@ -159,10 +159,10 @@ jobs:
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_311_DATE_COL:  "${{ env.FR_911_DATE_COL }}"
-          FR_311_GEOID_COL: "${{ env.FR_911_GEOID_COL }}"
-          FR_311_WINSOR_Q:  "${{ env.FR_911_WINSOR_Q }}"
-          FR_311_EMA_ALPHAS: "${{ env.FR_911_EMA_ALPHAS }}"
+          FR_911_DATE_COL:  "${{ env.FR_911_DATE_COL }}"
+          FR_911_GEOID_COL: "${{ env.FR_911_GEOID_COL }}"
+          FR_911_WINSOR_Q:  "${{ env.FR_911_WINSOR_Q }}"
+          FR_911_EMA_ALPHAS: "${{ env.FR_911_EMA_ALPHAS }}"
         run: |
           set -euo pipefail
 
@@ -183,7 +183,7 @@ jobs:
             [ -f "$p" ] && { PICK="$p"; break; }
           done
           if [ -z "$PICK" ]; then
-            echo "ℹ️ 311 günlük bulunamadı → adım atlanıyor."
+            echo "ℹ️ 911 günlük bulunamadı → adım atlanıyor."
             exit 0
           fi
           echo "✅ 911 kaynağı: $PICK"
