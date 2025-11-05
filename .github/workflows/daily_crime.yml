@@ -153,64 +153,41 @@ jobs:
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
       # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
-      - name: (1) 911 → enrich GRID & EVENTS (local search)
+      - name: (1) 911 → enrich GRID & EVENTS 
         env:
-          FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
-          FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
-          FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
-          FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_911_DATE_COL:  "${{ env.FR_911_DATE_COL }}"
-          FR_911_GEOID_COL: "${{ env.FR_911_GEOID_COL }}"
-          FR_911_WINSOR_Q:  "${{ env.FR_911_WINSOR_Q }}"
-          FR_911_EMA_ALPHAS: "${{ env.FR_911_EMA_ALPHAS }}"
+          ARTIFACT_ZIP:  ${{ env.ARTIFACT_ZIP }}
+          ARTIFACT_DIR:  ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+          # Aşağıdakiler tanımlı değilse script varsayılanlarını kullanır:
+          FR_EVENTS_DAILY_OUT: ${{ env.FR_EVENTS_DAILY_OUT }}
+          FR_GRID_DAILY_OUT:   ${{ env.FR_GRID_DAILY_OUT }}
         run: |
           set -euo pipefail
+          python -u update_911_fr.py
 
-          GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
-          EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
-          if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
-            echo "⚠️ daily grid/events yok → 911 enrich atlanıyor."
-            exit 0
-          fi
+          EVENTS_FILE="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
+          GRID_FILE="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
 
-          CANDIDATES=( \
-            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv" \
-            "${CRIME_DATA_DIR}/sf_911_last_5_year.csv" \
-            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year_y.csv" \
-            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year.csv" \
-            "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year_y.csv" \
-            "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year.csv" \
-          )
-          PICK=""
-          for p in "${CANDIDATES[@]}"; do
-            [ -f "$p" ] && { PICK="$p"; break; }
-          done
-          if [ -z "$PICK" ]; then
-            echo "ℹ️ 911 günlük bulunamadı → adım atlanıyor."
-            exit 0
-          fi
-          echo "✅ 911 kaynağı: $PICK"
-          export FR_911_DAILY_IN="$PICK"
-
-          if [ -f "./update_911_daily.py" ]; then
-            PYFILE="./update_911_daily.py"
-          elif [ -f "./scripts/update_911_daily.py" ]; then
-            PYFILE="./scripts/update_911_daily.py"
-          else
-            echo "❌ 911 script'i bulunamadı."; exit 67
-          fi
-
-          python -u "$PYFILE"
-
-          python - <<'PY'
+          for f in "$EVENTS_FILE" "$GRID_FILE"; do
+            if [ -f "$f" ]; then
+              echo ""
+              echo "📄 $(basename "$f") — $(wc -l < "$f") satır"
+              head -n 5 "$f" || true
+              echo "🧭 columns:"
+              F="$f" python - <<'PY'
           import os, pandas as pd
-          p=os.path.join(os.getenv("CRIME_DATA_DIR"), os.getenv("FR_GRID_DAILY_OUT","crime_prediction_data/fr_crime_grid_daily.csv"))
-          if os.path.exists(p):
-              df=pd.read_csv(p, nrows=0)
-              print("GRID columns:", list(df.columns))
-          else:
-              print("⚠️ GRID yok, kolon listesi alınamadı.")
+          f = os.environ['F']
+          try:
+              df = pd.read_csv(f, nrows=0)
+              print(",".join(df.columns))
+          except Exception as e:
+              print(f"kolon okuma hatası: {e}")
           PY
+            else
+              echo "⚠️ Dosya yok: $f"
+            fi
+          done
 
       # ---------------------- 311 ENRICH (yerel arama) ----------------------
       - name: (2) 311 → enrich GRID & EVENTS (local search)
