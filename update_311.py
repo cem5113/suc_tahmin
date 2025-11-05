@@ -624,13 +624,17 @@ def main():
     except Exception as e:
         print(f"⚠️ 311 merge aşamasında hata: {e}\n↪️ PASSTHROUGH uygulanıyor…")
         try:
+            # Güncel ortam değişkeni varsa kullan; yoksa SAVE_DIR altındaki varsayılanı dene
             crime_01_path = os.environ.get("DAILY_IN", os.path.join(SAVE_DIR, "sf_crime_01.csv"))
             if os.path.exists(crime_01_path):
-            crime = pd.read_csv(crime_01_path, dtype={"GEOID": str}, low_memory=False)
-            crime["311_request_count"] = 0
-            out_311_crime = os.environ.get("DAILY_OUT", os.path.join(SAVE_DIR, "sf_crime_02.csv"))
-            save_atomic(crime, out_311_crime)
+                crime = pd.read_csv(crime_01_path, dtype={"GEOID": str}, low_memory=False)
+                crime["311_request_count"] = 0
+
+                out_311_crime = os.environ.get("DAILY_OUT", os.path.join(SAVE_DIR, "sf_crime_02.csv"))
+                save_atomic(crime, out_311_crime)
                 print("✅ Passthrough yazıldı (exception fallback).")
+            else:
+                print(f"⚠️ Passthrough için kaynak yok: {crime_01_path} bulunamadı.")
         except Exception as ee:
             print(f"❌ Passthrough da başarısız: {ee}")
 
