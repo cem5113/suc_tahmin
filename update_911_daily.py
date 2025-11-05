@@ -72,16 +72,20 @@ def build_candidates():
         "FR_911": [
             ARTIFACT_DIR / "sf_911_last_5_year_y.csv",
             ARTIFACT_DIR / "sf_911_last_5_year.csv",
+            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_911_last_5_year_y.csv",  # EK
+            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_911_last_5_year.csv",    # EK
             Path("crime_prediction_data") / "sf_911_last_5_year_y.csv",
             Path("crime_prediction_data") / "sf_911_last_5_year.csv",
         ],
         "CENSUS": [
             ARTIFACT_DIR / "sf_census_blocks_with_population.geojson",
+            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_census_blocks_with_population.geojson",  # EK
             Path("crime_prediction_data") / "sf_census_blocks_with_population.geojson",
             Path("./sf_census_blocks_with_population.geojson"),
         ],
         "CRIME": [
             ARTIFACT_DIR / INPUT_CRIME_FILENAME,
+            ARTIFACT_DIR / "sf-crime-pipeline-output" / INPUT_CRIME_FILENAME,  # EK
             Path("crime_prediction_data") / INPUT_CRIME_FILENAME,
             Path(INPUT_CRIME_FILENAME),
         ],
