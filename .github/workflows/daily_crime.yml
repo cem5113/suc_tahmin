@@ -35,10 +35,10 @@ env:
   FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
 
   # Günlük dosyalar — alt klasörle birlikte
-  FR_GRID_DAILY_IN:  crime_prediction_data/fr_crime_grid_daily.csv
-  FR_GRID_DAILY_OUT: crime_prediction_data/fr_crime_grid_daily.csv
-  FR_EVENTS_DAILY_IN:  crime_prediction_data/fr_crime_events_daily.csv
-  FR_EVENTS_DAILY_OUT: crime_prediction_data/fr_crime_events_daily.csv
+  FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
+  FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
+  FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
+  FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
 
   # (Fix) Top-level env içinde başka env'e referans verilemez ⇒ github.workspace kullan
   NEIGH_FILE: ${{ github.workspace }}/neighbors.csv
