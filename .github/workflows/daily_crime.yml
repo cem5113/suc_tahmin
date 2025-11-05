@@ -208,24 +208,28 @@ jobs:
       
           EVENTS_FILE="${FR_OUTPUT_DIR%/}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
           GRID_FILE="${FR_OUTPUT_DIR%/}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
-          for f in "$EVENTS_FILE" "$GRID_FILE"; do
-            if [ -f "$f" ]; then
-              echo ""; echo "📄 $(basename "$f") — $(wc -l < "$f") satır"
-              head -n 5 "$f" || true
-              echo "🧭 columns:"; F="$f" python - <<'PY'
-              import os, pandas as pd
-              f=os.environ['F']
-              try:
-                  print(",".join(pd.read_csv(f, nrows=0).columns))
-              except Exception as e:
-                  print(f"kolon okuma hatası: {e}")
-              PY
+      
+          print_cols () {
+          python - "$1" <<'PY'
+          import sys, pandas as pd
+          f=sys.argv[1]
+          try:
+              print(",".join(pd.read_csv(f, nrows=0).columns))
+          except Exception as e:
+              print(f"kolon okuma hatası: {e}")
+          PY
+          }
+      
+          for f in "${EVENTS_FILE}" "${GRID_FILE}"; do
+            if [ -f "${f}" ]; then
+              echo ""; echo "📄 $(basename "${f}") — $(wc -l < "${f}") satır"
+              head -n 5 "${f}" || true
+              echo "🧭 columns:"; print_cols "${f}"
             else
-              echo "⚠️ Dosya yok: $f"
+              echo "⚠️ Dosya yok: ${f}"
             fi
           done
 
-          
       # ---------------------- 311 ENRICH (yerel arama) ----------------------
       - name: (2) 311 → enrich GRID & EVENTS (local search)
         env:
