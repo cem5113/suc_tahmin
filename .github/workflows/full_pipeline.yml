@@ -588,6 +588,18 @@ jobs:
             echo "POI adımı bulunamadı"; exit 2
           fi
 
+      - name: 07.9) Assert sf_crime_06 presence (before police/gov)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          D="${CRIME_DATA_DIR}"
+          F="${D}/sf_crime_06.csv"
+          echo "→ Beklenen: $F"
+          ls -lah "$D" | sed -n '1,120p' || true
+          [ -f "$F" ] || { echo "❌ sf_crime_06.csv yok! POI adımının DAILY_OUT/CRIME_OUT loglarını kontrol et."; exit 2; }
+          echo "---- sf_crime_06.csv (head) ----"
+          head -n 5 "$F" || true
+
       - name: 08) Polis & Devlet binaları → sf_crime_07.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
