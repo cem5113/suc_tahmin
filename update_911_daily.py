@@ -1,44 +1,95 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# update_crime_daily.py — Event-level → (1) events_daily  (2) GEOID×date grid_daily
-# REVIZE: artifact ZIP açma + aday yol keşfi + "en güncel dosyayı seç" + tazelik logu + event_hour/hr_key üretimi
+# update_911_fr.py — Girdi: sf_crime.csv → Çıktılar:
+#   1) fr_crime_events_daily.csv  (event-level + günlük 911 özellikleri)
+#   2) fr_crime_grid_daily.csv    (GEOID×date grid + günlük 911 özellikleri)
+#
+# Notlar:
+# - 911 ham/özetten datetime → date; GEOID×date sayımı (n_911_day) + last1d/3d/7d (shift(1))
+# - Join yalnızca (GEOID, date) ile yapılır (saat önemsiz)
+# - GEOID yoksa lat/lon → GEOID eşlemesi yapılır (census geojson gerekir)
 
 from __future__ import annotations
 import os, zipfile
 from pathlib import Path
-from datetime import datetime, date, timedelta
+from typing import Optional
 import pandas as pd
-import numpy as np
-import shutil
-import warnings
+import geopandas as gpd
 
-warnings.simplefilter("ignore", FutureWarning)
-pd.options.mode.copy_on_write = True
+# =========================
+# BASIC UTILS
+# =========================
+def log(msg: str): print(msg, flush=True)
 
-# ----------------------- ENV / PATHS -----------------------
-BASE_DIR     = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).expanduser().resolve()
+def ensure_parent(path: str):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-# Artifact (ZIP) desteği — isteğe bağlı
+def safe_save_csv(df: pd.DataFrame, path: str):
+    try:
+        ensure_parent(path)
+        tmp = path + ".tmp"
+        df.to_csv(tmp, index=False)
+        os.replace(tmp, path)
+        log(f"💾 Kaydedildi: {path} (satır={len(df):,})")
+    except Exception as e:
+        b = path + ".bak"
+        try:
+            df.to_csv(b, index=False)
+        except Exception:
+            pass
+        log(f"❌ Kaydetme hatası: {path} — Yedek: {b}\n{e}")
+
+def to_date(s):
+    return pd.to_datetime(s, errors="coerce").dt.date
+
+def normalize_geoid(s: pd.Series, target_len: int) -> pd.Series:
+    s = s.astype(str).str.extract(r"(\d+)", expand=False)
+    return s.str[:target_len].str.zfill(target_len)
+
+def first_existing(paths) -> Optional[Path]:
+    for p in paths:
+        if p and Path(p).exists():
+            return Path(p)
+    return None
+
+# =========================
+# CONFIG
+# =========================
 ARTIFACT_ZIP = Path(os.getenv("ARTIFACT_ZIP", "artifact/sf-crime-pipeline-output.zip"))
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifact_unzipped"))
 
-# Girdi/çıktı ENV (override edebilir)
-EVENTS_PATH  = Path(os.getenv("FR_EVENTS_PATH", "sf_crime.csv"))
-OUT_EVENTS   = Path(os.getenv("FR_OUT_EVENTS",  "fr_crime_events_daily.csv"))
-OUT_GRID     = Path(os.getenv("FR_OUT_GRID",    "fr_crime_grid_daily.csv"))
+# GİRİŞ
+INPUT_CRIME_FILENAME = os.getenv("FR_CRIME_FILE", "sf_crime.csv")
 
-DATE_COL  = os.getenv("FR_DATE_COL", "incident_datetime")
-GEOID_COL = os.getenv("FR_GEOID_COL", "GEOID")
-ID_COL    = os.getenv("FR_ID_COL", "id")
+# ÇIKIŞLAR
+OUTPUT_EVENTS_DAILY  = os.getenv("FR_EVENTS_DAILY_OUT", "fr_crime_events_daily.csv")
+OUTPUT_GRID_DAILY    = os.getenv("FR_GRID_DAILY_OUT",   "fr_crime_grid_daily.csv")
+OUTPUT_DIR = Path(os.getenv("FR_OUTPUT_DIR", "crime_prediction_data"))
 
-MIN_YEARS = int(os.getenv("FR_MIN_YEARS", "5"))
-MIN_DAYS  = max(1, MIN_YEARS * 365)
+# Aday yollar
+def build_candidates():
+    return {
+        "FR_911": [
+            ARTIFACT_DIR / "sf_911_last_5_year_y.csv",
+            ARTIFACT_DIR / "sf_911_last_5_year.csv",
+            Path("crime_prediction_data") / "sf_911_last_5_year_y.csv",
+            Path("crime_prediction_data") / "sf_911_last_5_year.csv",
+        ],
+        "CENSUS": [
+            ARTIFACT_DIR / "sf_census_blocks_with_population.geojson",
+            Path("crime_prediction_data") / "sf_census_blocks_with_population.geojson",
+            Path("./sf_census_blocks_with_population.geojson"),
+        ],
+        "CRIME": [
+            ARTIFACT_DIR / INPUT_CRIME_FILENAME,
+            Path("crime_prediction_data") / INPUT_CRIME_FILENAME,
+            Path(INPUT_CRIME_FILENAME),
+        ],
+    }
 
-# ----------------------- Helpers -----------------------
-def _abs(p: Path) -> Path:
-    p = p.expanduser()
-    return (p if p.is_absolute() else (BASE_DIR / p)).resolve()
-
+# =========================
+# ZIP HELPERS
+# =========================
 def _is_within_directory(directory: Path, target: Path) -> bool:
     try:
         directory = directory.resolve()
@@ -47,364 +98,208 @@ def _is_within_directory(directory: Path, target: Path) -> bool:
     except Exception:
         return False
 
-def _safe_unzip(zip_path: Path, dest_dir: Path):
+def safe_unzip(zip_path: Path, dest_dir: Path):
     if not zip_path.exists():
-        print(f"ℹ️ Artifact ZIP yok: {zip_path}")
+        log(f"ℹ️ Artifact ZIP bulunamadı: {zip_path} — klasörlerden denenecek.")
         return
     dest_dir.mkdir(parents=True, exist_ok=True)
-    print(f"📦 ZIP açılıyor: {zip_path} → {dest_dir}")
-    with zipfile.ZipFile(zip_path, "r") as zf:
+    log(f"📦 ZIP açılıyor: {zip_path} → {dest_dir}")
+    with zipfile.ZipFile(zip_path, 'r') as zf:
         for m in zf.infolist():
-            out = dest_dir / m.filename
-            if not _is_within_directory(dest_dir, out.parent):
+            out_path = dest_dir / m.filename
+            if not _is_within_directory(dest_dir, out_path.parent):
                 raise RuntimeError(f"Zip path outside target dir engellendi: {m.filename}")
             if m.is_dir():
-                out.mkdir(parents=True, exist_ok=True); continue
-            out.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(m, "r") as src, open(out, "wb") as dst:
+                out_path.mkdir(parents=True, exist_ok=True); continue
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(m, 'r') as src, open(out_path, 'wb') as dst:
                 dst.write(src.read())
-    print("✅ ZIP çıkarma tamam.")
+    log("✅ ZIP çıkarma tamam.")
 
-def _read_table(p: Path) -> pd.DataFrame:
-    p = _abs(p)
-    if not p.exists():
-        print(f"❌ Bulunamadı: {p}")
-        return pd.DataFrame()
-    try:
-        suf = "".join(p.suffixes).lower()
-        if suf.endswith(".parquet"):
-            df = pd.read_parquet(p)
-        elif suf.endswith(".csv.gz"):
-            df = pd.read_csv(p, low_memory=False, compression="gzip")
-        else:
-            df = pd.read_csv(p, low_memory=False)
-        print(f"📖 Okundu: {p}  ({len(df):,}×{df.shape[1]})  mtime={datetime.fromtimestamp(p.stat().st_mtime)}")
+# =========================
+# GEO HELPERS
+# =========================
+def _load_blocks(CENSUS_GEOJSON_CANDIDATES) -> tuple[gpd.GeoDataFrame, int]:
+    census_path = first_existing(CENSUS_GEOJSON_CANDIDATES)
+    if census_path is None:
+        raise FileNotFoundError("❌ GEOID poligon dosyası yok: sf_census_blocks_with_population.geojson")
+
+    gdf_blocks = gpd.read_file(census_path)
+    if "GEOID" not in gdf_blocks.columns:
+        cand = [c for c in gdf_blocks.columns if str(c).upper().startswith("GEOID")]
+        if not cand:
+            raise ValueError("GeoJSON içinde GEOID benzeri sütun yok.")
+        gdf_blocks = gdf_blocks.rename(columns={cand[0]: "GEOID"})
+
+    tlen = gdf_blocks["GEOID"].astype(str).str.len().mode().iat[0]
+    gdf_blocks["GEOID"] = normalize_geoid(gdf_blocks["GEOID"], int(tlen))
+
+    if gdf_blocks.crs is None:
+        gdf_blocks.set_crs("EPSG:4326", inplace=True)
+    elif gdf_blocks.crs.to_epsg() != 4326:
+        gdf_blocks = gdf_blocks.to_crs(4326)
+    return gdf_blocks, int(tlen)
+
+def ensure_geoid_from_latlon(df: pd.DataFrame, CENSUS_GEOJSON_CANDIDATES) -> pd.DataFrame:
+    if "GEOID" in df.columns and df["GEOID"].notna().any():
         return df
-    except Exception as e:
-        print(f"⚠️ Okunamadı: {p} → {e}")
-        return pd.DataFrame()
 
-def _safe_save_csv(df: pd.DataFrame, p: Path) -> None:
-    p = _abs(p)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    df.to_csv(tmp, index=False)
-    tmp.replace(p)
-    print(f"💾 Kaydedildi: {p}  ({len(df):,}×{df.shape[1]})")
+    lat_col = next((c for c in ["latitude", "lat", "y"] if c in df.columns), None)
+    lon_col = next((c for c in ["longitude", "lon", "x"] if c in df.columns), None)
+    if not lat_col or not lon_col:
+        raise ValueError("❌ Veride GEOID yok ve lat/lon bulunamadı.")
 
-def _norm_geoid(s: pd.Series) -> pd.Series:
-    return (
-        s.astype(str)
-         .str.extract(r"(\d+)", expand=False)
-         .fillna("")
-         .apply(lambda x: x.zfill(11) if x else "")
-    )
+    gdf_blocks, tlen = _load_blocks(CANDS["CENSUS"])
 
-def _detect_dt_col(df: pd.DataFrame, hint: str = "incident_datetime") -> str | None:
-    cand = [
-        hint, "datetime", "date_time", "occurred_at", "occurred_datetime",
-        "event_datetime", "time", "date"
-    ]
-    for c in cand:
-        if c in df.columns:
-            return c
-    if "incident_date" in df.columns and "incident_time" in df.columns:
-        return "incident_date+incident_time"
-    return None
+    tmp = df.copy()
+    tmp[lat_col] = pd.to_numeric(tmp[lat_col], errors="coerce")
+    tmp[lon_col] = pd.to_numeric(tmp[lon_col], errors="coerce")
+    tmp = tmp.dropna(subset=[lat_col, lon_col]).copy()
 
-def _ensure_date(df: pd.DataFrame, dt_col_hint: str) -> pd.Series:
-    use = _detect_dt_col(df, dt_col_hint)
-    if use is None:
-        if "date" in df.columns:
-            return pd.to_datetime(df["date"], errors="coerce").dt.date
-        raise ValueError("Tarih/saat sütunu bulunamadı (FR_DATE_COL ile belirtin).")
-    if use == "incident_date+incident_time":
-        dt = pd.to_datetime(
-            df["incident_date"].astype(str).str.strip() + " " +
-            df["incident_time"].astype(str).str.strip(),
-            errors="coerce", utc=True
-        )
-    else:
-        dt = pd.to_datetime(df[use], errors="coerce", utc=True)
-    return dt.dt.date
+    pts = gpd.GeoDataFrame(tmp, geometry=gpd.points_from_xy(tmp[lon_col], tmp[lat_col]), crs="EPSG:4326")
+    joined = gpd.sjoin(pts, gdf_blocks[["GEOID", "geometry"]], how="left", predicate="within")
+    out = pd.DataFrame(joined.drop(columns=["geometry", "index_right"], errors="ignore"))
+    out["GEOID"] = normalize_geoid(out["GEOID"], tlen)
+    return out
 
-def _ensure_event_hour_and_hrkey(df: pd.DataFrame, dt_col_hint: str) -> pd.DataFrame:
-    """
-    event_hour: 0–23  (UTC bazlı parse; saat dilimi normalize edilmek istenirse burada ayarlanabilir)
-    hr_key    : 0,3,6,...,21 (3 saatlik aralık başlangıcı)
-    """
-    use = _detect_dt_col(df, dt_col_hint)
-    hr = None
-    if use == "incident_date+incident_time":
-        dt = pd.to_datetime(
-            df["incident_date"].astype(str).str.strip() + " " +
-            df["incident_time"].astype(str).str.strip(),
-            errors="coerce", utc=True
-        )
-        hr = dt.dt.hour
-    elif use is not None:
-        dt = pd.to_datetime(df[use], errors="coerce", utc=True)
-        hr = dt.dt.hour
-    elif "date" in df.columns:
-        # sadece tarih varsa saat türetilemez; None kalsın
-        hr = None
+# =========================
+# 911 DAILY SUMMARY (NO HOURS)
+# =========================
+def read_911_daily(FR_911_CANDIDATES, CENSUS_GEOJSON_CANDIDATES) -> pd.DataFrame:
+    src = first_existing(FR_911_CANDIDATES)
+    if src is None:
+        raise FileNotFoundError("❌ 911 verisi bulunamadı (zip veya klasör).")
+    log(f"📥 911 kaynağı yükleniyor: {src}")
 
-    if hr is not None:
-        df["event_hour"] = pd.to_numeric(hr, errors="coerce").fillna(0).astype("int16")
-        df["hr_key"]     = ((df["event_hour"] // 3) * 3).astype("int16")
-    else:
-        # Kolon yoksa, merge tarafı takvim-bazlı (varsayılan hr_key=0) join'e düşebilir
-        if "event_hour" not in df.columns:
-            df["event_hour"] = pd.Series([np.nan]*len(df), dtype="float32")
-        if "hr_key" not in df.columns:
-            df["hr_key"] = pd.Series([np.nan]*len(df), dtype="float32")
+    df = pd.read_csv(src, low_memory=False, dtype={"GEOID":"string"})
+    # Zaman kolonu tespiti
+    ts_col = next((c for c in ["received_time","received_datetime","datetime","timestamp",
+                               "call_received_datetime","date"] if c in df.columns), None)
+    if ts_col is None:
+        raise ValueError("911 verisinde datetime/içeren bir zaman kolonu bulunamadı.")
 
-    return df
+    # GEOID yoksa lat/lon → GEOID
+    if "GEOID" not in df.columns or df["GEOID"].isna().all():
+        log("ℹ️ 911 verisinde GEOID yok; lat/lon → GEOID hesaplanacak.")
+        df = ensure_geoid_from_latlon(df, CANDS["CENSUS"])
 
-# ---- Aday yol üretimi (artifact → BASE_DIR → yerel) + en güncel dosyayı seç
-def _build_event_candidates() -> list[Path]:
-    return [
-        ARTIFACT_DIR / "sf_crime.csv",
-        ARTIFACT_DIR / "fr_crime.csv",
-        BASE_DIR / "sf_crime.csv",
-        BASE_DIR / "fr_crime.csv",
-        Path("sf_crime.csv"),
-        Path("fr_crime.csv"),
-    ]
+    # date üret
+    df["date"] = to_date(df[ts_col])
+    df = df.dropna(subset=["GEOID","date"]).copy()
 
-def _existing(paths: list[Path]) -> list[Path]:
-    uniq = []
-    seen = set()
-    for p in paths:
-        ap = _abs(p)
-        if ap.exists() and str(ap) not in seen:
-            uniq.append(ap); seen.add(str(ap))
-    return uniq
+    # Günlük sayım (GEOID × date)
+    day = (df.groupby(["GEOID","date"], as_index=False)
+             .size()
+             .rename(columns={"size":"n_911_day"}))
 
-def _pick_latest(paths: list[Path]) -> Path | None:
-    ex = _existing(paths)
-    if not ex:
-        return None
-    # En güncel mtime’a göre seç
-    ex.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return ex[0]
+    # Rolling (sızıntısız: shift(1))
+    day = day.sort_values(["GEOID","date"]).reset_index(drop=True)
 
-def _max_event_date(df: pd.DataFrame) -> date | None:
-    dc = _detect_dt_col(df, DATE_COL)
-    col = "date" if "date" in df.columns else dc
-    if col is None:
-        return None
+    day["n_911_last1d"] = (
+        day.groupby("GEOID")["n_911_day"]
+           .transform(lambda s: s.shift(1).fillna(0))
+    ).astype("float32")
+
+    def roll_sum(s: pd.Series, W: int) -> pd.Series:
+        return s.shift(1).rolling(W, min_periods=1).sum()
+
+    day["n_911_last3d"] = (
+        day.groupby("GEOID")["n_911_day"].transform(lambda s: roll_sum(s, 3)).fillna(0)
+    ).astype("float32")
+
+    day["n_911_last7d"] = (
+        day.groupby("GEOID")["n_911_day"].transform(lambda s: roll_sum(s, 7)).fillna(0)
+    ).astype("float32")
+
+    return day
+
+# =========================
+# MAIN
+# =========================
+def main():
+    global CANDS  # ensure_geoid_from_latlon içinde kullanılıyor
+
+    # 0) ZIP varsa çıkar
+    safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
+
+    # 1) Aday yollar
+    CANDS = build_candidates()
+
+    # 2) 911 günlük özet
+    fr911_daily = read_911_daily(CANDS["FR_911"], CANDS["CENSUS"])
+    log(f"📊 911 günlük özet: {fr911_daily.shape[0]:,} satır × {fr911_daily.shape[1]} sütun")
+
+    # 3) sf_crime.csv (girdi)
+    crime_path = first_existing(CANDS["CRIME"])
+    if crime_path is None:
+        raise FileNotFoundError("❌ sf_crime.csv bulunamadı.")
+    crime = pd.read_csv(crime_path, low_memory=False, dtype={"GEOID":"string"})
+    log(f"📥 sf_crime.csv: {crime_path} — satır: {len(crime):,}")
+
+    # 4) GEOID normalize / gerekirse lat-lon → GEOID
     try:
-        if col == "incident_date+incident_time":
-            dt = pd.to_datetime(
-                df["incident_date"].astype(str).str.strip() + " " +
-                df["incident_time"].astype(str).str.strip(),
-                errors="coerce", utc=True
-            )
-        else:
-            dt = pd.to_datetime(df[col], errors="coerce", utc=True)
-        return dt.dt.date.max()
+        gdf_blocks, tlen = _load_blocks(CANDS["CENSUS"])
     except Exception:
-        return None
-
-# ----------------------- Main -----------------------
-def main() -> int:
-    print("📂 CWD:", Path.cwd())
-    print("🔧 BASE_DIR       :", BASE_DIR)
-    print("🔧 OUT_EVENTS     :", _abs(OUT_EVENTS))
-    print("🔧 OUT_GRID       :", _abs(OUT_GRID))
-    print("🔧 FR_MIN_YEARS   :", MIN_YEARS)
-    print("🔧 FR_DATE_COL    :", DATE_COL)
-    print("🔧 FR_GEOID_COL   :", GEOID_COL)
-    print("🔧 FR_ID_COL      :", ID_COL)
-
-    # 0) ZIP varsa aç
-    _safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
-
-    # 1) Girdi keşfi: ENV yol geçerliyse onu, değilse adaylardan en günceli
-    preferred = _abs(EVENTS_PATH)
-    ev_path: Path | None = None
-    if preferred.exists():
-        ev_path = preferred
-        print(f"🔎 Girdi (ENV): {ev_path}  mtime={datetime.fromtimestamp(ev_path.stat().st_mtime)}")
+        tlen = 11
+    if "GEOID" in crime.columns and crime["GEOID"].notna().any():
+        crime["GEOID"] = normalize_geoid(crime["GEOID"], tlen)
     else:
-        cand = _build_event_candidates()
-        ev_path = _pick_latest(cand)
-        if ev_path:
-            print(f"🔎 Girdi (auto-picked latest): {ev_path}  mtime={datetime.fromtimestamp(ev_path.stat().st_mtime)}")
-        else:
-            print("❌ Olası girdi bulunamadı.")
-            return 1
+        log("ℹ️ sf_crime: GEOID yok; lat/lon → GEOID hesaplanacak.")
+        crime = ensure_geoid_from_latlon(crime, CANDS["CENSUS"])
+        crime["GEOID"] = normalize_geoid(crime["GEOID"], tlen)
 
-    # 2) Oku
-    ev = _read_table(ev_path)
-    if ev.empty:
-        print("❌ Olay verisi boş. Çıkılıyor.")
-        return 1
-
-    # 3) Tazelik kontrolü (İstanbul günü)
-    today_tr = datetime.now().date()
-    dmax = _max_event_date(ev)
-    print(f"📆 Maks olay tarihi: {dmax}")
-    if dmax and dmax < today_tr - timedelta(days=1):
-        print(f"⚠️ Uyarı: Olay verisi eski görünüyor (maks={dmax}, today={today_tr}).")
-
-    # GEOID normalize (varsa / yoksa otomatik bul)
-    if GEOID_COL in ev.columns:
-        ev[GEOID_COL] = _norm_geoid(ev[GEOID_COL])
+    # 5) DATE kolonu (olay saati ÖNEMSİZ; datetime → date)
+    if "date" in crime.columns:
+        crime["date"] = to_date(crime["date"])
     else:
-        alt = next((c for c in ev.columns if "geoid" in c.lower()), None)
-        if alt:
-            print(f"🔎 GEOID otomatik bulundu: {alt}")
-            ev[GEOID_COL] = _norm_geoid(ev[alt])
-        else:
-            print("⚠️ GEOID sütunu yok. Grid için GEOID listesi çıkmayabilir.")
+        dt_col = next((c for c in ["datetime","event_datetime","occurred_at","timestamp"] if c in crime.columns), None)
+        if dt_col is None:
+            raise ValueError("❌ sf_crime.csv içinde 'date' veya 'datetime' benzeri bir kolon yok.")
+        crime["date"] = to_date(crime[dt_col])
 
-    # DATE üret
+    # 6) EVENTS_DAILY: (GEOID, date) ile 911 join
+    keys = ["GEOID","date"]
+    events_daily = crime.merge(fr911_daily, on=keys, how="left")
+    for c in ["n_911_day","n_911_last1d","n_911_last3d","n_911_last7d"]:
+        if c in events_daily.columns:
+            events_daily[c] = pd.to_numeric(events_daily[c], errors="coerce").fillna(0)
+
+    # 7) GRID_DAILY: olayları GEOID×date topla + 911 özetlerini eşleştir
+    #    - crime_count_day: o gün GEOID içindeki olay sayısı
+    #    - Y_day: (crime_count_day > 0) ikili etiket (işine yarıyorsa)
+    agg_crime = (events_daily
+                 .groupby(keys, as_index=False)
+                 .size()
+                 .rename(columns={"size":"crime_count_day"}))
+    grid_daily = agg_crime.merge(fr911_daily, on=keys, how="left")
+    grid_daily["crime_count_day"] = pd.to_numeric(grid_daily["crime_count_day"], errors="coerce").fillna(0).astype(int)
+    grid_daily["Y_day"] = (grid_daily["crime_count_day"] > 0).astype("int8")
+
+    for c in ["n_911_day","n_911_last1d","n_911_last3d","n_911_last7d"]:
+        if c in grid_daily.columns:
+            grid_daily[c] = pd.to_numeric(grid_daily[c], errors="coerce").fillna(0)
+
+    # 8) Yaz
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_events = OUTPUT_DIR / OUTPUT_EVENTS_DAILY
+    out_grid   = OUTPUT_DIR / OUTPUT_GRID_DAILY
+
+    safe_save_csv(events_daily, str(out_events))
+    safe_save_csv(grid_daily,   str(out_grid))
+
+    # 9) Kısa önizleme
     try:
-        ev_date = _ensure_date(ev, DATE_COL)
-    except Exception as e:
-        print(f"❌ Tarih oluşturulamadı: {e}")
-        return 2
-
-    df = ev.copy()
-    df["date"] = ev_date
-
-    # event_hour + hr_key üret (911 adımı için önemli)
-    df = _ensure_event_hour_and_hrkey(df, DATE_COL)
-
-    # id yoksa yarat
-    if ID_COL not in df.columns:
-        print(f"ℹ️ '{ID_COL}' yok → sentetik id üretilecek.")
-        df.insert(0, ID_COL, pd.RangeIndex(0, len(df)).map(lambda i: f"synt_{i}"))
-
-    # ---------- (1) EVENTS_DAILY ----------
-    events_daily = df.copy()
-    events_daily["Y_label_event"] = 1
-    _safe_save_csv(events_daily, OUT_EVENTS)
-
-    # ---------- (2) GRID (GEOID×date) ----------
-    # GEOID listesi
-    geoids: list[str] = []
-    if GEOID_COL in events_daily.columns and events_daily[GEOID_COL].notna().any():
-        geoids = sorted(events_daily.loc[events_daily[GEOID_COL] != "", GEOID_COL].unique().tolist())
-    else:
-        for c in [
-            "crime_prediction_data/sf_crime_grid_full_labeled.csv",
-            "crime_prediction_data/sf_crime_grid_full_labeled.parquet",
-            "sf_crime_grid_full_labeled.csv",
-            "sf_crime_grid_full_labeled.parquet",
-            "crime_prediction_data/sf_crime_y.csv",
-            "sf_crime_y.csv",
-        ]:
-            src = _abs(Path(c))
-            if not src.exists():
-                continue
-            try:
-                tmp = pd.read_parquet(src) if str(src).lower().endswith(".parquet") else pd.read_csv(src, low_memory=False)
-                if "GEOID" in tmp.columns:
-                    geoids = sorted(tmp["GEOID"].astype(str).str.zfill(11).unique().tolist())
-                    print(f"🔎 GEOID listesi {src} kaynağından alındı ({len(geoids)}).")
-                    break
-            except Exception:
-                continue
-
-    if not geoids:
-        print("⚠️ GEOID listesi yok → grid üretimi atlanıyor.")
-        return 0
-
-    # tarih aralığı (min 5 yıl)
-    dmin = events_daily["date"].dropna().min()
-    dmax = events_daily["date"].dropna().max()
-    if pd.isna(dmin) or pd.isna(dmax):
-        print("⚠️ Kullanılabilir tarih bulunamadı → grid atlandı.")
-        return 0
-
-    desired_start = (dmax - timedelta(days=MIN_DAYS - 1)) if (dmax - dmin).days + 1 < MIN_DAYS else dmin
-    all_days = pd.date_range(start=desired_start, end=dmax, freq="D").date
-    print(f"📅 Tarih aralığı: {desired_start} → {dmax} ({len(all_days)} gün)")
-
-    # tam grid
-    grid = pd.MultiIndex.from_product([geoids, all_days], names=[GEOID_COL, "date"]).to_frame(index=False)
-
-    # günlük olay sayısı
-    agg = (events_daily
-           .dropna(subset=["date"])
-           .groupby([GEOID_COL, "date"], as_index=False)
-           .size()
-           .rename(columns={"size": "events_count"}))
-
-    grid = grid.merge(agg, on=[GEOID_COL, "date"], how="left")
-    grid["events_count"] = pd.to_numeric(grid["events_count"], errors="coerce").fillna(0).astype("int32")
-    grid["Y_label"] = (grid["events_count"] > 0).astype("int8")
-
-    def _pick_911_base(base_dir: Path) -> Path | None:
-        cands = [
-            base_dir / "sf_911_last_5_year_y.csv",
-            base_dir / "sf_911_last_5_year.csv",
-            Path("./sf_911_last_5_year_y.csv"),
-            Path("./sf_911_last_5_year.csv"),
-        ]
-        for p in cands:
-            if p.exists() and p.is_file():
-                return p
-        return None
-    
+        log("—— fr_crime_events_daily.csv — örnek —")
+        cols = ["GEOID","date","n_911_day","n_911_last1d","n_911_last3d","n_911_last7d"]
+        log(events_daily[[c for c in cols if c in events_daily.columns]].head(8).to_string(index=False))
+    except Exception:
+        pass
     try:
-        _base_911 = _pick_911_base(BASE_DIR)
-        if _base_911 is not None:
-            df911 = pd.read_csv(_base_911, low_memory=False, dtype={"GEOID": "string"})
-            if "date" in df911.columns:
-                df911["date"] = pd.to_datetime(df911["date"], errors="coerce").dt.date
-    
-            # Grid ile tarih+GEOID üzerinden birleştir (saat aralığı yoksa günlük kullan)
-            merge_cols = [c for c in [
-                "911_request_count_hour_range",
-                "911_request_count_daily(before_24_hours)"
-            ] if c in df911.columns]
-    
-            if merge_cols and {"GEOID","date"}.issubset(grid.columns) and {"GEOID","date"}.issubset(df911.columns):
-                grid = grid.merge(
-                    df911[["GEOID","date"] + merge_cols],
-                    on=["GEOID","date"], how="left"
-                )
-                # sayısal doldurma
-                for c in merge_cols:
-                    grid[c] = pd.to_numeric(grid[c], errors="coerce").fillna(0).astype("int32")
-    
-                print("🔗 Grid, 911 özetleriyle zenginleştirildi.")
-        else:
-            print("ℹ️ 911 özeti bulunamadı (sf_911_last_5_year_y.csv / sf_911_last_5_year.csv).")
-    except Exception as e:
-        print(f"⚠️ 911 okuma/zenginleştirme atlandı: {e}")
-    
-    _safe_save_csv(grid, OUT_GRID)
-
-    # opsiyonel mirror (CRIME_DATA_DIR içine)
-    try:
-        mirror = _abs(Path(os.getenv("FR_MIRROR_DIR", "crime_prediction_data")))
-        mirror.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(_abs(OUT_EVENTS), mirror / _abs(OUT_EVENTS).name)
-        shutil.copy2(_abs(OUT_GRID),   mirror / _abs(OUT_GRID).name)
-        print(f"📦 Mirror kopya: {mirror}")
-    except Exception as e:
-        print(f"ℹ️ Mirror atlandı: {e}")
-
-    # özet
-    print("\n📊 Özet:")
-    print(f"  Events_daily: {len(events_daily):,} satır — id korunuyor: {ID_COL in events_daily.columns}")
-    print(f"  Grid: {len(grid):,} satır ({len(geoids):,} GEOID × {len(all_days):,} gün)")
-    try:
-        vc = grid["Y_label"].value_counts(normalize=True).mul(100).round(2).to_dict()
-        print(f"  Y_label dağılımı (%): {vc}")
+        log("—— fr_crime_grid_daily.csv — örnek —")
+        cols = ["GEOID","date","crime_count_day","Y_day","n_911_day","n_911_last1d","n_911_last3d","n_911_last7d"]
+        log(grid_daily[[c for c in cols if c in grid_daily.columns]].head(8).to_string(index=False))
     except Exception:
         pass
 
-    return 0
-
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as exc:
-        print(f"⚠️ Hata: {exc}")
-        raise SystemExit(1)
+    main()
