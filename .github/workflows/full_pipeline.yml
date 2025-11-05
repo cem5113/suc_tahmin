@@ -310,10 +310,25 @@ jobs:
       - name: 02.fix) Move root-level sf_crime_01.csv into CRIME_DATA_DIR if present
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
-          set -e
-          if [ -f "sf_crime_01.csv" ]; then
-            echo "↪️ Root'ta sf_crime_01.csv bulundu; CRIME_DATA_DIR altına taşınıyor."
-            mv -f "sf_crime_01.csv" "${CRIME_DATA_DIR}/sf_crime_01.csv"
+          set -euo pipefail
+      
+          # 🔍 debug
+          pwd
+          echo "CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+      
+          SRC="sf_crime_01.csv"
+          DST="${CRIME_DATA_DIR}/sf_crime_01.csv"
+      
+          if [ -f "$SRC" ]; then
+            if [ "$(realpath "$SRC")" -ef "$(realpath "$DST")" ]; then
+              echo "ℹ️ sf_crime_01.csv zaten doğru yerde (same file); taşınmadı."
+            else
+              mkdir -p "${CRIME_DATA_DIR}"
+              mv -f "$SRC" "$DST"
+              echo "✅ Taşındı: $SRC → $DST"
+            fi
+          else
+            echo "ℹ️ Root'ta sf_crime_01.csv yok; adım atlandı."
           fi
 
       - name: 02.1) Verify sf_crime_01 presence & head
