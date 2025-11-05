@@ -197,7 +197,7 @@ jobs:
             echo "ℹ️ artifact/ yok (muhtemelen workflow_dispatch ile çalıştı)."
           fi
       
-          python -u update_911_fr.py
+          python -u update_911_daily.py
       
           EVENTS_FILE="${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
           GRID_FILE="${FR_OUTPUT_DIR}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
