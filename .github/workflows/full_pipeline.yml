@@ -693,7 +693,7 @@ jobs:
               cent = _centroids_table(poly_ok)
               nb = _ensure_min_degree(nb, cent)
               if nb.empty:
-                  nb = pd.DataFrame(columns=["geoid","neighbor"])
+                  nb = pd.DataFrame(columns(["geoid","neighbor"]))
               nb["geoid"] = _norm(nb["geoid"])
               nb["neighbor"] = _norm(nb["neighbor"])
               nb = _sym(nb).drop_duplicates().sort_values(["geoid","neighbor"])
@@ -886,6 +886,104 @@ jobs:
             --output parquet_out/ \
             --compression zstd \
             --stats
+
+      # ======================= NEW: FRESHNESS GUARDS & METADATA =======================
+      - name: Assert freshness (SF timezone) before upload
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, sys, pandas as pd
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+
+          SF = ZoneInfo("America/Los_Angeles")
+          today_sf = datetime.now(SF).date()
+          MAX_LAG = int(os.getenv("FRESHNESS_SF_MAX_LAG_DAYS","1"))
+          min_ok_date = today_sf - timedelta(days=MAX_LAG)
+
+          base = os.getenv("CRIME_DATA_DIR","crime_prediction_data")
+          checks = [
+            (os.path.join(base,"sf_crime.csv"),                     ["incident_datetime","datetime","date"]),
+            (os.path.join(base,"sf_911_last_5_year.csv"),           ["incident_datetime","date","call_datetime"]),
+            (os.path.join(base,"sf_311_last_5_years.csv"),          ["date","requested_datetime","opened_date"]),
+            (os.path.join(base,"sf_weather_5years.csv"),            ["date"]),
+            (os.path.join(base,"sf_crime_grid_full_labeled.csv"),   ["date"]),
+            (os.path.join(base,"risk_hourly.csv"),                  ["date"]),
+          ]
+
+          fails=[]
+          for path, cols in checks:
+            if not os.path.exists(path):
+              print(f"ℹ️ skip (yok): {path}")
+              continue
+            try:
+              df = pd.read_csv(path, nrows=5000)
+              col = next((c for c in cols if c in df.columns), None)
+              if not col:
+                print(f"ℹ️ skip (tarih kolonu yok): {path}")
+                continue
+              mx = pd.to_datetime(df[col], errors="coerce").dt.date.max()
+              if pd.isna(mx):
+                print(f"ℹ️ skip (tarih parse edilemedi): {path}")
+                continue
+              ok = (mx >= min_ok_date)
+              print(f"{'OK ' if ok else 'BAD'}  {os.path.basename(path)}  max_date={mx}  (min_ok={min_ok_date})")
+              if not ok:
+                fails.append((path, str(mx)))
+            except Exception as e:
+              print(f"ℹ️ skip (okuma hatası): {path} → {e}")
+
+          if fails:
+            print("❌ Stale dosyalar (artifact yüklenmeyecek):")
+            for p,mx in fails:
+              print(f" - {p} (max={mx})")
+            sys.exit(86)
+          PY
+
+      - name: Sanity packlist (mtime + head)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          echo "== PACK CANDIDATES (mtime) =="
+          while IFS= read -r p; do
+            [ -f "$p" ] && printf "%-48s  %s\n" "$(basename "$p")" "$(stat -c %y "$p" 2>/dev/null || stat -f %Sm "$p")"
+          done <<EOF
+          ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_weather_5years.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
+          ${{ env.CRIME_DATA_DIR }}/risk_hourly.csv
+          EOF
+
+          echo "== quick heads =="
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_crime.csv" || true
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv" || true
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv" || true
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv" || true
+
+      - name: Write build info
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "run_number=${GITHUB_RUN_NUMBER}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "commit=${GITHUB_SHA}"
+            echo "branch=${GITHUB_REF_NAME}"
+            echo "built_at_utc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          } > "${CRIME_DATA_DIR}/_build_info.txt"
+          cat "${CRIME_DATA_DIR}/_build_info.txt"
+
+      - name: Clobber duplicates outside CRIME_DATA_DIR (optional)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          find . -type f -name 'sf_911_last_5_year*.csv' ! -path "./${{ env.CRIME_DATA_DIR }}/*" -delete || true
+          find . -type f -name 'sf_311_last_5_years*.csv' ! -path "./${{ env.CRIME_DATA_DIR }}/*" -delete || true
+      # ======================= /NEW =======================
 
       # Parquet'leri ayrı artifact olarak yükle
       - name: Upload Parquet artifact (opsiyonel)
