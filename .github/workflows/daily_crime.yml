@@ -153,91 +153,61 @@ jobs:
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
       # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
-      - name: (1) 911 → enrich GRID & EVENTS (local search only)
+      - name: (1) 911 → enrich GRID & EVENTS (local search)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
           FR_EVENTS_DAILY_IN:  "${{ env.FR_EVENTS_DAILY_IN }}"
           FR_EVENTS_DAILY_OUT: "${{ env.FR_EVENTS_DAILY_OUT }}"
-          FR_911_DATE_COL:  "${{ env.FR_911_DATE_COL }}"
-          FR_911_GEOID_COL: "${{ env.FR_911_GEOID_COL }}"
-          FR_911_WINSOR_Q:  "${{ env.FR_911_WINSOR_Q }}"
-          FR_CAT_TOPK:      "${{ env.FR_CAT_TOPK }}"
-          FR_911_EMA_ALPHAS: "${{ env.FR_911_EMA_ALPHAS }}"
+          FR_311_DATE_COL:  "${{ env.FR_911_DATE_COL }}"
+          FR_311_GEOID_COL: "${{ env.FR_911_GEOID_COL }}"
+          FR_311_WINSOR_Q:  "${{ env.FR_911_WINSOR_Q }}"
+          FR_311_EMA_ALPHAS: "${{ env.FR_911_EMA_ALPHAS }}"
         run: |
           set -euo pipefail
 
-          # normalize output yollar
-          GRID="${FR_GRID_DAILY_OUT}";   [[ "$GRID"  != /* ]] && GRID="${CRIME_DATA_DIR}/${GRID}"
-          EVTS="${FR_EVENTS_DAILY_OUT}"; [[ "$EVTS"  != /* ]] && EVTS="${CRIME_DATA_DIR}/${EVTS}"
-
+          GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
+          EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
             echo "⚠️ daily grid/events yok → 911 enrich atlanıyor."
             exit 0
           fi
 
-          echo "🔎 911 dosyası yerelde aranıyor (artifact dahil)..."
-          # Aday desenler
-          PATTERN='(sf_911_last_5_year(s)?(_y)?\.(csv|csv\.gz|parquet))$'
-          # Tüm adayları topla
-          mapfile -t FOUND < <(find "${CRIME_DATA_DIR}" -maxdepth 8 -type f \
-            | grep -E "${PATTERN}" || true)
-
-          if [ "${#FOUND[@]}" -eq 0 ]; then
-            echo "ℹ️ 911 verisi bulunamadı → adım atlanıyor."
+          CANDIDATES=( \
+            "${CRIME_DATA_DIR}/sf_911_last_5_year.csv" \
+            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year.csv" \
+            "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year.csv" \
+          )
+          PICK=""
+          for p in "${CANDIDATES[@]}"; do
+            [ -f "$p" ] && { PICK="$p"; break; }
+          done
+          if [ -z "$PICK" ]; then
+            echo "ℹ️ 311 günlük bulunamadı → adım atlanıyor."
             exit 0
           fi
+          echo "✅ 911 kaynağı: $PICK"
+          export FR_911_DAILY_IN="$PICK"
 
-          # Önce *_y.* olanlar arasından mtime'a göre en yeniyi seç; yoksa tümünden en yeniyi al
-          pick_latest_by_mtime () {
-            local -a arr=("$@")
-            if [ "${#arr[@]}" -eq 0 ]; then echo ""; return 0; fi
-            stat --format '%Y %n' "${arr[@]}" | sort -nr | head -n1 | cut -d' ' -f2-
-          }
-
-          mapfile -t ONLY_Y < <(printf '%s\n' "${FOUND[@]}" | grep -E 'sf_911_last_5_year(s)?_y\.(csv|csv\.gz|parquet)$' || true)
-          if [ "${#ONLY_Y[@]}" -gt 0 ]; then
-            PICK="$(pick_latest_by_mtime "${ONLY_Y[@]}")"
+          if [ -f "./update_911_daily.py" ]; then
+            PYFILE="./update_911_daily.py"
+          elif [ -f "./scripts/update_911_daily.py" ]; then
+            PYFILE="./scripts/update_911_daily.py"
           else
-            PICK="$(pick_latest_by_mtime "${FOUND[@]}")"
+            echo "❌ 911 script'i bulunamadı."; exit 67
           fi
-
-          if [ -z "${PICK:-}" ]; then
-            echo "ℹ️ 911 verisi seçilemedi → adım atlanıyor."
-            exit 0
-          fi
-
-          echo "✅ 911 kaynağı (mtime-latest): $PICK"
-          export FR_911_PATH="$PICK"
-
-          # Tazelik kontrolü (opsiyonel, log için)
-          python - <<'PY'
-          import os, pandas as pd, sys
-          p = os.environ.get("FR_911_PATH","")
-          if not p or not os.path.exists(p):
-              sys.exit(0)
-          suf = p.lower()
-          if suf.endswith(".parquet"):
-              df = pd.read_parquet(p)
-          else:
-              df = pd.read_csv(p, low_memory=False)
-          ts_cols = ["received_time","received_datetime","date","datetime","timestamp","call_received_datetime"]
-          use = next((c for c in ts_cols if c in df.columns), None)
-          if use:
-              dmax = pd.to_datetime(df[use], errors="coerce").dt.date.max()
-              print(f"📆 911 max tarih: {dmax}")
-          else:
-              print("ℹ️ 911 veri setinde tarih kolonu bulunamadı (tazelik kontrolü atlandı).")
-          PY
-
-          # Script path resolve
-          if   [ -f "./update_911_daily.py" ];         then PYFILE="./update_911_daily.py"
-          elif [ -f "./scripts/update_911_daily.py" ]; then PYFILE="./scripts/update_911_daily.py"
-          else echo "❌ update_911_daily.py yok."; exit 66; fi
 
           python -u "$PYFILE"
 
-          head -n 5 "$GRID" || true
+          python - <<'PY'
+          import os, pandas as pd
+          p=os.path.join(os.getenv("CRIME_DATA_DIR"), os.getenv("FR_GRID_DAILY_OUT","crime_prediction_data/fr_crime_grid_daily.csv"))
+          if os.path.exists(p):
+              df=pd.read_csv(p, nrows=0)
+              print("GRID columns:", list(df.columns))
+          else:
+              print("⚠️ GRID yok, kolon listesi alınamadı.")
+          PY
 
       # ---------------------- 311 ENRICH (yerel arama) ----------------------
       - name: (2) 311 → enrich GRID & EVENTS (local search)
