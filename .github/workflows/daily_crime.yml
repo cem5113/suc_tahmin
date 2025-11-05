@@ -155,81 +155,54 @@ jobs:
       # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
       - name: (1) 911 → enrich GRID & EVENTS
         env:
-          ARTIFACT_ZIP:  ${{ env.ARTIFACT_ZIP }}
-          ARTIFACT_DIR:  ${{ env.ARTIFACT_DIR }}
-          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
+          # Gerekli ENV
+          FR_OUTPUT_DIR:       ${{ env.FR_OUTPUT_DIR }}
           FR_EVENTS_DAILY_OUT: ${{ env.FR_EVENTS_DAILY_OUT }}
           FR_GRID_DAILY_OUT:   ${{ env.FR_GRID_DAILY_OUT }}
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}   # -u için garanti
+          CRIME_DATA_DIR:      ${{ env.CRIME_DATA_DIR }}
+          # (Opsiyonel) Dışarıdan elle FR_911 vermek istersen job/env'de tanımlayabilirsin
+          FR_911:              ${{ env.FR_911 }}
         run: |
           set -euo pipefail
 
-          echo "== check & set FR_911 =="
+          echo "== 911 kaynağı seçimi =="
           CANDIDATES=(
-            "${ARTIFACT_DIR}/sf_911_last_5_year_y.csv"
-            "${ARTIFACT_DIR}/sf_911_last_5_year.csv"
-            "${ARTIFACT_DIR}/sf_911_last_5_year_y"          # uzantısız
-            "${ARTIFACT_DIR}/sf_911_last_5_year"            # uzantısız
-            "${ARTIFACT_DIR}/sf-crime-pipeline-output/sf_911_last_5_year_y.csv"
-            "${ARTIFACT_DIR}/sf-crime-pipeline-output/sf_911_last_5_year.csv"
-            "${ARTIFACT_DIR}/sf-crime-pipeline-output/sf_911_last_5_year_y"
-            "${ARTIFACT_DIR}/sf-crime-pipeline-output/sf_911_last_5_year"
-
-            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
+            "${FR_911:-}"
             "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
-            "${CRIME_DATA_DIR}/sf_911_last_5_year_y"
-            "${CRIME_DATA_DIR}/sf_911_last_5_year"
-            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year_y.csv"
-            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year.csv"
-            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year_y"
-            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year"
-
-            # ihtiyaten "years" varyantı
-            "${ARTIFACT_DIR}/sf_911_last_5_years.csv"
-            "${ARTIFACT_DIR}/sf_911_last_5_years"
-            "${CRIME_DATA_DIR}/sf_911_last_5_years.csv"
-            "${CRIME_DATA_DIR}/sf_911_last_5_years"
             "sf_911_last_5_year.csv"
-            "sf_911_last_5_year"
-            "sf_911_last_5_years.csv"
-            "sf_911_last_5_years"
           )
+
           PICK=""
           for p in "${CANDIDATES[@]}"; do
-            if [ -f "$p" ]; then PICK="$p"; break; fi
+            if [ -n "${p}" ] && [ -f "${p}" ]; then
+              PICK="${p}"
+              break
+            fi
           done
-          if [ -n "$PICK" ]; then
-            echo "✅ 911 source: $PICK"
-            export FR_911="$PICK"      # <<< ÖNEMLİ: FR_911_PATH değil, FR_911
-          else
-            echo "ℹ️ 911 kaynağı bulunamadı; bu adım nazikçe atlanacak (Python guard var)."
-            # exit 0  # sert atlamak istersen aç
-          fi
 
-          echo "== find 911 CSVs (if artifact exists) =="
-          if [ -d "artifact" ]; then
-            # csv uzantılı
-            find artifact -maxdepth 6 -type f -name 'sf_911_last_5_year*.csv' -ls || true
-            # uzantısız (name pattern)
-            find artifact -maxdepth 6 -type f -name 'sf_911_last_5_year*' ! -name '*.csv' -ls || true
+          if [ -n "${PICK}" ]; then
+            export FR_911="${PICK}"
+            echo "✅ 911 source: ${FR_911}"
           else
-            echo "ℹ️ artifact/ yok (muhtemelen workflow_dispatch ile çalıştı)."
+            echo "❌ 911 kaynağı bulunamadı (sf_911_last_5_year.csv)."
+            echo "   İstersen FR_911=/path/to/sf_911_last_5_year.csv olarak env ver."
+            # Burada continue/exit tercihine göre davran:
+            # exit 1
           fi
 
           python -u update_911_daily.py
 
-          EVENTS_FILE="${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
-          GRID_FILE="${FR_OUTPUT_DIR}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
+          EVENTS_FILE="${FR_OUTPUT_DIR%/}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
+          GRID_FILE="${FR_OUTPUT_DIR%/}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
 
-          for f in "$EVENTS_FILE" "$GRID_FILE"; do
-            if [ -f "$f" ]; then
-              echo ""; echo "📄 $(basename "$f") — $(wc -l < "$f") satır"
-              head -n 5 "$f" || true
+          for f in "${EVENTS_FILE}" "${GRID_FILE}"; do
+            if [ -f "${f}" ]; then
+              echo ""; echo "📄 $(basename "${f}") — $(wc -l < "${f}") satır"
+              head -n 5 "${f}" || true
               echo "🧭 columns:"
-              F="$f" python - <<'PY'
+              F="${f}" python - <<'PY'
               import os, pandas as pd
-              f = os.environ['F']
+              f = os.environ.get("F", "")
               try:
                   df = pd.read_csv(f, nrows=0)
                   print(",".join(df.columns))
@@ -237,9 +210,10 @@ jobs:
                   print(f"kolon okuma hatası: {e}")
               PY
             else
-              echo "⚠️ Dosya yok: $f"
+              echo "⚠️ Dosya yok: ${f}"
             fi
           done
+
           
       # ---------------------- 311 ENRICH (yerel arama) ----------------------
       - name: (2) 311 → enrich GRID & EVENTS (local search)
