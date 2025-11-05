@@ -270,7 +270,7 @@ jobs:
                  -n "${ARTIFACT_NAME}" -D "_prev/$RID" >/dev/null 2>&1; then
               F=$(find "_prev/$RID" -type f -iname "${TARGET_FILE}" | head -n1 || true)
               if [ -n "${F:-}" ]; then
-                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"]
+                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"
                 echo "✅ Bulundu ve kopyalandı: $F → ${OUT_DIR}/${TARGET_FILE}"
                 FOUND="yes"
                 break
@@ -296,6 +296,7 @@ jobs:
           SF911_API_TOKEN: ${{ env.SF911_API_TOKEN }}
           SOCS_APP_TOKEN: ${{ env.SOCS_APP_TOKEN }}
           BACKFILL_DAYS: ${{ env.BACKFILL_DAYS }}
+          DAILY_OUT: ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
         run: |
           set -e
           python -u update_911.py
@@ -306,6 +307,17 @@ jobs:
         with:
           path: ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
           key: 311-${{ runner.os }}-${{ github.run_number }}
+
+      - name: 02.1) Verify sf_crime_01 presence & head
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          D="${CRIME_DATA_DIR}"
+          F1="${D}/sf_crime_01.csv"
+          echo "→ Beklenen dosya: $F1"
+          [ -f "$F1" ] || { echo "❌ sf_crime_01.csv yok! update_911.py loglarını kontrol et (DAILY_OUT doğru mu?)."; exit 2; }
+          echo "---- sf_crime_01.csv (head) ----"
+          head -n 5 "$F1" || true
 
       # ✅ YENİ: 311 cache sonrası tazelik kontrolü (hard gate)
       - name: Freshness check after 311 cache restore (hard gate)
@@ -378,7 +390,7 @@ jobs:
                  -n "${ARTIFACT_NAME}" -D "_prev/$RID" >/dev/null 2>&1; then
               F=$(find "_prev/$RID" -type f -iname "${TARGET_FILE}" | head -n1 || true)
               if [ -n "${F:-}" ]; then
-                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"]
+                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"
                 echo "✅ Bulundu ve kopyalandı: $F → ${OUT_DIR}/${TARGET_FILE}"
                 FOUND="yes"
                 break
@@ -401,6 +413,8 @@ jobs:
           SF_SODA_MAX_PAGES: ${{ env.SF_SODA_MAX_PAGES }}
           SOCS_APP_TOKEN: ${{ env.SOCS_APP_TOKEN }}
           BACKFILL_DAYS: ${{ env.BACKFILL_DAYS }}
+          DAILY_IN:  ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
+          DAILY_OUT: ${{ env.CRIME_DATA_DIR }}/sf_crime_02.csv
         run: |
           set -e
           if [ -f update_311.py ]; then
@@ -440,6 +454,26 @@ jobs:
           fi
           echo "---- sf_population.csv (head) ----"
           head -n 5 "$DEST" || true
+
+      - name: 03.1) Verify sf_crime_01/02 presence & heads
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          D="${CRIME_DATA_DIR}"
+          F1="${D}/sf_crime_01.csv"
+          F2="${D}/sf_crime_02.csv"
+
+          echo "→ Beklenen dosyalar:"
+          echo "  - $F1"
+          echo "  - $F2"
+
+          [ -f "$F1" ] || { echo "❌ sf_crime_01.csv yok! update_911.py çıktısını kontrol et."; exit 2; }
+          [ -f "$F2" ] || { echo "❌ sf_crime_02.csv yok! update_311.py DAILY_IN/DAILY_OUT ve loglarını kontrol et."; exit 3; }
+
+          echo "---- sf_crime_01.csv (head) ----"
+          head -n 5 "$F1" || true
+          echo "---- sf_crime_02.csv (head) ----"
+          head -n 5 "$F2" || true
 
       - name: (Opsiyonel) sf_population.csv başlık normalize
         if: ${{ steps.gate.outputs.proceed == 'true' }}
