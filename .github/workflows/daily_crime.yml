@@ -164,7 +164,7 @@ jobs:
           FR_GRID_DAILY_OUT:   ${{ env.FR_GRID_DAILY_OUT }}
         run: |
           set -euo pipefail
-          python -u update_911_fr.py
+          python -u update_911_daily.py
 
           EVENTS_FILE="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
           GRID_FILE="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
