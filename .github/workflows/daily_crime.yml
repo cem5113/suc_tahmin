@@ -440,29 +440,31 @@ jobs:
     needs: [run_fr]
     if: ${{ needs.run_fr.result == 'success' }}
     runs-on: ubuntu-latest
+  
     env:
       CRIME_DATA_DIR: ${{ github.workspace }}
       GRID_FILE: crime_prediction_data/fr_crime_grid_daily.csv
-      PATROL_TOP_K:   "25"
+      EVENTS_FILE: crime_prediction_data/fr_crime_events_daily.csv
+      PATROL_TOP_K: "25"
       PATROL_MIN_SPACING_M: "300"
       PATROL_OUT_CSV: "fr_patrol_plan.csv"
-
+  
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
+  
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
-
+  
       - name: Download daily grid/events from previous job
         uses: actions/download-artifact@v4
         with:
           name: fr-daily-grid-events
           path: ${{ env.CRIME_DATA_DIR }}
-
+  
       - name: Verify transferred files
         run: |
           set -euo pipefail
@@ -471,62 +473,18 @@ jobs:
           ls -la "${CRIME_DATA_DIR}/crime_prediction_data" || true
           head -n 3 "${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_grid_daily.csv" || true
           head -n 3 "${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_events_daily.csv" || true
-
+  
       - name: Install runtime Python deps
         run: |
           set -euo pipefail
           python -m pip install -U pip
           pip install pandas numpy
-
-          patrol-fr:
-            needs: [run_fr]
-            if: ${{ needs.run_fr.result == 'success' }}
-            runs-on: ubuntu-latest
-            env:
-              CRIME_DATA_DIR: ${{ github.workspace }}
-              GRID_FILE:   crime_prediction_data/fr_crime_grid_daily.csv
-              EVENTS_FILE: crime_prediction_data/fr_crime_events_daily.csv
-              PATROL_TOP_K:   "25"
-              PATROL_MIN_SPACING_M: "300"
-              PATROL_OUT_CSV: "fr_patrol_plan.csv"
-
-              steps:
-                - name: Checkout repository
-                  uses: actions/checkout@v4
-            
-                - name: Set up Python
-                  uses: actions/setup-python@v5
-                  with:
-                    python-version: "3.11"
-                    cache: "pip"
-            
-                - name: Download daily grid/events from previous job
-                  uses: actions/download-artifact@v4
-                  with:
-                    name: fr-daily-grid-events
-                    path: ${{ env.CRIME_DATA_DIR }}
-            
-                - name: Verify transferred files
-                  run: |
-                    set -euo pipefail
-                    echo "📦 CRIME_DATA_DIR=${CRIME_DATA_DIR}"
-                    ls -la "${CRIME_DATA_DIR}" || true
-                    ls -la "${CRIME_DATA_DIR}/crime_prediction_data" || true
-                    head -n 3 "${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_grid_daily.csv" || true
-                    head -n 3 "${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_events_daily.csv" || true
-            
-                - name: Install runtime Python deps
-                  run: |
-                    set -euo pipefail
-                    python -m pip install -U pip
-                    pip install pandas numpy
-
+  
       - name: Run patrol planner (auto-locate grid; events fallback)
         env:
-          # mevcuttaki env'lerin kalsın
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GRID_FILE:      ${{ env.GRID_FILE }}                 # ör: crime_prediction_data/fr_crime_grid_daily.csv
-          EVENTS_FILE:    crime_prediction_data/fr_crime_events_daily.csv
+          GRID_FILE:      ${{ env.GRID_FILE }}
+          EVENTS_FILE:    ${{ env.EVENTS_FILE }}
           PATROL_TOP_K:   ${{ env.PATROL_TOP_K }}
           PATROL_OUT_CSV: ${{ env.PATROL_OUT_CSV }}
         run: |
@@ -535,42 +493,31 @@ jobs:
           import os, sys
           from pathlib import Path
           import pandas as pd
-          
+  
           base        = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
           grid_hint   = os.environ.get("GRID_FILE","fr_crime_grid_daily.csv")
           events_hint = os.environ.get("EVENTS_FILE","fr_crime_events_daily.csv")
           k           = int(os.environ.get("PATROL_TOP_K","25"))
           out_csv     = base / os.environ.get("PATROL_OUT_CSV","fr_patrol_plan.csv")
-          
+  
           def log(*a): print(*a, flush=True)
-          
+  
           def locate(path_hint: str, fname: str):
-              """Önce hint'e bak, yoksa CRIME_DATA_DIR altında rglob ile bul."""
               p = base / path_hint
               if p.exists():
                   return p
-              # rglob ile arama
               matches = list(base.rglob(fname))
               if matches:
-                  # uzun nested yollarda birden fazla olabilir; en uzunu (en derine yazılmış olana) al
                   matches.sort(key=lambda x: len(str(x)))
-                  found = matches[-1]
-                  log(f"🔎 bulundu: {found}")
-                  return found
+                  return matches[-1]
               return None
-          
-          # 1) GRID'i bul
-          grid_fp = locate(grid_hint, "fr_crime_grid_daily.csv")
-          
-          # 2) EVENTS fallback
+  
+          grid_fp   = locate(grid_hint,   "fr_crime_grid_daily.csv")
           events_fp = locate(events_hint, "fr_crime_events_daily.csv")
-          
-          # 3) Veri kaynağını seç
-          df = None
-          src = None
+  
+          df, src = None, None
           if grid_fp and grid_fp.exists():
-              df = pd.read_csv(grid_fp)
-              src = f"grid:{grid_fp}"
+              df, src = pd.read_csv(grid_fp), f"grid:{grid_fp}"
               log(f"📖 GRID okundu: {grid_fp} ({len(df):,} satır)")
           elif events_fp and events_fp.exists():
               ev = pd.read_csv(events_fp)
@@ -585,49 +532,42 @@ jobs:
                       print(f"❌ EVENTS zorunlu kolon yok: {c}", file=sys.stderr); sys.exit(3)
               ev["date"] = pd.to_datetime(ev["date"], errors="coerce").dt.date
               ev = ev.dropna(subset=["GEOID","date"])
-              # aynı gün/aynı GEOID için olay sayısı
               agg = ev.groupby(["GEOID","date"], as_index=False).size().rename(columns={"size":"events_count"})
-              # varsa 911 özetlerini bindir (max ile)
               for c in ["n_911_day","n_911_last1d","n_911_last3d","n_911_last7d"]:
                   if c in ev.columns:
                       tmp = ev.groupby(["GEOID","date"], as_index=False)[c].max()
                       agg = agg.merge(tmp, on=["GEOID","date"], how="left")
-              # Y_label
               agg["Y_label"] = (agg["events_count"] > 0).astype("int8")
-              df = agg
-              src = f"events→grid:{events_fp}"
+              df, src = agg, f"events→grid:{events_fp}"
               log(f"🧮 EVENTS'ten grid türetildi: {len(df):,} satır")
           else:
               print(f"❌ GRID & EVENTS bulunamadı.\n- Aranan GRID: {base / grid_hint}\n- Aranan EVENTS: {base / events_hint}", file=sys.stderr)
               sys.exit(2)
-          
+  
           if df.empty:
               log("⚠️ Veri boş, plan üretilemedi.")
               out_csv.parent.mkdir(parents=True, exist_ok=True)
               pd.DataFrame(columns=["GEOID","date","risk_score","Y_label","events_count"]).to_csv(out_csv, index=False)
               sys.exit(0)
-          
-          # Tarih ve son gün
+  
           df["date"] = pd.to_datetime(df["date"], errors="coerce")
           last_day = df["date"].dropna().max()
           if pd.isna(last_day):
               print("❌ Tarih alanı hatalı.", file=sys.stderr); sys.exit(4)
           today = df[df["date"]==last_day].copy()
-          
-          # Güvenli sayı okuyucu
+  
           def safe_num(df, colnames, default=0.0):
               for name in colnames:
                   if name in df.columns:
                       return pd.to_numeric(df[name], errors="coerce").fillna(0)
               return pd.Series(default, index=df.index)
-          
-          # Kolon eşleştirmeleri
+  
           events_series = safe_num(today, ["events_count","crime_count_day"], 0.0)
           nbor_24  = safe_num(today, ["neighbor_crime_24h","neighbor_crime_1d"], 0.0)
           nbor_72  = safe_num(today, ["neighbor_crime_72h","neighbor_crime_3d"], 0.0)
           nbor_7d  = safe_num(today, ["neighbor_crime_7d"], 0.0)
           n911_1d  = safe_num(today, ["n911_prev_1d","n_911_last1d"], 0.0)
-          
+  
           today["risk_score"] = (
               events_series*1.0 +
               nbor_24*0.20 +
@@ -635,8 +575,7 @@ jobs:
               nbor_7d*0.05 +
               n911_1d*0.10
           )
-          
-          # Top-K
+  
           agg_cols = {"risk_score":"max"}
           if "events_count" in today.columns:
               agg_cols["events_count"] = "max"
@@ -644,13 +583,14 @@ jobs:
               agg_cols["crime_count_day"] = "max"
           if "Y_label" in today.columns:
               agg_cols["Y_label"] = "max"
-          
-          topk = (today.sort_values("risk_score", ascending=False)
-                       .groupby("GEOID", as_index=False)
-                       .agg(agg_cols)
-                       .sort_values("risk_score", ascending=False)
-                       .head(k))
-          
+  
+          topk = (
+            today.sort_values("risk_score", ascending=False)
+                 .groupby("GEOID", as_index=False)
+                 .agg(agg_cols)
+                 .sort_values("risk_score", ascending=False)
+                 .head(k)
+          )
           topk.insert(1, "date", last_day.date())
           out_csv.parent.mkdir(parents=True, exist_ok=True)
           topk.to_csv(out_csv, index=False)
