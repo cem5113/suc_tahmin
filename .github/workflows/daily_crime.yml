@@ -153,37 +153,34 @@ jobs:
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
       # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
-      - name: (1) 911 → enrich GRID & EVENTS 
+      - name: 01) 911 (events + grid)
         env:
           ARTIFACT_ZIP:  ${{ env.ARTIFACT_ZIP }}
           ARTIFACT_DIR:  ${{ env.ARTIFACT_DIR }}
           FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
-          FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-          # Aşağıdakiler tanımlı değilse script varsayılanlarını kullanır:
           FR_EVENTS_DAILY_OUT: ${{ env.FR_EVENTS_DAILY_OUT }}
           FR_GRID_DAILY_OUT:   ${{ env.FR_GRID_DAILY_OUT }}
         run: |
           set -euo pipefail
-          python -u update_911_daily.py
-
+          python -u update_911_fr.py
+      
           EVENTS_FILE="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
           GRID_FILE="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
-
+      
           for f in "$EVENTS_FILE" "$GRID_FILE"; do
             if [ -f "$f" ]; then
-              echo ""
-              echo "📄 $(basename "$f") — $(wc -l < "$f") satır"
+              echo ""; echo "📄 $(basename "$f") — $(wc -l < "$f") satır"
               head -n 5 "$f" || true
               echo "🧭 columns:"
               F="$f" python - <<'PY'
-          import os, pandas as pd
-          f = os.environ['F']
-          try:
-              df = pd.read_csv(f, nrows=0)
-              print(",".join(df.columns))
-          except Exception as e:
-              print(f"kolon okuma hatası: {e}")
-          PY
+      import os, pandas as pd
+      f = os.environ['F']
+      try:
+          df = pd.read_csv(f, nrows=0)
+          print(",".join(df.columns))
+      except Exception as e:
+          print(f"kolon okuma hatası: {e}")
+      PY
             else
               echo "⚠️ Dosya yok: $f"
             fi
