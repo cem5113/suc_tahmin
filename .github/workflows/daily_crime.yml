@@ -153,14 +153,31 @@ jobs:
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
       # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
-      # (0) 911 artifact'ını indir
-      - name: Download 911 artifact (sf-crime-pipeline-output)
-        uses: actions/download-artifact@v4
+      # (0) Triggered by workflow_run ise tetikleyen koşudan indir
+      - name: Download 911 artifact (from triggering run)
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: dawidd6/action-download-artifact@v2
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_id: ${{ github.event.workflow_run.id }}
           name: sf-crime-pipeline-output
-          path: artifact   # -> artifact/sf_911_last_5_year*.csv burada olacak
+          path: artifact
+          repo: ${{ github.repository }}
+          if_no_artifact_found: warn
       
-      # (1) 911 → enrich GRID & EVENTS
+      # (0b) Manuel çalıştırmada (dispatch), son başarılı koşudan indir (fallback)
+      - name: Download 911 artifact (latest successful full_pipeline)
+        if: ${{ github.event_name != 'workflow_run' }}
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: full_pipeline.yml      # "Full SF Crime Pipeline" dosya adı
+          branch: main
+          name: sf-crime-pipeline-output
+          path: artifact
+          repo: ${{ github.repository }}
+          if_no_artifact_found: warn
+
       - name: (1) 911 → enrich GRID & EVENTS
         env:
           CRIME_DATA_DIR:      ${{ env.CRIME_DATA_DIR }}
@@ -175,47 +192,39 @@ jobs:
             "${GITHUB_WORKSPACE}/artifact/sf_911_last_5_year.csv"
             "${GITHUB_WORKSPACE}/artifact/sf_911_last_5_year_y.csv"
             "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
-            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
             "sf_911_last_5_year.csv"
           )
-      
           PICK=""
           for p in "${CANDIDATES[@]}"; do
             if [ -f "$p" ]; then PICK="$p"; break; fi
           done
-      
-          if [ -n "$PICK" ]; then
-            export FR_911="$PICK"
-            echo "✅ 911 source: $FR_911"
-          else
-            echo "❌ 911 kaynağı bulunamadı (sf_911_last_5_year*.csv)."
-            ls -l "${GITHUB_WORKSPACE}/artifact" || true
-            exit 1
+          if [ -z "$PICK" ]; then
+            echo "❌ 911 CSV bulunamadı."; ls -la artifact || true; exit 1
           fi
+          export FR_911="$PICK"
+          echo "✅ 911 source: $FR_911"
       
           python -u update_911_daily.py
       
           EVENTS_FILE="${FR_OUTPUT_DIR%/}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
           GRID_FILE="${FR_OUTPUT_DIR%/}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
-      
-          for f in "${EVENTS_FILE}" "${GRID_FILE}"; do
-            if [ -f "${f}" ]; then
-              echo ""; echo "📄 $(basename "${f}") — $(wc -l < "${f}") satır"
-              head -n 5 "${f}" || true
-              echo "🧭 columns:"
-              F="${f}" python - <<'PY'
-              import os, pandas as pd
-              f = os.environ.get("F","")
-              try:
-                  df = pd.read_csv(f, nrows=0)
-                  print(",".join(df.columns))
-              except Exception as e:
-                  print(f"kolon okuma hatası: {e}")
-              PY
+          for f in "$EVENTS_FILE" "$GRID_FILE"; do
+            if [ -f "$f" ]; then
+              echo ""; echo "📄 $(basename "$f") — $(wc -l < "$f") satır"
+              head -n 5 "$f" || true
+              echo "🧭 columns:"; F="$f" python - <<'PY'
+      import os, pandas as pd
+      f=os.environ['F']
+      try:
+          print(",".join(pd.read_csv(f, nrows=0).columns))
+      except Exception as e:
+          print(f"kolon okuma hatası: {e}")
+      PY
             else
-              echo "⚠️ Dosya yok: ${f}"
+              echo "⚠️ Dosya yok: $f"
             fi
           done
+
           
       # ---------------------- 311 ENRICH (yerel arama) ----------------------
       - name: (2) 311 → enrich GRID & EVENTS (local search)
