@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CRIME_DATA_DIR: crime_prediction_data
+  CRIME_DATA_DIR: ${{ github.workspace }}/crime_prediction_data
   GEOID_LEN: "11"
 
   BACKFILL_DAYS: "0"   # ← Mevcut satır KALDI; override aşağıda yapılıyor
