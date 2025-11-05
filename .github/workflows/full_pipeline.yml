@@ -300,13 +300,15 @@ jobs:
         run: |
           set -e
           python -u update_911.py
-
-      - name: Restore 311 summary cache
+          
+      - name: 02.fix) Move root-level sf_crime_01.csv into CRIME_DATA_DIR if present
         if: ${{ steps.gate.outputs.proceed == 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
-          key: 311-${{ runner.os }}-${{ github.run_number }}
+        run: |
+          set -e
+          if [ -f "sf_crime_01.csv" ]; then
+            echo "↪️ Root'ta sf_crime_01.csv bulundu; CRIME_DATA_DIR altına taşınıyor."
+            mv -f "sf_crime_01.csv" "${CRIME_DATA_DIR}/sf_crime_01.csv"
+          fi
 
       - name: 02.1) Verify sf_crime_01 presence & head
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -318,6 +320,13 @@ jobs:
           [ -f "$F1" ] || { echo "❌ sf_crime_01.csv yok! update_911.py loglarını kontrol et (DAILY_OUT doğru mu?)."; exit 2; }
           echo "---- sf_crime_01.csv (head) ----"
           head -n 5 "$F1" || true
+          
+      - name: Restore 311 summary cache
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
+          key: 311-${{ runner.os }}-${{ github.run_number }}
 
       # ✅ YENİ: 311 cache sonrası tazelik kontrolü (hard gate)
       - name: Freshness check after 311 cache restore (hard gate)
