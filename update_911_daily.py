@@ -29,7 +29,14 @@ def safe_save_csv(df: pd.DataFrame, path: str):
             pass
         log(f"❌ Kaydetme hatası: {path} — Yedek: {b}\n{e}")
 
-def to_date(s): return pd.to_datetime(s, errors="coerce").dt.date
+def to_date(s):
+    return pd.to_datetime(
+        s,
+        errors="coerce",
+        utc=False,
+        infer_datetime_format=True
+    ).dt.date
+
 def normalize_geoid(s: pd.Series, n: int = 11) -> pd.Series:
     s = s.astype("string")
     # rakamları çek → ilk n hane → soluna 0 doldur
