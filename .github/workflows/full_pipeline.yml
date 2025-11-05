@@ -350,7 +350,7 @@ jobs:
           restore-keys: |
             311-${{ runner.os }}-
 
-      # ✅ YENİ: 311 cache sonrası tazelik kontrolü (hard gate)
+      # ✅ 311 cache sonrası tazelik kontrolü (STALE ise sil, script yeniden üretsin)
       - name: Freshness check after 311 cache restore (soft fix)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
@@ -384,7 +384,7 @@ jobs:
           print(f"✅ 311 cache OK: max={mx}")
           PY
 
-      # ✅ 311 için artifact prefetch (ham _y VEYA 3h özet)
+      # ✅ 311 için artifact prefetch (ham _y VEYA 3h özet). Bulursa CRIME_DATA_DIR altına koyar.
       - name: Prefetch 311 files from previous successful run (artifact)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
@@ -394,20 +394,19 @@ jobs:
           OUT_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
-      
+
           mkdir -p "${OUT_DIR}"
-          # Aranacak dosyalar: önce ham (_y), sonra 3h özet (csv)
           TARGETS=("sf_311_last_5_years_y.csv" "sf_311_last_5_years.csv")
-      
+
           sudo apt-get update -y >/dev/null
-          sudo apt-get install -y unzip >/dev/null
-      
+          sudo apt-get install -y unzip >/dev/null || true
+
           if ! command -v gh >/dev/null; then
             type -p curl >/dev/null && sudo curl -sSL https://raw.githubusercontent.com/cli/cli/trunk/script/install.sh | sh
           fi
           gh --version || true
           gh auth status || true
-      
+
           mkdir -p _prev
           for T in "${TARGETS[@]}"; do
             # Hedef yoksa artefact'lardan dene
@@ -415,7 +414,7 @@ jobs:
               echo "ℹ️ ${OUT_DIR}/${T} zaten var, indirme atlandı."
               continue
             fi
-      
+
             FOUND=""
             for RID in $(gh run list -R "${GITHUB_REPOSITORY}" \
                           --workflow "${WORKFLOW_NAME}" --status success \
@@ -435,21 +434,24 @@ jobs:
                 echo "  ↪️ Artifact indirilemedi veya yok (#$RID)."
               fi
             done
-      
+
             if [ -z "${FOUND}" ]; then
               echo "ℹ️ ${T} önceki artifact’larda bulunamadı; gerekirse update_311.py repo main / API’ye döner."
             fi
           done
 
-      # 311: aynı şekilde bulk çekim
+      # ✅ Tek adımda: artefact → repo → API fallback + incremental + merge
       - name: 03) 311 → sf_crime_02.csv (bulk 50k)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
+          BACKFILL_DAYS: ${{ env.BACKFILL_DAYS }}
+          ARTIFACT_DIR: artifact
+          SOCS_APP_TOKEN: ${{ env.SOCS_APP_TOKEN }}
           SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
           SF_SODA_PAGE_LIMIT: ${{ env.SF_SODA_PAGE_LIMIT }}
           SF_SODA_MAX_PAGES: ${{ env.SF_SODA_MAX_PAGES }}
-          SOCS_APP_TOKEN: ${{ env.SOCS_APP_TOKEN }}
-          BACKFILL_DAYS: ${{ env.BACKFILL_DAYS }}
           DAILY_IN:  ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
           DAILY_OUT: ${{ env.CRIME_DATA_DIR }}/sf_crime_02.csv
         run: |
@@ -459,13 +461,18 @@ jobs:
           else
             python -u scripts/update_311.py
           fi
-      
+
+      # 🔍 Küçük debug: IO ve başlıklar
       - name: 03.debug) Show 311 IO
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
+          set -euo pipefail
           echo "DAILY_IN=${DAILY_IN}"
           echo "DAILY_OUT=${DAILY_OUT}"
-          ls -lah "${CRIME_DATA_DIR}" | sed -n '1,100p'
+          ls -lah "${CRIME_DATA_DIR}" | sed -n '1,200p'
+          echo "----- HEAD: sf_311_last_5_years_y.csv -----" && head -n 3 "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv" || true
+          echo "----- HEAD: sf_311_last_5_years.csv   -----" && head -n 3 "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"   || true
+          echo "----- HEAD: sf_crime_02.csv           -----" && head -n 3 "${CRIME_DATA_DIR}/sf_crime_02.csv"           || true
 
       - name: Ensure population CSV (local file)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
