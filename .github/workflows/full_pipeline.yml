@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CRIME_DATA_DIR: ${{ github.workspace }}/crime_prediction_data
+  CRIME_DATA_DIR: ${{ github.workspace }}
   GEOID_LEN: "11"
 
   BACKFILL_DAYS: "0"   # ← Mevcut satır KALDI; override aşağıda yapılıyor
@@ -69,6 +69,12 @@ jobs:
 
       - name: Ensure data dir
         run: mkdir -p "${CRIME_DATA_DIR}"
+
+      - name: Echo paths
+        run: |
+          pwd
+          echo "CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+          ls -lah "${CRIME_DATA_DIR}" || true
 
       # --- SF 07:00 kapısı (TZ ayarla + saat kontrolü) ---
       - name: Set runner timezone to America/Los_Angeles
