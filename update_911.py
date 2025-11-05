@@ -106,6 +106,12 @@ CRIME_GRID_CANDIDATES = [
     Path("./sf_crime_grid_full_labeled.csv"),
 ]
 merged_output_path = Path(os.getenv("DAILY_OUT", str(Path(BASE_DIR) / "sf_crime_01.csv")))
+if not merged_output_path.is_absolute():
+    merged_output_path = Path(BASE_DIR) / merged_output_path.name
+
+# (opsiyonel ama faydalı: env’i ve hedefi loglayın)
+log(f"🧾 DAILY_OUT seen as: {os.getenv('DAILY_OUT', '(unset)')}")
+log(f"📝 Writing sf_crime_01 → {merged_output_path}")
 
 # Census blocks (komşu için — yalnızca BASE_DIR ve kök)
 CENSUS_CANDIDATES = [
