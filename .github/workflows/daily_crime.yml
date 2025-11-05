@@ -153,6 +153,7 @@ jobs:
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
       # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
+      # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
       - name: (1) 911 → enrich GRID & EVENTS (local search)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
@@ -174,8 +175,11 @@ jobs:
           fi
 
           CANDIDATES=( \
+            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv" \
             "${CRIME_DATA_DIR}/sf_911_last_5_year.csv" \
+            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year_y.csv" \
             "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year.csv" \
+            "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year_y.csv" \
             "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year.csv" \
           )
           PICK=""
@@ -421,7 +425,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CRIME_DATA_DIR: ${{ github.workspace }}
-      GRID_FILE: fr_crime_grid_daily.csv
+      GRID_FILE: crime_prediction_data/fr_crime_grid_daily.csv
       PATROL_TOP_K:   "25"
       PATROL_MIN_SPACING_M: "300"
       PATROL_OUT_CSV: "fr_patrol_plan.csv"
