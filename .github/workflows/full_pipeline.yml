@@ -343,14 +343,15 @@ jobs:
           head -n 5 "$F1" || true
           
       - name: Restore 311 summary cache
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
         uses: actions/cache@v4
         with:
           path: ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
-          key: 311-${{ runner.os }}-${{ github.run_number }}
+          key: 311-${{ runner.os }}-v1
+          restore-keys: |
+            311-${{ runner.os }}-
 
       # ✅ YENİ: 311 cache sonrası tazelik kontrolü (hard gate)
-      - name: Freshness check after 311 cache restore (hard gate)
+      - name: Freshness check after 311 cache restore (soft fix)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -euo pipefail
@@ -366,19 +367,20 @@ jobs:
           hdr = pd.read_csv(p, nrows=0, low_memory=False)
           col = next((c for c in CANDS if c in hdr.columns), None)
           if not col:
-              print("⚠️ 311: tarih kolonu bulunamadı (cache)."); sys.exit(0)
+              print("⚠️ 311: tarih kolonu yok (cache)."); sys.exit(0)
           mx = None
           for ch in pd.read_csv(p, usecols=[col], chunksize=200_000, low_memory=False):
               s = pd.to_datetime(ch[col], errors="coerce").dt.date
               m = s.max()
               if pd.notna(m) and (mx is None or m > mx): mx = m
           if mx is None:
-              print("❌ 311 cache parse edilemedi"); sys.exit(3)
+              print("⚠️ 311 cache parse edilemedi → sileceğim ki yeniden üretilebilsin.")
+              os.remove(p); sys.exit(0)
           today_sf = datetime.now(ZoneInfo("America/Los_Angeles")).date()
           lag = int(os.getenv("FRESHNESS_SF_MAX_LAG_DAYS","2"))
           if mx < today_sf - timedelta(days=lag):
-              print(f"❌ 311 cache STALE: max={mx}  (limit {lag} gün)")
-              sys.exit(4)
+              print(f"⚠️ 311 cache STALE (max={mx}) → dosya siliniyor; bir sonraki adım yeniden üretecek.")
+              os.remove(p); sys.exit(0)
           print(f"✅ 311 cache OK: max={mx}")
           PY
 
