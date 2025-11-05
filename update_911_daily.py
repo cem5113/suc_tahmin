@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# update_911_fr.py — Girdi: sf_crime.csv → Çıktılar:
+# update_911_daily.py — Girdi: sf_crime.csv → Çıktılar:
 #   1) fr_crime_events_daily.csv  (event-level + günlük 911 özellikleri)
 #   2) fr_crime_grid_daily.csv    (GEOID×date grid + günlük 911 özellikleri)
 #
