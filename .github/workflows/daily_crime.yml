@@ -421,7 +421,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CRIME_DATA_DIR: ${{ github.workspace }}
-      GRID_FILE:      crime_prediction_data/fr_crime_grid_daily.csv
+      GRID_FILE: fr_crime_grid_daily.csv
       PATROL_TOP_K:   "25"
       PATROL_MIN_SPACING_M: "300"
       PATROL_OUT_CSV: "fr_patrol_plan.csv"
