@@ -437,6 +437,13 @@ jobs:
           else
             python -u scripts/update_311.py
           fi
+      
+      - name: 03.debug) Show 311 IO
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          echo "DAILY_IN=${DAILY_IN}"
+          echo "DAILY_OUT=${DAILY_OUT}"
+          ls -lah "${CRIME_DATA_DIR}" | sed -n '1,100p'
 
       - name: Ensure population CSV (local file)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
