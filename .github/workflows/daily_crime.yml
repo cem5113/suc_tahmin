@@ -19,28 +19,28 @@ defaults:
     shell: bash
 
 env:
-  # Kök: repo çalışma alanı
+  # KÖK
   CRIME_DATA_DIR: ${{ github.workspace }}
 
   WX_LOCATION: "paris"
   WX_UNIT: "metric"
   GEOID_LEN: "11"
 
-  # Artifact klasörü (varsa)
+  # Artifact (ZIP) varsayılan ad/konum
   ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
   ARTIFACT_DIR: artifact
 
-  # Ana çıktı/okuma dizini
+  # Çıktı klasörü ve fallback dizinleri
   FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
   FALLBACK_DIRS: ${{ github.workspace }}/crime_prediction_data,${{ github.workspace }}
 
-  # Günlük dosyalar — alt klasörle birlikte
+  # Günlük dosyalar
   FR_GRID_DAILY_IN:  crime_prediction_data/fr_crime_grid_daily.csv
   FR_GRID_DAILY_OUT: crime_prediction_data/fr_crime_grid_daily.csv
   FR_EVENTS_DAILY_IN:  crime_prediction_data/fr_crime_events_daily.csv
   FR_EVENTS_DAILY_OUT: crime_prediction_data/fr_crime_events_daily.csv
 
-  # (Fix) Top-level env içinde başka env'e referans verilemez ⇒ github.workspace kullan
+  # NEIGH (varsayılan; adım içinde artifact öncelikli PICK yapılacak)
   NEIGH_FILE: ${{ github.workspace }}/neighbors.csv
 
   # 911 varsayılanları
@@ -93,15 +93,27 @@ jobs:
           python -m pip install -U pip wheel setuptools pyarrow pandas
           pip install numpy scikit-learn pyproj shapely geopandas fiona rtree
 
-      - name: Download upstream artifact (only when triggered by run)
+      # ===== UPSTREAM ARTIFACT İNDİRME =====
+      - name: Download upstream artifact (from triggering run)
         if: ${{ github.event_name == 'workflow_run' }}
         uses: dawidd6/action-download-artifact@v6
         with:
           run_id: ${{ github.event.workflow_run.id }}
           name: sf-crime-pipeline-output
           path: artifact
+          if_no_artifact_found: warn
 
-      - name: Unzip artifact if present (optional)
+      - name: Download upstream artifact (latest successful, when manual)
+        if: ${{ github.event_name != 'workflow_run' }}
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: full_pipeline.yml
+          branch: main
+          name: sf-crime-pipeline-output
+          path: artifact
+          if_no_artifact_found: warn
+
+      - name: Unzip artifact if present
         run: |
           set -euo pipefail
           if [ -f "${ARTIFACT_ZIP}" ]; then
@@ -116,26 +128,30 @@ jobs:
           echo "== artifact contents =="
           find artifact -maxdepth 6 -type f | sed -n '1,200p' || true
 
-      # --- (0) Build FR daily: sf_crime.csv konumunu otomatik bul ---
+      # ===== (0) FR daily GRID/EVENTS: sf_crime.csv KAYNAĞI ARTIFACT ÖNCELİKLİ =====
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
         run: |
           set -euo pipefail
-          echo "📂 CWD: $(pwd)"
           echo "📦 CRIME_DATA_DIR=${CRIME_DATA_DIR}"
           mkdir -p "${CRIME_DATA_DIR}/crime_prediction_data"
-          ls -la "${CRIME_DATA_DIR}" || true
 
-          # sf_crime.csv aday yollar
-          C1="${CRIME_DATA_DIR}/sf_crime.csv"
-          C2="${CRIME_DATA_DIR}/crime_prediction_data/sf_crime.csv"
-          C3="${CRIME_DATA_DIR}/artifact/sf_crime.csv"
-          if   [ -f "$C1" ]; then export FR_EVENTS_PATH="$C1"
-          elif [ -f "$C2" ]; then export FR_EVENTS_PATH="$C2"
-          elif [ -f "$C3" ]; then export FR_EVENTS_PATH="$C3"
-          else
-            echo "❌ sf_crime.csv yok (aradım: $C1 $C2 $C3)"; exit 1
+          # sf_crime.csv adayları — artifact öncelikli
+          CANDIDATES=(
+            "${GITHUB_WORKSPACE}/artifact/sf_crime.csv"
+            "${CRIME_DATA_DIR}/artifact/sf_crime.csv"
+            "${CRIME_DATA_DIR}/sf_crime.csv"
+            "${CRIME_DATA_DIR}/crime_prediction_data/sf_crime.csv"
+            "sf_crime.csv"
+          )
+          FR_EVENTS_PATH=""
+          for p in "${CANDIDATES[@]}"; do
+            if [ -f "$p" ]; then FR_EVENTS_PATH="$p"; break; fi
+          done
+          if [ -z "$FR_EVENTS_PATH" ]; then
+            echo "❌ sf_crime.csv bulunamadı"; exit 1
           fi
 
+          export FR_EVENTS_PATH
           export FR_OUT_EVENTS="${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_events_daily.csv"
           export FR_OUT_GRID="${CRIME_DATA_DIR}/crime_prediction_data/fr_crime_grid_daily.csv"
           export FR_MIN_YEARS="5"
@@ -144,41 +160,13 @@ jobs:
           export FR_ID_COL="id"
 
           echo "🔧 FR_EVENTS_PATH: ${FR_EVENTS_PATH}"
-          echo "🔧 FR_OUT_EVENTS : ${FR_OUT_EVENTS}"
-          echo "🔧 FR_OUT_GRID   : ${FR_OUT_GRID}"
-
           python -u update_crime_daily.py
 
           echo "---- GRID head ----";   head -n 5 "${FR_OUT_GRID}"   || true
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
-      # ---------------------- 911 ENRICH — SADE: sadece yerel/artefact arama ----------------------
-      # (0) Triggered by workflow_run ise tetikleyen koşudan indir
-      - name: Download 911 artifact (from triggering run)
-        if: ${{ github.event_name == 'workflow_run' }}
-        uses: dawidd6/action-download-artifact@v2
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_id: ${{ github.event.workflow_run.id }}
-          name: sf-crime-pipeline-output
-          path: artifact
-          repo: ${{ github.repository }}
-          if_no_artifact_found: warn
-      
-      # (0b) Manuel çalıştırmada (dispatch), son başarılı koşudan indir (fallback)
-      - name: Download 911 artifact (latest successful full_pipeline)
-        if: ${{ github.event_name != 'workflow_run' }}
-        uses: dawidd6/action-download-artifact@v2
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: full_pipeline.yml      # "Full SF Crime Pipeline" dosya adı
-          branch: main
-          name: sf-crime-pipeline-output
-          path: artifact
-          repo: ${{ github.repository }}
-          if_no_artifact_found: warn
-
-      - name: (1) 911 → enrich GRID & EVENTS
+      # ===== (1) 911 ENRICH — ARTIFACT ÖNCELİKLİ KAYNAK SEÇİMİ =====
+      - name: (1) 911 → enrich GRID & EVENTS (artifact-first)
         env:
           CRIME_DATA_DIR:      ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:       ${{ env.FR_OUTPUT_DIR }}
@@ -186,52 +174,29 @@ jobs:
           FR_GRID_DAILY_OUT:   ${{ env.FR_GRID_DAILY_OUT }}
         run: |
           set -euo pipefail
-      
-          echo "== 911 kaynağı seçimi (artifact + main) =="
+          echo "== 911 kaynağı seçimi (artifact-first) =="
           CANDIDATES=(
-            "${GITHUB_WORKSPACE}/artifact/sf_911_last_5_year.csv"
             "${GITHUB_WORKSPACE}/artifact/sf_911_last_5_year_y.csv"
+            "${GITHUB_WORKSPACE}/artifact/sf_911_last_5_year.csv"
+            "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year_y.csv"
+            "${CRIME_DATA_DIR}/artifact/sf_911_last_5_year.csv"
+            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
             "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+            "sf_911_last_5_year_y.csv"
             "sf_911_last_5_year.csv"
           )
           PICK=""
           for p in "${CANDIDATES[@]}"; do
-            if [ -f "$p" ]; then PICK="$p"; break; fi
+            [ -f "$p" ] && { PICK="$p"; break; }
           done
-          if [ -z "$PICK" ]; then
-            echo "❌ 911 CSV bulunamadı."; ls -la artifact || true; exit 1
-          fi
+          [ -z "$PICK" ] && { echo "❌ 911 CSV bulunamadı."; exit 1; }
           export FR_911="$PICK"
           echo "✅ 911 source: $FR_911"
-      
-          python -u update_911_daily.py
-      
-          EVENTS_FILE="${FR_OUTPUT_DIR%/}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
-          GRID_FILE="${FR_OUTPUT_DIR%/}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
-      
-          print_cols () {
-          python - "$1" <<'PY'
-          import sys, pandas as pd
-          f=sys.argv[1]
-          try:
-              print(",".join(pd.read_csv(f, nrows=0).columns))
-          except Exception as e:
-              print(f"kolon okuma hatası: {e}")
-          PY
-          }
-      
-          for f in "${EVENTS_FILE}" "${GRID_FILE}"; do
-            if [ -f "${f}" ]; then
-              echo ""; echo "📄 $(basename "${f}") — $(wc -l < "${f}") satır"
-              head -n 5 "${f}" || true
-              echo "🧭 columns:"; print_cols "${f}"
-            else
-              echo "⚠️ Dosya yok: ${f}"
-            fi
-          done
 
-      # ---------------------- 311 ENRICH (yerel arama) ----------------------
-      - name: (2) 311 → enrich GRID & EVENTS (local search)
+          python -u update_911_daily.py
+
+      # ===== (2) 311 ENRICH — ARTIFACT ÖNCELİKLİ =====
+      - name: (2) 311 → enrich GRID & EVENTS (artifact-first)
         env:
           FR_GRID_DAILY_IN:  "${{ env.FR_GRID_DAILY_IN }}"
           FR_GRID_DAILY_OUT: "${{ env.FR_GRID_DAILY_OUT }}"
@@ -243,154 +208,256 @@ jobs:
           FR_311_EMA_ALPHAS: "${{ env.FR_311_EMA_ALPHAS }}"
         run: |
           set -euo pipefail
-
           GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
           EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
           if [ ! -f "$GRID" ] || [ ! -f "$EVTS" ]; then
             echo "⚠️ daily grid/events yok → 311 enrich atlanıyor."
             exit 0
           fi
-
-          CANDIDATES=( \
-            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv" \
-            "${CRIME_DATA_DIR}/crime_prediction_data/sf_311_last_5_years.csv" \
-            "${CRIME_DATA_DIR}/artifact/sf_311_last_5_years.csv" \
+          CANDIDATES=(
+            "${GITHUB_WORKSPACE}/artifact/sf_311_last_5_years.csv"
+            "${CRIME_DATA_DIR}/artifact/sf_311_last_5_years.csv"
+            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
+            "${CRIME_DATA_DIR}/crime_prediction_data/sf_311_last_5_years.csv"
+            "sf_311_last_5_years.csv"
           )
           PICK=""
           for p in "${CANDIDATES[@]}"; do
             [ -f "$p" ] && { PICK="$p"; break; }
           done
           if [ -z "$PICK" ]; then
-            echo "ℹ️ 311 günlük bulunamadı → adım atlanıyor."
+            echo "ℹ️ 311 bulunamadı → adım atlanıyor."
             exit 0
           fi
           echo "✅ 311 kaynağı: $PICK"
           export FR_311_DAILY_IN="$PICK"
 
-          if [ -f "./update_311_daily.py" ]; then
-            PYFILE="./update_311_daily.py"
-          elif [ -f "./scripts/update_311_daily.py" ]; then
-            PYFILE="./scripts/update_311_daily.py"
-          else
-            echo "❌ 311 script'i bulunamadı."; exit 67
-          fi
-
+          PYFILE=""
+          [ -f "./update_311_daily.py" ] && PYFILE="./update_311_daily.py"
+          [ -z "$PYFILE" ] && [ -f "./scripts/update_311_daily.py" ] && PYFILE="./scripts/update_311_daily.py"
+          [ -z "$PYFILE" ] && { echo "❌ 311 script'i yok"; exit 67; }
           python -u "$PYFILE"
 
-          python - <<'PY'
-          import os, pandas as pd
-          p=os.path.join(os.getenv("CRIME_DATA_DIR"), os.getenv("FR_GRID_DAILY_OUT","crime_prediction_data/fr_crime_grid_daily.csv"))
-          if os.path.exists(p):
-              df=pd.read_csv(p, nrows=0)
-              print("GRID columns:", list(df.columns))
-          else:
-              print("⚠️ GRID yok, kolon listesi alınamadı.")
-          PY
-
-      - name: (3) Bus stops -> enrich GRID & EVENTS
-        env:
-          BUS_CANON_RAW: "sf_bus_stops_with_geoid.csv"
+      # ===== (3) BUS — ARTIFACT ÖNCELİKLİ =====
+      - name: (3) Bus stops -> enrich GRID & EVENTS (artifact-first)
         run: |
           set -euo pipefail
+          CANDIDATES=(
+            "${GITHUB_WORKSPACE}/artifact/sf_bus_stops_with_geoid.csv"
+            "${CRIME_DATA_DIR}/artifact/sf_bus_stops_with_geoid.csv"
+            "${CRIME_DATA_DIR}/sf_bus_stops_with_geoid.csv"
+            "sf_bus_stops_with_geoid.csv"
+          )
+          BUS_SOURCE=""
+          for p in "${CANDIDATES[@]}"; do
+            [ -f "$p" ] && { BUS_SOURCE="$p"; break; }
+          done
+          [ -z "$BUS_SOURCE" ] && { echo "ℹ️ Bus stops yok → atlanıyor"; exit 0; }
+          export BUS_CANON_RAW="$BUS_SOURCE"
+          echo "✅ BUS source: $BUS_CANON_RAW"
           python -u update_bus_daily.py
 
-      - name: (4) Train stops -> enrich GRID & EVENTS
-        env:
-          TRAIN_STOPS_NAME: "sf_train_stops_with_geoid.csv"
+      # ===== (4) TRAIN — ARTIFACT ÖNCELİKLİ =====
+      - name: (4) Train stops -> enrich GRID & EVENTS (artifact-first)
         run: |
           set -euo pipefail
+          CANDIDATES=(
+            "${GITHUB_WORKSPACE}/artifact/sf_train_stops_with_geoid.csv"
+            "${CRIME_DATA_DIR}/artifact/sf_train_stops_with_geoid.csv"
+            "${CRIME_DATA_DIR}/sf_train_stops_with_geoid.csv"
+            "sf_train_stops_with_geoid.csv"
+          )
+          TRAIN_SOURCE=""
+          for p in "${CANDIDATES[@]}"; do
+            [ -f "$p" ] && { TRAIN_SOURCE="$p"; break; }
+          done
+          [ -z "$TRAIN_SOURCE" ] && { echo "ℹ️ Train stops yok → atlanıyor"; exit 0; }
+          export TRAIN_STOPS_NAME="$TRAIN_SOURCE"
+          echo "✅ TRAIN source: $TRAIN_STOPS_NAME"
           python -u update_train_daily.py
 
-      - name: (5) POI -> enrich GRID & EVENTS
-        env:
-          POI_GEOJSON_1: "${{ env.CRIME_DATA_DIR }}/sf_pois.geojson"
-          POI_GEOJSON_2: "sf_pois.geojson"
-          POI_CLEAN_CSV: "${{ env.CRIME_DATA_DIR }}/sf_pois_cleaned_with_geoid.csv"
-          BLOCK_GEOJSON: "${{ env.CRIME_DATA_DIR }}/sf_census_blocks_with_population.geojson"
+      # ===== (5) POI — ARTIFACT ÖNCELİKLİ =====
+      - name: (5) POI -> enrich GRID & EVENTS (artifact-first)
         run: |
           set -euo pipefail
+          # POI GeoJSON
+          POI_GJ=""
+          for p in \
+            "${GITHUB_WORKSPACE}/artifact/sf_pois.geojson" \
+            "${CRIME_DATA_DIR}/artifact/sf_pois.geojson" \
+            "${CRIME_DATA_DIR}/sf_pois.geojson" \
+            "sf_pois.geojson"; do
+            [ -f "$p" ] && { POI_GJ="$p"; break; }
+          done
+          # Cleaned CSV
+          POI_CLEAN=""
+          for p in \
+            "${GITHUB_WORKSPACE}/artifact/sf_pois_cleaned_with_geoid.csv" \
+            "${CRIME_DATA_DIR}/artifact/sf_pois_cleaned_with_geoid.csv" \
+            "${CRIME_DATA_DIR}/sf_pois_cleaned_with_geoid.csv" \
+            "sf_pois_cleaned_with_geoid.csv"; do
+            [ -f "$p" ] && { POI_CLEAN="$p"; break; }
+          done
+          # Blocks (nüfuslu)
+          BLOCK_GJ=""
+          for p in \
+            "${GITHUB_WORKSPACE}/artifact/sf_census_blocks_with_population.geojson" \
+            "${CRIME_DATA_DIR}/artifact/sf_census_blocks_with_population.geojson" \
+            "${CRIME_DATA_DIR}/sf_census_blocks_with_population.geojson" \
+            "sf_census_blocks_with_population.geojson"; do
+            [ -f "$p" ] && { BLOCK_GJ="$p"; break; }
+          done
+
+          [ -z "$POI_GJ" ] && [ -z "$POI_CLEAN" ] && { echo "ℹ️ POI kaynakları yok → atlanıyor"; exit 0; }
+
+          export POI_GEOJSON_1="$POI_GJ"
+          export POI_GEOJSON_2="$POI_GJ"
+          export POI_CLEAN_CSV="$POI_CLEAN"
+          export BLOCK_GEOJSON="$BLOCK_GJ"
+
+          echo "✅ POI_GEOJSON: ${POI_GEOJSON_1:-none}"
+          echo "✅ POI_CLEAN_CSV: ${POI_CLEAN_CSV:-none}"
+          echo "✅ BLOCK_GEOJSON: ${BLOCK_GEOJSON:-none}"
           python -u update_poi_daily.py
 
-      - name: (5.1) Build BLOCKS centroid CSV (one-time)
+      # ===== (5.1) BLOCKS CENTROID — ARTIFACT ÖNCELİKLİ =====
+      - name: (5.1) Build BLOCKS centroid CSV (artifact-first)
         run: |
           set -euo pipefail
           python - <<'PY'
-          import pandas as pd, geopandas as gpd, os
+          import os
           from pathlib import Path
-
+          import pandas as pd, geopandas as gpd
           BASE = Path(os.environ["CRIME_DATA_DIR"])
-          INP  = BASE/"sf_census_blocks_with_population.geojson"
-          OUT  = BASE/"sf_blocks_centroids.csv"
-
-          print(f"INPUT={INP}")
+          # artifact-first
+          cand = [
+            BASE/"artifact/sf_census_blocks_with_population.geojson",
+            Path(os.getenv("GITHUB_WORKSPACE",""))/"artifact/sf_census_blocks_with_population.geojson",
+            BASE/"sf_census_blocks_with_population.geojson",
+            Path("sf_census_blocks_with_population.geojson"),
+          ]
+          INP = next((p for p in cand if p.exists()), None)
+          if INP is None:
+              print("ℹ️ BLOCKS geojson yok → centroid üretimi atlandı."); raise SystemExit(0)
+          OUT = BASE/"sf_blocks_centroids.csv"
           gdf = gpd.read_file(INP).to_crs("EPSG:4326")
           if "GEOID" not in gdf.columns:
               raise ValueError("BLOCKS GeoJSON içinde GEOID yok")
-
-          def g11(s: pd.Series)->pd.Series:
-              return (
-                s.astype(str).str.extract(r"(\d+)",expand=False)
-                .fillna("").str.replace(" ","",regex=False).str.zfill(11).str[:11]
-              )
-
-          gdf["GEOID"]=g11(gdf["GEOID"])
+          gdf["GEOID"] = (
+              gdf["GEOID"].astype(str).str.extract(r"(\d+)",expand=False)
+              .fillna("").str.replace(" ","",regex=False).str.zfill(11).str[:11]
+          )
           cent = gdf.dissolve(by="GEOID")["geometry"].centroid
           df=pd.DataFrame({"GEOID":cent.index,"centroid_lat":cent.y,"centroid_lon":cent.x})
+          OUT.parent.mkdir(parents=True, exist_ok=True)
           df.to_csv(OUT,index=False)
           print(f"✅ wrote {OUT} rows={len(df)}")
           PY
 
-      - name: (6) Police & Government -> enrich GRID & EVENTS
-        env:
-          POLICE_FILE: "sf_police_stations.csv"
-          GOV_FILE: "sf_government_buildings.csv"
-          BLOCKS_CSV: "sf_blocks_centroids.csv"
+      # ===== (6) POLICE & GOV — ARTIFACT ÖNCELİKLİ =====
+      - name: (6) Police & Government -> enrich GRID & EVENTS (artifact-first)
         run: |
           set -euo pipefail
+          # Police
+          POLICE=""
+          for p in \
+            "${GITHUB_WORKSPACE}/artifact/sf_police_stations.csv" \
+            "${CRIME_DATA_DIR}/artifact/sf_police_stations.csv" \
+            "${CRIME_DATA_DIR}/sf_police_stations.csv" \
+            "sf_police_stations.csv"; do
+            [ -f "$p" ] && { POLICE="$p"; break; }
+          done
+          # Gov
+          GOV=""
+          for p in \
+            "${GITHUB_WORKSPACE}/artifact/sf_government_buildings.csv" \
+            "${CRIME_DATA_DIR}/artifact/sf_government_buildings.csv" \
+            "${CRIME_DATA_DIR}/sf_government_buildings.csv" \
+            "sf_government_buildings.csv"; do
+            [ -f "$p" ] && { GOV="$p"; break; }
+          done
+          # Blocks centroids
+          BLOCKS="${CRIME_DATA_DIR}/sf_blocks_centroids.csv"
+          [ ! -f "$BLOCKS" ] && { echo "ℹ️ blocks centroid yok → atlanıyor"; exit 0; }
+
+          [ -z "$POLICE" ] && [ -z "$GOV" ] && { echo "ℹ️ police/gov yok → atlanıyor"; exit 0; }
+          export POLICE_FILE="$POLICE"
+          export GOV_FILE="$GOV"
+          export BLOCKS_CSV="$BLOCKS"
+          echo "✅ POLICE: ${POLICE_FILE:-none}"
+          echo "✅ GOV: ${GOV_FILE:-none}"
           python -u update_police_gov_daily.py
 
-      - name: (7) Weather (date-merge) -> enrich GRID & EVENTS
-        env:
-          WEATHER_FILE: "sf_weather_5years.csv"
+      # ===== (7) WEATHER — ARTIFACT ÖNCELİKLİ (tarih-merge) =====
+      - name: (7) Weather (date-merge) -> enrich GRID & EVENTS (artifact-first)
         run: |
           set -euo pipefail
+          CANDIDATES=(
+            "${GITHUB_WORKSPACE}/artifact/sf_weather_5years.csv"
+            "${CRIME_DATA_DIR}/artifact/sf_weather_5years.csv"
+            "${CRIME_DATA_DIR}/sf_weather_5years.csv"
+            "sf_weather_5years.csv"
+          )
+          WX=""
+          for p in "${CANDIDATES[@]}"; do
+            [ -f "$p" ] && { WX="$p"; break; }
+          done
+          [ -z "$WX" ] && { echo "ℹ️ weather yok → atlanıyor"; exit 0; }
+          export WEATHER_FILE="$WX"
+          echo "✅ WEATHER source: $WEATHER_FILE"
           python -u update_weather_daily.py
 
-      - name: (8) Neighbor windows (1/3/7d) -> enrich GRID & EVENTS
-        env:
-          NEIGH_FILE: "${{ env.NEIGH_FILE }}"
+      # ===== (8) NEIGHBORS — ARTIFACT ÖNCELİKLİ =====
+      - name: (8) Neighbor windows (1/3/7d) -> enrich GRID & EVENTS (artifact-first)
         run: |
           set -euo pipefail
-          if [ ! -f "${NEIGH_FILE}" ]; then
+          CANDIDATES=(
+            "${GITHUB_WORKSPACE}/artifact/neighbors.csv"
+            "${CRIME_DATA_DIR}/artifact/neighbors.csv"
+            "${CRIME_DATA_DIR}/neighbors.csv"
+            "neighbors.csv"
+          )
+          PICK=""
+          for p in "${CANDIDATES[@]}"; do
+            [ -f "$p" ] && { PICK="$p"; break; }
+          done
+          if [ -z "$PICK" ]; then
             echo "ℹ️ neighbors.csv yok → komşu enrich atlanıyor."
             exit 0
           fi
+          export NEIGH_FILE="$PICK"
+          echo "✅ NEIGH source: $NEIGH_FILE"
           python -u scripts/make_neighbors_daily.py
 
-      - name: (9) Population -> enrich GRID & EVENTS
-        env:
-          POP_FILE: "sf_population.csv"
+      # ===== (9) POPULATION — ARTIFACT ÖNCELİKLİ =====
+      - name: (9) Population -> enrich GRID & EVENTS (artifact-first)
         run: |
           set -euo pipefail
-
-          POP="${CRIME_DATA_DIR}/${POP_FILE}"
-          GRID="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"
-          EVTS="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}"
-
-          if [ ! -f "$POP" ]; then
-            echo "ℹ️ population yok → atlanıyor ($POP)"
+          CANDIDATES=(
+            "${GITHUB_WORKSPACE}/artifact/sf_population.csv"
+            "${CRIME_DATA_DIR}/artifact/sf_population.csv"
+            "${CRIME_DATA_DIR}/sf_population.csv"
+            "sf_population.csv"
+          )
+          POP=""
+          for p in "${CANDIDATES[@]}"; do
+            [ -f "$p" ] && { POP="$p"; break; }
+          done
+          if [ -z "$POP" ]; then
+            echo "ℹ️ population yok → atlanıyor"
             exit 0
           fi
+          export POP_FILE="$POP"
+          echo "✅ POP source: $POP_FILE"
 
           python - <<'PY'
           import os, pandas as pd
           base = os.environ["CRIME_DATA_DIR"]
-          pop_path = os.path.join(base, os.environ["POP_FILE"])
+          pop_path = os.environ["POP_FILE"]
           grid_path = os.path.join(base, os.environ["FR_GRID_DAILY_OUT"])
           evt_path  = os.path.join(base, os.environ["FR_EVENTS_DAILY_OUT"])
 
           pop = pd.read_csv(pop_path)
-          # normalize
           pop["GEOID"] = (
               pop["GEOID"].astype(str).str.extract(r"(\d+)",expand=False)
               .str.zfill(11).str[:11]
@@ -417,7 +484,7 @@ jobs:
           set -euo pipefail
           echo "==== GRID (top 3 rows) ====";   head -n 3 "${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT}"   || true
           echo "==== EVENTS (top 3 rows) ===="; head -n 3 "${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT}" || true
-          echo "==== GRID column list ===="
+          echo "==== GRID columns ===="
           python - <<'PY'
           import pandas as pd, os
           p=os.path.join(os.getenv("CRIME_DATA_DIR"),os.getenv("FR_GRID_DAILY_OUT"))
