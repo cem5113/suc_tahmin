@@ -59,7 +59,7 @@ _raw_save_dir = os.getenv("CRIME_DATA_DIR", "crime_prediction_data").strip().str
 _repo_leaf = Path.cwd().name  # örn: 'crime_prediction_data' (Actions'ta /work/<repo>/<repo>)
 if not os.path.isabs(_raw_save_dir) and Path(_raw_save_dir).name == _repo_leaf:
     _raw_save_dir = "."  # aynı ada sahip alt klasörü tekrar oluşturma
-SAVE_DIR = os.path.normpath(_raw_save_dir)
+SAVE_DIR = os.path.abspath(os.path.normpath(_raw_save_dir))
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 # Adlandırma
@@ -624,11 +624,12 @@ def main():
     except Exception as e:
         print(f"⚠️ 311 merge aşamasında hata: {e}\n↪️ PASSTHROUGH uygulanıyor…")
         try:
-            crime_01_path = os.path.join(SAVE_DIR, "sf_crime_01.csv")
+            crime_01_path = os.environ.get("DAILY_IN", os.path.join(SAVE_DIR, "sf_crime_01.csv"))
             if os.path.exists(crime_01_path):
-                crime = pd.read_csv(crime_01_path, dtype={"GEOID": str}, low_memory=False)
-                crime["311_request_count"] = 0
-                save_atomic(crime, os.path.join(SAVE_DIR, "sf_crime_02.csv"))
+            crime = pd.read_csv(crime_01_path, dtype={"GEOID": str}, low_memory=False)
+            crime["311_request_count"] = 0
+            out_311_crime = os.environ.get("DAILY_OUT", os.path.join(SAVE_DIR, "sf_crime_02.csv"))
+            save_atomic(crime, out_311_crime)
                 print("✅ Passthrough yazıldı (exception fallback).")
         except Exception as ee:
             print(f"❌ Passthrough da başarısız: {ee}")
