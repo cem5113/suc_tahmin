@@ -562,14 +562,26 @@ jobs:
         run: |
           set -e
           python -u update_train.py
-
-      - name: 07) POI zenginleştirme → sf_crime_06.csv
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
+      
+      - name: POI enrich (GEOID-only)
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          CRIME_IN:  "${{ env.CRIME_DATA_DIR }}/sf_crime_05.csv"
+          CRIME_OUT: "${{ env.CRIME_DATA_DIR }}/sf_crime_06.csv"
         run: |
-          set -e
-          if [ -f update_poi.py ]; then python -u update_poi.py;
-          elif [ -f pipeline_make_sf_crime_06.py ]; then python -u pipeline_make_sf_crime_06.py;
-          else echo "POI adımı bulunamadı"; exit 2; fi
+          set -euo pipefail
+          echo "CWD=$(pwd)"
+          echo "CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+          ls -lah "${CRIME_DATA_DIR}" || true
+          ls -lah "${CRIME_DATA_DIR}/sf_crime_05.csv" || { echo "❌ sf_crime_05.csv yok"; exit 2; }
+      
+          if [ -f update_poi.py ]; then
+            python -u update_poi.py
+          elif [ -f pipeline_make_sf_crime_06.py ]; then
+            python -u pipeline_make_sf_crime_06.py
+          else
+            echo "POI adımı bulunamadı"; exit 2
+          fi
 
       - name: 08) Polis & Devlet binaları → sf_crime_07.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
