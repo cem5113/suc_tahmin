@@ -521,7 +521,14 @@ patrol-fr:
         python -m pip install -U pip
         pip install pandas numpy
 
-    - name: Run patrol planner (grid or events fallback)
+    - name: Run patrol planner (auto-locate grid; events fallback)
+      env:
+        # mevcuttaki env'lerin kalsın
+        CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        GRID_FILE:      ${{ env.GRID_FILE }}                 # ör: crime_prediction_data/fr_crime_grid_daily.csv
+        EVENTS_FILE:    crime_prediction_data/fr_crime_events_daily.csv
+        PATROL_TOP_K:   ${{ env.PATROL_TOP_K }}
+        PATROL_OUT_CSV: ${{ env.PATROL_OUT_CSV }}
       run: |
         set -euo pipefail
         python - <<'PY'
@@ -529,24 +536,44 @@ patrol-fr:
         from pathlib import Path
         import pandas as pd
         
-        base       = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
-        grid_path  = base / os.environ.get("GRID_FILE","fr_crime_grid_daily.csv")
-        events_path= base / os.environ.get("EVENTS_FILE","fr_crime_events_daily.csv")
-        k          = int(os.environ.get("PATROL_TOP_K","25"))
-        out_csv    = base / os.environ.get("PATROL_OUT_CSV","fr_patrol_plan.csv")
+        base        = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
+        grid_hint   = os.environ.get("GRID_FILE","fr_crime_grid_daily.csv")
+        events_hint = os.environ.get("EVENTS_FILE","fr_crime_events_daily.csv")
+        k           = int(os.environ.get("PATROL_TOP_K","25"))
+        out_csv     = base / os.environ.get("PATROL_OUT_CSV","fr_patrol_plan.csv")
         
         def log(*a): print(*a, flush=True)
         
-        # 1) GRID varsa onu kullan
+        def locate(path_hint: str, fname: str):
+            """Önce hint'e bak, yoksa CRIME_DATA_DIR altında rglob ile bul."""
+            p = base / path_hint
+            if p.exists():
+                return p
+            # rglob ile arama
+            matches = list(base.rglob(fname))
+            if matches:
+                # uzun nested yollarda birden fazla olabilir; en uzunu (en derine yazılmış olana) al
+                matches.sort(key=lambda x: len(str(x)))
+                found = matches[-1]
+                log(f"🔎 bulundu: {found}")
+                return found
+            return None
+        
+        # 1) GRID'i bul
+        grid_fp = locate(grid_hint, "fr_crime_grid_daily.csv")
+        
+        # 2) EVENTS fallback
+        events_fp = locate(events_hint, "fr_crime_events_daily.csv")
+        
+        # 3) Veri kaynağını seç
         df = None
         src = None
-        if grid_path.exists():
-            df = pd.read_csv(grid_path)
-            src = "grid"
-            log(f"📖 GRID okundu: {grid_path} ({len(df):,} satır)")
-        # 2) Yoksa EVENTS'ten türet (GEOID+date -> events_count)
-        elif events_path.exists():
-            ev = pd.read_csv(events_path)
+        if grid_fp and grid_fp.exists():
+            df = pd.read_csv(grid_fp)
+            src = f"grid:{grid_fp}"
+            log(f"📖 GRID okundu: {grid_fp} ({len(df):,} satır)")
+        elif events_fp and events_fp.exists():
+            ev = pd.read_csv(events_fp)
             if ev.empty:
                 log("⚠️ EVENTS boş, plan üretilemedi.")
                 out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -568,10 +595,10 @@ patrol-fr:
             # Y_label
             agg["Y_label"] = (agg["events_count"] > 0).astype("int8")
             df = agg
-            src = "events→grid"
+            src = f"events→grid:{events_fp}"
             log(f"🧮 EVENTS'ten grid türetildi: {len(df):,} satır")
         else:
-            print(f"❌ GRID yok: {grid_path} ve EVENTS yok: {events_path}", file=sys.stderr)
+            print(f"❌ GRID & EVENTS bulunamadı.\n- Aranan GRID: {base / grid_hint}\n- Aranan EVENTS: {base / events_hint}", file=sys.stderr)
             sys.exit(2)
         
         if df.empty:
@@ -587,7 +614,7 @@ patrol-fr:
             print("❌ Tarih alanı hatalı.", file=sys.stderr); sys.exit(4)
         today = df[df["date"]==last_day].copy()
         
-        # Güvenli sayı okuyucu (birden fazla isim desteği)
+        # Güvenli sayı okuyucu
         def safe_num(df, colnames, default=0.0):
             for name in colnames:
                 if name in df.columns:
@@ -609,7 +636,7 @@ patrol-fr:
             n911_1d*0.10
         )
         
-        # Top-K seçim
+        # Top-K
         agg_cols = {"risk_score":"max"}
         if "events_count" in today.columns:
             agg_cols["events_count"] = "max"
@@ -627,7 +654,7 @@ patrol-fr:
         topk.insert(1, "date", last_day.date())
         out_csv.parent.mkdir(parents=True, exist_ok=True)
         topk.to_csv(out_csv, index=False)
-        print(f"✅ [{src}] Wrote patrol CSV -> {out_csv} (rows={len(topk)})")
+        print(f"✅ [{src}] wrote patrol CSV -> {out_csv} (rows={len(topk)})")
         PY
 
     - name: Preview patrol CSV
