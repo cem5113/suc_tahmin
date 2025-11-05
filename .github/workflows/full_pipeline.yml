@@ -604,7 +604,7 @@ jobs:
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
-          NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+          NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
           NEIGHBOR_STRATEGY: queen         # queen|rook
           MIN_NEIGHBOR_DEG: "3"            # en az derece
           KNN_K: "5"                       # takviye için k
@@ -703,7 +703,7 @@ jobs:
           except Exception:
               gpd = None
 
-          CRIME_DIR = Path("crime_prediction_data")
+          CRIME_DIR  = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
           GEOID_LEN  = int(os.environ.get("GEOID_LEN","11"))
           STRATEGY   = os.environ.get("NEIGHBOR_STRATEGY","queen").lower()
           MIN_DEG    = int(os.environ.get("MIN_NEIGHBOR_DEG","3"))
@@ -815,33 +815,6 @@ jobs:
 
           echo "neighbors.csv (ilk 10 satır):"
           head -n 10 "${DEST}" || true
-
-      - name: 10.6) sf_crime_07 → sf_crime_08 (komşuluk ekleme)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
-        run: |
-          set -e
-          [ -f "${CRIME_DATA_DIR}/sf_crime_07.csv" ] || { echo "❌ sf_crime_07.csv yok"; exit 2; }
-          [ -f "${NEIGH_FILE}" ] || { echo "❌ neighbors.csv yok: ${NEIGH_FILE}"; exit 3; }
-
-          # Doğru betik yolunu bul ve çalıştır
-          if [ -f scripts/make_neighbors.py ]; then
-            PY=scripts/make_neighbors.py
-          elif [ -f make_neighbors.py ]; then
-            PY=make_neighbors.py
-          else
-            echo "❌ make_neighbors.py bulunamadı (scripts/ altında olmalı)."
-            exit 4
-          fi
-
-          python -u "$PY"
-
-          # Çıktıyı doğrula
-          [ -f "${CRIME_DATA_DIR}/sf_crime_08.csv" ] || { echo "❌ sf_crime_08.csv oluşmadı"; exit 5; }
-          echo "---- sf_crime_08.csv (head) ----"
-          head -n 10 "${CRIME_DATA_DIR}/sf_crime_08.csv" || true
           
       - name: 11) Install ML deps for stacking
         if: ${{ steps.gate.outputs.proceed == 'true' }}
