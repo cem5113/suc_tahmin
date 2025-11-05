@@ -161,21 +161,39 @@ jobs:
           FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
           FR_EVENTS_DAILY_OUT: ${{ env.FR_EVENTS_DAILY_OUT }}
           FR_GRID_DAILY_OUT:   ${{ env.FR_GRID_DAILY_OUT }}
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}   # -u için garanti
         run: |
           set -euo pipefail
-      
-          echo "== check & set FR_911_PATH =="
+
+          echo "== check & set FR_911 =="
           CANDIDATES=(
             "${ARTIFACT_DIR}/sf_911_last_5_year_y.csv"
             "${ARTIFACT_DIR}/sf_911_last_5_year.csv"
+            "${ARTIFACT_DIR}/sf_911_last_5_year_y"          # uzantısız
+            "${ARTIFACT_DIR}/sf_911_last_5_year"            # uzantısız
             "${ARTIFACT_DIR}/sf-crime-pipeline-output/sf_911_last_5_year_y.csv"
             "${ARTIFACT_DIR}/sf-crime-pipeline-output/sf_911_last_5_year.csv"
+            "${ARTIFACT_DIR}/sf-crime-pipeline-output/sf_911_last_5_year_y"
+            "${ARTIFACT_DIR}/sf-crime-pipeline-output/sf_911_last_5_year"
+
             "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
             "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+            "${CRIME_DATA_DIR}/sf_911_last_5_year_y"
+            "${CRIME_DATA_DIR}/sf_911_last_5_year"
             "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year_y.csv"
             "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year.csv"
-            "sf_911_last_5_year_y.csv"
+            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year_y"
+            "${CRIME_DATA_DIR}/crime_prediction_data/sf_911_last_5_year"
+
+            # ihtiyaten "years" varyantı
+            "${ARTIFACT_DIR}/sf_911_last_5_years.csv"
+            "${ARTIFACT_DIR}/sf_911_last_5_years"
+            "${CRIME_DATA_DIR}/sf_911_last_5_years.csv"
+            "${CRIME_DATA_DIR}/sf_911_last_5_years"
             "sf_911_last_5_year.csv"
+            "sf_911_last_5_year"
+            "sf_911_last_5_years.csv"
+            "sf_911_last_5_years"
           )
           PICK=""
           for p in "${CANDIDATES[@]}"; do
@@ -183,25 +201,27 @@ jobs:
           done
           if [ -n "$PICK" ]; then
             echo "✅ 911 source: $PICK"
-            export FR_911_PATH="$PICK"
+            export FR_911="$PICK"      # <<< ÖNEMLİ: FR_911_PATH değil, FR_911
           else
-            echo "ℹ️ 911 kaynağı bulunamadı; bu adım nazikçe atlanacak."
-            # İstersen sert fail yerine direkt çık:
-            # exit 0
+            echo "ℹ️ 911 kaynağı bulunamadı; bu adım nazikçe atlanacak (Python guard var)."
+            # exit 0  # sert atlamak istersen aç
           fi
-      
+
           echo "== find 911 CSVs (if artifact exists) =="
           if [ -d "artifact" ]; then
+            # csv uzantılı
             find artifact -maxdepth 6 -type f -name 'sf_911_last_5_year*.csv' -ls || true
+            # uzantısız (name pattern)
+            find artifact -maxdepth 6 -type f -name 'sf_911_last_5_year*' ! -name '*.csv' -ls || true
           else
             echo "ℹ️ artifact/ yok (muhtemelen workflow_dispatch ile çalıştı)."
           fi
-      
+
           python -u update_911_daily.py
-      
+
           EVENTS_FILE="${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
           GRID_FILE="${FR_OUTPUT_DIR}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
-      
+
           for f in "$EVENTS_FILE" "$GRID_FILE"; do
             if [ -f "$f" ]; then
               echo ""; echo "📄 $(basename "$f") — $(wc -l < "$f") satır"
