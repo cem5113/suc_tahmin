@@ -48,14 +48,35 @@ OUTPUT_DIR           = Path(os.getenv("FR_OUTPUT_DIR", "crime_prediction_data"))
 def build_candidates():
     return {
         "FR_911": [
+            # artifact klasörü (uzantılı + uzantısız)
             ARTIFACT_DIR / "sf_911_last_5_year_y.csv",
             ARTIFACT_DIR / "sf_911_last_5_year.csv",
+            ARTIFACT_DIR / "sf_911_last_5_year_y",
+            ARTIFACT_DIR / "sf_911_last_5_year",
+
+            # artifact alt zip açılmış klasör adıyla
             ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_911_last_5_year_y.csv",
             ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_911_last_5_year.csv",
+            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_911_last_5_year_y",
+            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_911_last_5_year",
+
+            # repo kökü (mutlak CRIME_DATA_DIR ve göreli)
             CRIME_DATA_DIR / "sf_911_last_5_year_y.csv",
             CRIME_DATA_DIR / "sf_911_last_5_year.csv",
+            CRIME_DATA_DIR / "sf_911_last_5_year_y",
+            CRIME_DATA_DIR / "sf_911_last_5_year",
             Path("crime_prediction_data") / "sf_911_last_5_year_y.csv",
             Path("crime_prediction_data") / "sf_911_last_5_year.csv",
+            Path("crime_prediction_data") / "sf_911_last_5_year_y",
+            Path("crime_prediction_data") / "sf_911_last_5_year",
+
+            # emniyet payı: bazı repo'larda ...years
+            ARTIFACT_DIR / "sf_911_last_5_years.csv",
+            ARTIFACT_DIR / "sf_911_last_5_years",
+            CRIME_DATA_DIR / "sf_911_last_5_years.csv",
+            CRIME_DATA_DIR / "sf_911_last_5_years",
+            Path("crime_prediction_data") / "sf_911_last_5_years.csv",
+            Path("crime_prediction_data") / "sf_911_last_5_years",
         ],
         "CENSUS": [
             ARTIFACT_DIR / "sf_census_blocks_with_population.geojson",
@@ -161,7 +182,7 @@ def read_911_daily(fr911_candidates, census_candidates) -> pd.DataFrame:
 def main():
     safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
     cands = build_candidates()
-    # 1) Adayların varlık durumunu göster (teşhis için)
+
     print("== Candidates ==")
     for key, arr in cands.items():
         print(f"[{key}]")
@@ -172,13 +193,22 @@ def main():
                 exists = False
             print("  -", p, "OK" if exists else "")
 
-    # Teşhis: tüm aday listeleri ve varlık durumu
     for k, arr in cands.items():
         print(f"🔎 Candidates[{k}]:")
-        for p in arr: print("   -", p, "EXISTS" if Path(p).exists() else "")
+        for p in arr:
+            print("   -", p, "EXISTS" if Path(p).exists() else "")
 
-    fr911_daily = read_911_daily(cands["FR_911"], cands["CENSUS"])
-    log(f"📊 911 günlük özet: {fr911_daily.shape[0]:,} satır × {fr911_daily.shape[1]} sütun")
+    # --- 911 kaynağını gerçekten var mı diye kontrol et
+    src_911 = first_existing(cands["FR_911"])
+    if src_911 is None:
+        log("ℹ️ 911 kaynağı bulunamadı → bu adım NAZİKÇE atlanacak (hata yok).")
+        # Boş bir çerçeve verelim ki join sonrası fillna(0) çalışsın
+        fr911_daily = pd.DataFrame(columns=[
+            "GEOID","date","n_911_day","n_911_last1d","n_911_last3d","n_911_last7d"
+        ])
+    else:
+        fr911_daily = read_911_daily(cands["FR_911"], cands["CENSUS"])
+        log(f"📊 911 günlük özet: {fr911_daily.shape[0]:,} satır × {fr911_daily.shape[1]} sütun")
 
     crime_path = first_existing(cands["CRIME"])
     if crime_path is None:
@@ -203,7 +233,8 @@ def main():
         crime["date"] = to_date(crime["date"])
     else:
         dt_col = next((c for c in ["datetime","event_datetime","occurred_at","timestamp"] if c in crime.columns), None)
-        if dt_col is None: raise ValueError("❌ sf_crime.csv içinde 'date' veya 'datetime' benzeri bir kolon yok.")
+        if dt_col is None:
+            raise ValueError("❌ sf_crime.csv içinde 'date' veya 'datetime' benzeri bir kolon yok.")
         crime["date"] = to_date(crime[dt_col])
 
     # EVENTS
@@ -214,7 +245,8 @@ def main():
             events_daily[c] = pd.to_numeric(events_daily[c], errors="coerce").fillna(0)
 
     # GRID
-    agg_crime = (events_daily.groupby(keys, as_index=False).size().rename(columns={"size":"crime_count_day"}))
+    agg_crime = (events_daily.groupby(keys, as_index=False).size()
+                 .rename(columns={"size":"crime_count_day"}))
     grid_daily = agg_crime.merge(fr911_daily, on=keys, how="left")
     grid_daily["crime_count_day"] = pd.to_numeric(grid_daily["crime_count_day"], errors="coerce").fillna(0).astype(int)
     grid_daily["Y_day"] = (grid_daily["crime_count_day"] > 0).astype("int8")
@@ -232,12 +264,14 @@ def main():
         log("—— fr_crime_events_daily.csv — örnek —")
         cols = ["GEOID","date","n_911_day","n_911_last1d","n_911_last3d","n_911_last7d"]
         log(events_daily[[c for c in cols if c in events_daily.columns]].head(8).to_string(index=False))
-    except Exception: pass
+    except Exception:
+        pass
     try:
         log("—— fr_crime_grid_daily.csv — örnek —")
         cols = ["GEOID","date","crime_count_day","Y_day","n_911_day","n_911_last1d","n_911_last3d","n_911_last7d"]
         log(grid_daily[[c for c in cols if c in grid_daily.columns]].head(8).to_string(index=False))
-    except Exception: pass
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()
