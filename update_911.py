@@ -97,15 +97,15 @@ LOCAL_NAME = "sf_911_last_5_year.csv"
 OUT_DIR = Path(os.getenv("CRIME_DATA_DIR", str(Path(BASE_DIR)))).resolve()
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 local_summary_path = OUT_DIR / LOCAL_NAME
+Y_NAME = "sf_911_last_5_year_y.csv"
 y_summary_path     = OUT_DIR / Y_NAME
-y_summary_path = Path(BASE_DIR) / Y_NAME
 
 # Crime grid (yalnızca BASE_DIR ve kök)
 CRIME_GRID_CANDIDATES = [
     Path(BASE_DIR) / "sf_crime_grid_full_labeled.csv",
     Path("./sf_crime_grid_full_labeled.csv"),
 ]
-merged_output_path = Path(BASE_DIR) / "sf_crime_01.csv"
+merged_output_path = Path(os.getenv("DAILY_OUT", str(Path(BASE_DIR) / "sf_crime_01.csv")))
 
 # Census blocks (komşu için — yalnızca BASE_DIR ve kök)
 CENSUS_CANDIDATES = [
