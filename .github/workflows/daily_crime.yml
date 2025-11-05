@@ -19,7 +19,6 @@ defaults:
     shell: bash
 
 env:
-  # Kök dizinler
   CRIME_DATA_DIR: ${{ github.workspace }}/crime_prediction_data
   FR_OUTPUT_DIR:  ${{ github.workspace }}/crime_prediction_data
 
@@ -27,27 +26,22 @@ env:
   WX_UNIT: "metric"
   GEOID_LEN: "11"
 
-  # Artifact konumları (opsiyonel ZIP + klasör)
   ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
   ARTIFACT_DIR: artifact
 
-  # Günlük çıktı dosya adları (SADECE DOSYA ADI)
   FR_GRID_DAILY_IN:  fr_crime_grid_daily.csv
   FR_GRID_DAILY_OUT: fr_crime_grid_daily.csv
   FR_EVENTS_DAILY_IN:  fr_crime_events_daily.csv
   FR_EVENTS_DAILY_OUT: fr_crime_events_daily.csv
 
-  # Top-level env içinde başka env'e referans verilmez → workspace kullan
   NEIGH_FILE: ${{ github.workspace }}/crime_prediction_data/neighbors.csv
 
-  # 911 varsayılanları
   FR_911_DATE_COL: "incident_datetime"
   FR_911_GEOID_COL: "GEOID"
   FR_911_WINSOR_Q: "0"
   FR_CAT_TOPK: "8"
   FR_911_EMA_ALPHAS: "0.3,0.5"
 
-  # 311 varsayılanları
   FR_311_DATE_COL: "date"
   FR_311_GEOID_COL: "GEOID"
   FR_311_WINSOR_Q: "0"
@@ -90,8 +84,7 @@ jobs:
           python -m pip install -U pip wheel setuptools pyarrow pandas
           pip install numpy scikit-learn pyproj shapely geopandas fiona rtree
 
-      # Upstream workflow_run tetiklendiyse artefaktı indir (klasör halinde)
-      - name: Download upstream artifact (folder)
+      - name: Download upstream artifact (only when triggered by run)
         if: ${{ github.event_name == 'workflow_run' }}
         uses: dawidd6/action-download-artifact@v6
         with:
@@ -99,7 +92,6 @@ jobs:
           name: sf-crime-pipeline-output
           path: artifact
 
-      # ZIP varsa aç (opsiyonel)
       - name: Unzip artifact if present (optional)
         run: |
           set -euo pipefail
@@ -115,7 +107,6 @@ jobs:
           echo "== artifact contents =="
           find artifact -maxdepth 6 -type f | sed -n '1,200p' || true
 
-      # (0) Günlük GRID & EVENTS üretimi (sf_crime.csv otomatik bulunur)
       - name: (0) Build FR daily (GRID & EVENTS) + Y_label
         run: |
           set -euo pipefail
@@ -124,7 +115,6 @@ jobs:
           mkdir -p "${CRIME_DATA_DIR}"
           ls -la "${CRIME_DATA_DIR}" || true
 
-          # sf_crime.csv aday yolları
           C1="${CRIME_DATA_DIR}/sf_crime.csv"
           C2="${CRIME_DATA_DIR}/crime_prediction_data/sf_crime.csv"
           C3="${ARTIFACT_DIR}/sf_crime.csv"
@@ -151,7 +141,6 @@ jobs:
           echo "---- GRID head ----";   head -n 5 "${FR_OUT_GRID}"   || true
           echo "---- EVENTS head ----"; head -n 5 "${FR_OUT_EVENTS}" || true
 
-      # 01) 911 enrich — iki çıktı da
       - name: 01) 911 (events + grid)
         env:
           ARTIFACT_ZIP:  ${{ env.ARTIFACT_ZIP }}
@@ -186,7 +175,6 @@ jobs:
             fi
           done
 
-      # 02) 311 enrich — yerel arama
       - name: (2) 311 → enrich GRID & EVENTS (local search)
         env:
           FR_GRID_DAILY_IN:  ${{ env.FR_GRID_DAILY_IN }}
@@ -358,13 +346,13 @@ jobs:
           echo "==== EVENTS (top 3 rows) ===="; head -n 3 "${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT}" || true
           echo "==== GRID column list ===="
           python - <<'PY'
-          import pandas as pd, os
-          p=os.path.join(os.environ["FR_OUTPUT_DIR"], os.environ["FR_GRID_DAILY_OUT"])
-          if os.path.exists(p):
-              df=pd.read_csv(p, nrows=0); print("\n".join(df.columns))
-          else:
-              print("⚠️ GRID yok.")
-          PY
+import pandas as pd, os
+p=os.path.join(os.environ["FR_OUTPUT_DIR"], os.environ["FR_GRID_DAILY_OUT"])
+if os.path.exists(p):
+    df=pd.read_csv(p, nrows=0); print("\n".join(df.columns))
+else:
+    print("⚠️ GRID yok.")
+PY
 
       - name: Upload artifacts (GRID & EVENTS)
         uses: actions/upload-artifact@v4
