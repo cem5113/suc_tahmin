@@ -173,14 +173,14 @@ jobs:
               head -n 5 "$f" || true
               echo "🧭 columns:"
               F="$f" python - <<'PY'
-      import os, pandas as pd
-      f = os.environ['F']
-      try:
-          df = pd.read_csv(f, nrows=0)
-          print(",".join(df.columns))
-      except Exception as e:
-          print(f"kolon okuma hatası: {e}")
-      PY
+          import os, pandas as pd
+          f = os.environ['F']
+          try:
+              df = pd.read_csv(f, nrows=0)
+              print(",".join(df.columns))
+          except Exception as e:
+              print(f"kolon okuma hatası: {e}")
+          PY
             else
               echo "⚠️ Dosya yok: $f"
             fi
