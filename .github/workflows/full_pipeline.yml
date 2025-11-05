@@ -30,7 +30,7 @@ env:
   CRIME_DATA_DIR: crime_prediction_data
   GEOID_LEN: "11"
 
-  BACKFILL_DAYS: "0"
+  BACKFILL_DAYS: "0"   # ← Mevcut satır KALDI; override aşağıda yapılıyor
   SF_SODA_FETCH_STRATEGY: ${{ vars.SF_SODA_FETCH_STRATEGY || 'bulk' }}
   SF_SODA_PAGE_LIMIT: ${{ vars.SF_SODA_PAGE_LIMIT || '50000' }}
   SF_SODA_MAX_PAGES: ${{ vars.SF_SODA_MAX_PAGES || '100' }}
@@ -103,6 +103,25 @@ jobs:
             echo "- Çalışma zamanı (SF): **$(date)**"
             echo "- Not: 07:00 kapısı nedeniyle adımlar atlandı. Manuel tetiklerken \`force=true\` verin."
           } >> $GITHUB_STEP_SUMMARY
+
+      # ================== EK: ENV BOOTSTRAP (mevcut satırları değiştirmeden override) ==================
+      - name: Bootstrap env overrides (BACKFILL & FRESHNESS)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          VARS_BACKFILL: ${{ vars.BACKFILL_DAYS }}           # org/repo → Settings → Variables → BACKFILL_DAYS
+          VARS_FRESH_LAG: ${{ vars.FRESHNESS_SF_MAX_LAG_DAYS }}
+        run: |
+          set -euo pipefail
+          # BACKFILL_DAYS öncelik: vars.BACKFILL_DAYS > mevcut env BACKFILL_DAYS > 30
+          BF="${VARS_BACKFILL:-${BACKFILL_DAYS:-30}}"
+          echo "BACKFILL_DAYS=${BF}" >> "$GITHUB_ENV"
+          echo "Resolved BACKFILL_DAYS=${BF}"
+
+          # FRESHNESS_SF_MAX_LAG_DAYS: vars > mevcut > 2
+          FL="${VARS_FRESH_LAG:-${FRESHNESS_SF_MAX_LAG_DAYS:-2}}"
+          echo "FRESHNESS_SF_MAX_LAG_DAYS=${FL}" >> "$GITHUB_ENV"
+          echo "Resolved FRESHNESS_SF_MAX_LAG_DAYS=${FL}"
+      # =================================================================================================
 
       - name: System deps for rtree (optional)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -693,7 +712,7 @@ jobs:
               cent = _centroids_table(poly_ok)
               nb = _ensure_min_degree(nb, cent)
               if nb.empty:
-                  nb = pd.DataFrame(columns(["geoid","neighbor"]))
+                  nb = pd.DataFrame(columns=["geoid","neighbor"])
               nb["geoid"] = _norm(nb["geoid"])
               nb["neighbor"] = _norm(nb["neighbor"])
               nb = _sym(nb).drop_duplicates().sort_values(["geoid","neighbor"])
