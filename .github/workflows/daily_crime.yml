@@ -213,13 +213,13 @@ jobs:
               echo ""; echo "📄 $(basename "$f") — $(wc -l < "$f") satır"
               head -n 5 "$f" || true
               echo "🧭 columns:"; F="$f" python - <<'PY'
-      import os, pandas as pd
-      f=os.environ['F']
-      try:
-          print(",".join(pd.read_csv(f, nrows=0).columns))
-      except Exception as e:
-          print(f"kolon okuma hatası: {e}")
-      PY
+              import os, pandas as pd
+              f=os.environ['F']
+              try:
+                  print(",".join(pd.read_csv(f, nrows=0).columns))
+              except Exception as e:
+                  print(f"kolon okuma hatası: {e}")
+              PY
             else
               echo "⚠️ Dosya yok: $f"
             fi
