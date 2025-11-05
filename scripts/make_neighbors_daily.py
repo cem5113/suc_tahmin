@@ -55,8 +55,9 @@ def _norm_geoid(s: pd.Series, L: int = 11) -> pd.Series:
          .str[:L].str.zfill(L)
     )
 
-def _mk_date(s: pd.Series) -> pd.Series:
-    return pd.to_datetime(s, errors="coerce").dt.date
+# --- tarih yardımcıları: HER ZAMAN datetime64[ns] ---
+def _as_date64(s: pd.Series) -> pd.Series:
+    return pd.to_datetime(s, errors="coerce").dt.normalize()
 
 def _ensure_date_col(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
@@ -65,9 +66,9 @@ def _ensure_date_col(df: pd.DataFrame) -> pd.DataFrame:
         if c in d.columns:
             cand = c; break
     if cand is None and {"year","month","day"}.issubset(d.columns):
-        d["date"] = pd.to_datetime(d[["year","month","day"]], errors="coerce").dt.date
+        d["date"] = _as_date64(pd.to_datetime(d[["year","month","day"]], errors="coerce"))
     elif cand is not None:
-        d["date"] = _mk_date(d[cand])
+        d["date"] = _as_date64(d[cand])
     else:
         d["date"] = pd.NaT
     return d
@@ -117,6 +118,7 @@ def build_daily_base(grid: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
                 g.groupby(["GEOID","date"], dropna=False)["__base__"]
                  .sum().reset_index(name="base_cnt")
             )
+            gb["date"] = _as_date64(gb["date"])
             return gb
 
     # 2) Events'ten günlük üret
@@ -135,6 +137,7 @@ def build_daily_base(grid: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
                 ev.groupby(["GEOID","date"], dropna=False)
                   .size().reset_index(name="base_cnt")
             )
+        gb["date"] = _as_date64(gb["date"])
         return gb
 
     raise RuntimeError("GRID ve EVENTS boş; günlük taban oluşturulamadı.")
@@ -149,15 +152,15 @@ def neighbor_daily_features(base: pd.DataFrame, neigh: pd.DataFrame) -> pd.DataF
       - geoid bazında tarihe göre sırala, shift(1) ve rolling(3,7)
     """
     b = base.copy()
-    b["GEOID"]   = _norm_geoid(b["GEOID"], GEOID_LEN)
-    b["date"]    = _mk_date(b["date"])
+    b["GEOID"]    = _norm_geoid(b["GEOID"], GEOID_LEN)
+    b["date"]     = _as_date64(b["date"])
     b["base_cnt"] = pd.to_numeric(b["base_cnt"], errors="coerce").fillna(0).astype("int64")
 
     # Tam tarih kapsaması: her GEOID için min→max arası tüm günler (eksikler 0)
     full = []
     for g, gdf in b.groupby("GEOID", dropna=False):
         gdf = gdf.sort_values("date")
-        rng = pd.date_range(gdf["date"].min(), gdf["date"].max(), freq="D").date
+        rng = pd.date_range(gdf["date"].min(), gdf["date"].max(), freq="D")  # datetime64[ns]
         aux = pd.DataFrame({"GEOID": g, "date": rng})
         aux = aux.merge(gdf[["date","base_cnt"]], on="date", how="left")
         aux["base_cnt"] = aux["base_cnt"].fillna(0).astype("int64")
@@ -197,6 +200,7 @@ def neighbor_daily_features(base: pd.DataFrame, neigh: pd.DataFrame) -> pd.DataF
         "nb_last7d": "neighbor_crime_7d",
     })[["GEOID","date","neighbor_crime_1d","neighbor_crime_3d","neighbor_crime_7d"]]
 
+    out["date"] = _as_date64(out["date"])
     for c in ["neighbor_crime_1d","neighbor_crime_3d","neighbor_crime_7d"]:
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype("int64")
     return out
@@ -205,13 +209,15 @@ def enrich_targets(grid: pd.DataFrame, events: pd.DataFrame, feats: pd.DataFrame
     # merge anahtarlarını her iki tarafta normalize et (kritik!)
     f2 = feats.copy()
     f2["GEOID"] = _norm_geoid(f2["GEOID"], GEOID_LEN)
-    f2["date"]  = _mk_date(f2["date"])
+    f2["date"]  = _as_date64(f2["date"])
 
     g2 = grid
     e2 = events
 
     if not grid.empty:
         g_norm = _normalize_keys(grid, GEOID_LEN)
+        g_norm["date"] = _as_date64(g_norm["date"])
+        f2["date"]     = _as_date64(f2["date"])
         g2 = g_norm.merge(f2, on=["GEOID","date"], how="left")
         for c in ["neighbor_crime_1d","neighbor_crime_3d","neighbor_crime_7d"]:
             if c in g2.columns:
@@ -219,6 +225,8 @@ def enrich_targets(grid: pd.DataFrame, events: pd.DataFrame, feats: pd.DataFrame
 
     if not events.empty:
         ev_norm = _normalize_keys(events, GEOID_LEN)
+        ev_norm["date"] = _as_date64(ev_norm["date"])
+        f2["date"]      = _as_date64(f2["date"])
         e2 = ev_norm.merge(f2, on=["GEOID","date"], how="left")
         for c in ["neighbor_crime_1d","neighbor_crime_3d","neighbor_crime_7d"]:
             if c in e2.columns:
