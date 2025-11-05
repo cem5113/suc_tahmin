@@ -231,8 +231,6 @@ jobs:
         with:
           path: ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
           key: 911-${{ runner.os }}-${{ github.run_number }}
-          restore-keys: |
-            911-${{ runner.os }}-
 
       # ✅ GH auth: login YOK (GH_TOKEN var)
       - name: Prefetch sf_911_last_5_year_y.csv from previous successful run (artifact)
@@ -272,7 +270,7 @@ jobs:
                  -n "${ARTIFACT_NAME}" -D "_prev/$RID" >/dev/null 2>&1; then
               F=$(find "_prev/$RID" -type f -iname "${TARGET_FILE}" | head -n1 || true)
               if [ -n "${F:-}" ]; then
-                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"
+                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"]
                 echo "✅ Bulundu ve kopyalandı: $F → ${OUT_DIR}/${TARGET_FILE}"
                 FOUND="yes"
                 break
@@ -308,10 +306,41 @@ jobs:
         with:
           path: ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
           key: 311-${{ runner.os }}-${{ github.run_number }}
-          restore-keys: |
-            311-${{ runner.os }}-
 
-      # ✅ YENİ: 311 özet dosyası için artifact prefetch (GH login YOK)
+      # ✅ YENİ: 311 cache sonrası tazelik kontrolü (hard gate)
+      - name: Freshness check after 311 cache restore (hard gate)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, sys, pandas as pd
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+          p = os.path.join(os.environ["CRIME_DATA_DIR"], "sf_311_last_5_years.csv")
+          if not os.path.exists(p):
+              sys.exit(0)
+          CANDS = ["requested_datetime","requested_date","opened_date","created_date",
+                   "created_datetime","date","datetime"]
+          hdr = pd.read_csv(p, nrows=0, low_memory=False)
+          col = next((c for c in CANDS if c in hdr.columns), None)
+          if not col:
+              print("⚠️ 311: tarih kolonu bulunamadı (cache)."); sys.exit(0)
+          mx = None
+          for ch in pd.read_csv(p, usecols=[col], chunksize=200_000, low_memory=False):
+              s = pd.to_datetime(ch[col], errors="coerce").dt.date
+              m = s.max()
+              if pd.notna(m) and (mx is None or m > mx): mx = m
+          if mx is None:
+              print("❌ 311 cache parse edilemedi"); sys.exit(3)
+          today_sf = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+          lag = int(os.getenv("FRESHNESS_SF_MAX_LAG_DAYS","2"))
+          if mx < today_sf - timedelta(days=lag):
+              print(f"❌ 311 cache STALE: max={mx}  (limit {lag} gün)")
+              sys.exit(4)
+          print(f"✅ 311 cache OK: max={mx}")
+          PY
+
+      # ✅ 311 özet dosyası için artifact prefetch (GH login YOK)
       - name: Prefetch sf_311_last_5_years_y.csv from previous successful run (artifact)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
@@ -349,7 +378,7 @@ jobs:
                  -n "${ARTIFACT_NAME}" -D "_prev/$RID" >/dev/null 2>&1; then
               F=$(find "_prev/$RID" -type f -iname "${TARGET_FILE}" | head -n1 || true)
               if [ -n "${F:-}" ]; then
-                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"
+                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"]
                 echo "✅ Bulundu ve kopyalandı: $F → ${OUT_DIR}/${TARGET_FILE}"
                 FOUND="yes"
                 break
@@ -926,36 +955,28 @@ jobs:
             ("sf_311_last_5_years.csv",         ["requested_datetime","opened_date","date"]),
             ("sf_weather_5years.csv",           ["date"]),
             ("sf_crime_grid_full_labeled.csv",  ["date"]),
-            ("risk_hourly.csv",                  ["date"]),
+            ("risk_hourly.csv",                 ["date"]),
           ]
 
           overview = []
           for fname, candidates in targets:
             fpath = base / fname
             if not fpath.exists():
-              # yoksa pas geç
               continue
-
-            # hızlı/sağlam okuma (tüm dosyayı okumak zorunda değiliz)
             try:
               df_head = pd.read_csv(fpath, nrows=5000, low_memory=False)
               rowcount = sum(1 for _ in open(fpath, 'r', encoding='utf-8', errors='ignore')) - 1
-            except Exception as e:
-              # okunamazsa geç
+            except Exception:
               continue
 
-            # tarih kolonu seç
             col = next((c for c in candidates if c in df_head.columns), None)
             if col is None:
-              # uygun kolon yoksa geç
               continue
 
-            # max tarih
             mx = pd.to_datetime(df_head[col], errors="coerce").dt.date.max()
             if pd.isna(mx):
               continue
 
-            # tek satırlık latest dosyası: <orijinal>_latest.csv
             latest_path = fpath.with_name(fpath.stem + "_latest.csv")
             pd.DataFrame([{col: mx.isoformat()}]).to_csv(latest_path, index=False)
 
@@ -967,8 +988,7 @@ jobs:
             })
 
           if overview:
-            pd.DataFrame(overview, columns=["file","date_column","max_date","rows_total_approx"])\
-              .to_csv(base / "latest_overview.csv", index=False)
+            pd.DataFrame(overview, columns=["file","date_column","max_date","rows_total_approx"]).to_csv(base / "latest_overview.csv", index=False)
           PY
 
           echo "— latest_overview.csv (head) —"
