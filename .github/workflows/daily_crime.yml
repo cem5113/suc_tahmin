@@ -346,13 +346,13 @@ jobs:
           echo "==== EVENTS (top 3 rows) ===="; head -n 3 "${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT}" || true
           echo "==== GRID column list ===="
           python - <<'PY'
-import pandas as pd, os
-p=os.path.join(os.environ["FR_OUTPUT_DIR"], os.environ["FR_GRID_DAILY_OUT"])
-if os.path.exists(p):
-    df=pd.read_csv(p, nrows=0); print("\n".join(df.columns))
-else:
-    print("⚠️ GRID yok.")
-PY
+          import pandas as pd, os
+          p=os.path.join(os.environ["FR_OUTPUT_DIR"], os.environ["FR_GRID_DAILY_OUT"])
+          if os.path.exists(p):
+              df=pd.read_csv(p, nrows=0); print("\n".join(df.columns))
+          else:
+              print("⚠️ GRID yok.")
+          PY
 
       - name: Upload artifacts (GRID & EVENTS)
         uses: actions/upload-artifact@v4
