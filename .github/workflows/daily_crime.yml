@@ -159,16 +159,22 @@ jobs:
           ARTIFACT_DIR:  ${{ env.ARTIFACT_DIR }}
           FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
           FALLBACK_DIRS: ${{ env.FALLBACK_DIRS }}
-          # Aşağıdakiler tanımlı değilse script varsayılanlarını kullanır:
           FR_EVENTS_DAILY_OUT: ${{ env.FR_EVENTS_DAILY_OUT }}
           FR_GRID_DAILY_OUT:   ${{ env.FR_GRID_DAILY_OUT }}
+          # İsteğe bağlı: 911 dosyasını doğrudan göster
+          # FR_911_PATH: artifact/sf-crime-pipeline-output/sf_911_last_5_year.csv
         run: |
           set -euo pipefail
+          echo "== find 911 CSVs =="
+          find artifact -maxdepth 6 -type f -name 'sf_911_last_5_year*.csv' -ls || true
+          echo "== find CENSUS =="
+          find artifact -maxdepth 6 -type f -name 'sf_census_blocks_with_population.geojson' -ls || true
+      
           python -u update_911_fr.py
-
-          EVENTS_FILE="${CRIME_DATA_DIR}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
-          GRID_FILE="${CRIME_DATA_DIR}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
-
+      
+          EVENTS_FILE="${FR_OUTPUT_DIR}/${FR_EVENTS_DAILY_OUT:-fr_crime_events_daily.csv}"
+          GRID_FILE="${FR_OUTPUT_DIR}/${FR_GRID_DAILY_OUT:-fr_crime_grid_daily.csv}"
+      
           for f in "$EVENTS_FILE" "$GRID_FILE"; do
             if [ -f "$f" ]; then
               echo ""
@@ -176,14 +182,14 @@ jobs:
               head -n 5 "$f" || true
               echo "🧭 columns:"
               F="$f" python - <<'PY'
-          import os, pandas as pd
-          f = os.environ['F']
-          try:
-              df = pd.read_csv(f, nrows=0)
-              print(",".join(df.columns))
-          except Exception as e:
-              print(f"kolon okuma hatası: {e}")
-          PY
+              import os, pandas as pd
+              f = os.environ['F']
+              try:
+                  df = pd.read_csv(f, nrows=0)
+                  print(",".join(df.columns))
+              except Exception as e:
+                  print(f"kolon okuma hatası: {e}")
+              PY
             else
               echo "⚠️ Dosya yok: $f"
             fi
