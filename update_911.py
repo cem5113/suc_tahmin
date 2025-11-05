@@ -105,7 +105,7 @@ CRIME_GRID_CANDIDATES = [
     Path(BASE_DIR) / "sf_crime_grid_full_labeled.csv",
     Path("./sf_crime_grid_full_labeled.csv"),
 ]
-merged_output_path = Path(os.getenv("DAILY_OUT", str(Path(BASE_DIR) / "sf_crime_01.csv")))
+merged_output_path = Path(BASE_DIR) / "sf_crime_01.csv"
 
 # Census blocks (komşu için — yalnızca BASE_DIR ve kök)
 CENSUS_CANDIDATES = [
