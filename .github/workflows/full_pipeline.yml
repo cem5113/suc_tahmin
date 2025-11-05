@@ -343,63 +343,34 @@ jobs:
           head -n 5 "$F1" || true
           
       - name: Restore 311 summary cache
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
         uses: actions/cache@v4
         with:
           path: ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
-          key: 311-${{ runner.os }}-v1
+          key: 311-${{ runner.os }}-${{ github.run_number }}
           restore-keys: |
             311-${{ runner.os }}-
 
-      # ✅ 311 cache sonrası tazelik kontrolü (STALE ise sil, script yeniden üretsin)
-      - name: Freshness check after 311 cache restore (soft fix)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os, sys, pandas as pd
-          from datetime import datetime, timedelta
-          from zoneinfo import ZoneInfo
-          p = os.path.join(os.environ["CRIME_DATA_DIR"], "sf_311_last_5_years.csv")
-          if not os.path.exists(p):
-              sys.exit(0)
-          CANDS = ["requested_datetime","requested_date","opened_date","created_date",
-                   "created_datetime","date","datetime"]
-          hdr = pd.read_csv(p, nrows=0, low_memory=False)
-          col = next((c for c in CANDS if c in hdr.columns), None)
-          if not col:
-              print("⚠️ 311: tarih kolonu yok (cache)."); sys.exit(0)
-          mx = None
-          for ch in pd.read_csv(p, usecols=[col], chunksize=200_000, low_memory=False):
-              s = pd.to_datetime(ch[col], errors="coerce").dt.date
-              m = s.max()
-              if pd.notna(m) and (mx is None or m > mx): mx = m
-          if mx is None:
-              print("⚠️ 311 cache parse edilemedi → sileceğim ki yeniden üretilebilsin.")
-              os.remove(p); sys.exit(0)
-          today_sf = datetime.now(ZoneInfo("America/Los_Angeles")).date()
-          lag = int(os.getenv("FRESHNESS_SF_MAX_LAG_DAYS","2"))
-          if mx < today_sf - timedelta(days=lag):
-              print(f"⚠️ 311 cache STALE (max={mx}) → dosya siliniyor; bir sonraki adım yeniden üretecek.")
-              os.remove(p); sys.exit(0)
-          print(f"✅ 311 cache OK: max={mx}")
-          PY
-
-      # ✅ 311 için artifact prefetch (ham _y VEYA 3h özet). Bulursa CRIME_DATA_DIR altına koyar.
-      - name: Prefetch 311 files from previous successful run (artifact)
+      # ✅ YENİ: 311 özet dosyası için artifact prefetch (GH login YOK)
+      - name: Prefetch sf_311_last_5_years_y.csv from previous successful run (artifact)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT_NAME: sf-crime-pipeline-output
           WORKFLOW_NAME: Full SF Crime Pipeline
-          OUT_DIR: ${{ env.CRIME_DATA_DIR }}
+          TARGET_FILE: sf_311_last_5_years_y.csv
+          OUT_DIR: crime_prediction_data
         run: |
           set -euo pipefail
 
           mkdir -p "${OUT_DIR}"
-          TARGETS=("sf_311_last_5_years_y.csv" "sf_311_last_5_years.csv")
+          if [ -f "${OUT_DIR}/${TARGET_FILE}" ]; then
+            echo "ℹ️ ${OUT_DIR}/${TARGET_FILE} zaten var, indirme atlandı."
+            exit 0
+          fi
 
           sudo apt-get update -y >/dev/null
-          sudo apt-get install -y unzip >/dev/null || true
+          sudo apt-get install -y unzip >/dev/null
 
           if ! command -v gh >/dev/null; then
             type -p curl >/dev/null && sudo curl -sSL https://raw.githubusercontent.com/cli/cli/trunk/script/install.sh | sh
@@ -408,52 +379,39 @@ jobs:
           gh auth status || true
 
           mkdir -p _prev
-          for T in "${TARGETS[@]}"; do
-            # Hedef yoksa artefact'lardan dene
-            if [ -f "${OUT_DIR}/${T}" ]; then
-              echo "ℹ️ ${OUT_DIR}/${T} zaten var, indirme atlandı."
-              continue
-            fi
-
-            FOUND=""
-            for RID in $(gh run list -R "${GITHUB_REPOSITORY}" \
-                          --workflow "${WORKFLOW_NAME}" --status success \
-                          -L 12 --json databaseId -q '.[].databaseId'); do
-              echo "🔎 Run #$RID içinde ${T} aranıyor…"
-              rm -rf "_prev/$RID" && mkdir -p "_prev/$RID"
-              if gh run download -R "${GITHUB_REPOSITORY}" "$RID" \
-                   -n "${ARTIFACT_NAME}" -D "_prev/$RID" >/dev/null 2>&1; then
-                F=$(find "_prev/$RID" -type f -iname "${T}" | head -n1 || true)
-                if [ -n "${F:-}" ]; then
-                  cp -f "$F" "${OUT_DIR}/${T}"
-                  echo "✅ Bulundu ve kopyalandı: $F → ${OUT_DIR}/${T}"
-                  FOUND="yes"
-                  break
-                fi
-              else
-                echo "  ↪️ Artifact indirilemedi veya yok (#$RID)."
+          FOUND=""
+          for RID in $(gh run list -R "${GITHUB_REPOSITORY}" \
+                        --workflow "${WORKFLOW_NAME}" --status success \
+                        -L 10 --json databaseId -q '.[].databaseId'); do
+            echo "🔎 Run #$RID içinde ${TARGET_FILE} aranıyor…"
+            rm -rf "_prev/$RID" && mkdir -p "_prev/$RID"
+            if gh run download -R "${GITHUB_REPOSITORY}" "$RID" \
+                 -n "${ARTIFACT_NAME}" -D "_prev/$RID" >/dev/null 2>&1; then
+              F=$(find "_prev/$RID" -type f -iname "${TARGET_FILE}" | head -n1 || true)
+              if [ -n "${F:-}" ]; then
+                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"
+                echo "✅ Bulundu ve kopyalandı: $F → ${OUT_DIR}/${TARGET_FILE}"
+                FOUND="yes"
+                break
               fi
-            done
-
-            if [ -z "${FOUND}" ]; then
-              echo "ℹ️ ${T} önceki artifact’larda bulunamadı; gerekirse update_311.py repo main / API’ye döner."
+            else
+              echo "  ↪️ Artifact indirilemedi veya yok (#$RID)."
             fi
           done
 
-      # ✅ Tek adımda: artefact → repo → API fallback + incremental + merge
+          if [ -z "${FOUND}" ]; then
+            echo "ℹ️ ${TARGET_FILE} önceki artifact’larda bulunamadı; update_311.py kendi akışıyla devam edecek."
+          fi
+
+      # 311: aynı şekilde bulk çekim
       - name: 03) 311 → sf_crime_02.csv (bulk 50k)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN: ${{ env.GEOID_LEN }}
-          BACKFILL_DAYS: ${{ env.BACKFILL_DAYS }}
-          ARTIFACT_DIR: artifact
-          SOCS_APP_TOKEN: ${{ env.SOCS_APP_TOKEN }}
           SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
-          SF_SODA_PAGE_LIMIT: ${{ env.SF_SODA_PAGE_LIMIT }}
-          SF_SODA_MAX_PAGES: ${{ env.SF_SODA_MAX_PAGES }}
-          DAILY_IN:  ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
-          DAILY_OUT: ${{ env.CRIME_DATA_DIR }}/sf_crime_02.csv
+          SF_SODA_PAGE_LIMIT:    ${{ env.SF_SODA_PAGE_LIMIT }}
+          SF_SODA_MAX_PAGES:     ${{ env.SF_SODA_MAX_PAGES }}
+          SOCS_APP_TOKEN:        ${{ env.SOCS_APP_TOKEN }}
+          BACKFILL_DAYS:         ${{ env.BACKFILL_DAYS }}
         run: |
           set -e
           if [ -f update_311.py ]; then
@@ -461,18 +419,6 @@ jobs:
           else
             python -u scripts/update_311.py
           fi
-
-      # 🔍 Küçük debug: IO ve başlıklar
-      - name: 03.debug) Show 311 IO
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          echo "DAILY_IN=${DAILY_IN}"
-          echo "DAILY_OUT=${DAILY_OUT}"
-          ls -lah "${CRIME_DATA_DIR}" | sed -n '1,200p'
-          echo "----- HEAD: sf_311_last_5_years_y.csv -----" && head -n 3 "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv" || true
-          echo "----- HEAD: sf_311_last_5_years.csv   -----" && head -n 3 "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"   || true
-          echo "----- HEAD: sf_crime_02.csv           -----" && head -n 3 "${CRIME_DATA_DIR}/sf_crime_02.csv"           || true
 
       - name: Ensure population CSV (local file)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
