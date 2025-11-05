@@ -338,6 +338,46 @@ def main() -> int:
     grid["events_count"] = pd.to_numeric(grid["events_count"], errors="coerce").fillna(0).astype("int32")
     grid["Y_label"] = (grid["events_count"] > 0).astype("int8")
 
+    def _pick_911_base(base_dir: Path) -> Path | None:
+        cands = [
+            base_dir / "sf_911_last_5_year_y.csv",
+            base_dir / "sf_911_last_5_year.csv",
+            Path("./sf_911_last_5_year_y.csv"),
+            Path("./sf_911_last_5_year.csv"),
+        ]
+        for p in cands:
+            if p.exists() and p.is_file():
+                return p
+        return None
+    
+    try:
+        _base_911 = _pick_911_base(BASE_DIR)
+        if _base_911 is not None:
+            df911 = pd.read_csv(_base_911, low_memory=False, dtype={"GEOID": "string"})
+            if "date" in df911.columns:
+                df911["date"] = pd.to_datetime(df911["date"], errors="coerce").dt.date
+    
+            # Grid ile tarih+GEOID üzerinden birleştir (saat aralığı yoksa günlük kullan)
+            merge_cols = [c for c in [
+                "911_request_count_hour_range",
+                "911_request_count_daily(before_24_hours)"
+            ] if c in df911.columns]
+    
+            if merge_cols and {"GEOID","date"}.issubset(grid.columns) and {"GEOID","date"}.issubset(df911.columns):
+                grid = grid.merge(
+                    df911[["GEOID","date"] + merge_cols],
+                    on=["GEOID","date"], how="left"
+                )
+                # sayısal doldurma
+                for c in merge_cols:
+                    grid[c] = pd.to_numeric(grid[c], errors="coerce").fillna(0).astype("int32")
+    
+                print("🔗 Grid, 911 özetleriyle zenginleştirildi.")
+        else:
+            print("ℹ️ 911 özeti bulunamadı (sf_911_last_5_year_y.csv / sf_911_last_5_year.csv).")
+    except Exception as e:
+        print(f"⚠️ 911 okuma/zenginleştirme atlandı: {e}")
+    
     _safe_save_csv(grid, OUT_GRID)
 
     # opsiyonel mirror (CRIME_DATA_DIR içine)
