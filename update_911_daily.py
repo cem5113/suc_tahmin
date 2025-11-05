@@ -1,13 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# update_911_daily.py — Girdi: sf_crime.csv → Çıktılar:
-#   1) fr_crime_events_daily.csv  (event-level + günlük 911 özellikleri)
-#   2) fr_crime_grid_daily.csv    (GEOID×date grid + günlük 911 özellikleri)
-#
-# Notlar:
-# - 911 ham/özetten datetime → date; GEOID×date sayımı (n_911_day) + last1d/3d/7d (shift(1))
-# - Join yalnızca (GEOID, date) ile yapılır (saat önemsiz)
-# - GEOID yoksa lat/lon → GEOID eşlemesi yapılır (census geojson gerekir)
+# update_911_daily.py — Girdi: fr_crime.csv 
 
 from __future__ import annotations
 import os, zipfile
@@ -52,14 +43,17 @@ def first_existing(paths) -> Optional[Path]:
             return Path(p)
     return None
 
+# CRIME_DATA_DIR kökü
+CRIME_DATA_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).resolve()
+
 # =========================
 # CONFIG
 # =========================
 ARTIFACT_ZIP = Path(os.getenv("ARTIFACT_ZIP", "artifact/sf-crime-pipeline-output.zip"))
 ARTIFACT_DIR = Path(os.getenv("ARTIFACT_DIR", "artifact_unzipped"))
 
-# GİRİŞ
-INPUT_CRIME_FILENAME = os.getenv("FR_CRIME_FILE", "sf_crime.csv")
+# GİRİŞ (FR varsayılanına hizalı; sf_crime.csv kullanacaksan ENV ile override et)
+INPUT_CRIME_FILENAME = os.getenv("FR_CRIME_FILE", "fr_crime.csv")
 
 # ÇIKIŞLAR
 OUTPUT_EVENTS_DAILY  = os.getenv("FR_EVENTS_DAILY_OUT", "fr_crime_events_daily.csv")
@@ -70,22 +64,29 @@ OUTPUT_DIR = Path(os.getenv("FR_OUTPUT_DIR", "crime_prediction_data"))
 def build_candidates():
     return {
         "FR_911": [
+            # artifact kökleri
             ARTIFACT_DIR / "sf_911_last_5_year_y.csv",
             ARTIFACT_DIR / "sf_911_last_5_year.csv",
-            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_911_last_5_year_y.csv",  # EK
-            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_911_last_5_year.csv",    # EK
+            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_911_last_5_year_y.csv",
+            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_911_last_5_year.csv",
+            # CRIME_DATA_DIR altında
+            CRIME_DATA_DIR / "sf_911_last_5_year_y.csv",
+            CRIME_DATA_DIR / "sf_911_last_5_year.csv",
+            # repo göreli
             Path("crime_prediction_data") / "sf_911_last_5_year_y.csv",
             Path("crime_prediction_data") / "sf_911_last_5_year.csv",
         ],
         "CENSUS": [
             ARTIFACT_DIR / "sf_census_blocks_with_population.geojson",
-            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_census_blocks_with_population.geojson",  # EK
+            ARTIFACT_DIR / "sf-crime-pipeline-output" / "sf_census_blocks_with_population.geojson",
+            CRIME_DATA_DIR / "sf_census_blocks_with_population.geojson",
             Path("crime_prediction_data") / "sf_census_blocks_with_population.geojson",
             Path("./sf_census_blocks_with_population.geojson"),
         ],
         "CRIME": [
             ARTIFACT_DIR / INPUT_CRIME_FILENAME,
-            ARTIFACT_DIR / "sf-crime-pipeline-output" / INPUT_CRIME_FILENAME,  # EK
+            ARTIFACT_DIR / "sf-crime-pipeline-output" / INPUT_CRIME_FILENAME,
+            CRIME_DATA_DIR / INPUT_CRIME_FILENAME,
             Path("crime_prediction_data") / INPUT_CRIME_FILENAME,
             Path(INPUT_CRIME_FILENAME),
         ],
@@ -153,7 +154,8 @@ def ensure_geoid_from_latlon(df: pd.DataFrame, CENSUS_GEOJSON_CANDIDATES) -> pd.
     if not lat_col or not lon_col:
         raise ValueError("❌ Veride GEOID yok ve lat/lon bulunamadı.")
 
-    gdf_blocks, tlen = _load_blocks(CANDS["CENSUS"])
+    # Parametreyi kullan (global CANDS yerine)
+    gdf_blocks, tlen = _load_blocks(CENSUS_GEOJSON_CANDIDATES)
 
     tmp = df.copy()
     tmp[lat_col] = pd.to_numeric(tmp[lat_col], errors="coerce")
@@ -170,38 +172,37 @@ def ensure_geoid_from_latlon(df: pd.DataFrame, CENSUS_GEOJSON_CANDIDATES) -> pd.
 # 911 DAILY SUMMARY (NO HOURS)
 # =========================
 def read_911_daily(FR_911_CANDIDATES, CENSUS_GEOJSON_CANDIDATES) -> pd.DataFrame:
+    # ENV override: FR_911 verilmişse onu öne al
+    env_911 = os.getenv("FR_911", "").strip()
+    if env_911 and Path(env_911).exists():
+        FR_911_CANDIDATES = [Path(env_911)] + list(FR_911_CANDIDATES)
+
     src = first_existing(FR_911_CANDIDATES)
     if src is None:
         raise FileNotFoundError("❌ 911 verisi bulunamadı (zip veya klasör).")
     log(f"📥 911 kaynağı yükleniyor: {src}")
 
     df = pd.read_csv(src, low_memory=False, dtype={"GEOID":"string"})
-    # Zaman kolonu tespiti
     ts_col = next((c for c in ["received_time","received_datetime","datetime","timestamp",
                                "call_received_datetime","date"] if c in df.columns), None)
     if ts_col is None:
         raise ValueError("911 verisinde datetime/içeren bir zaman kolonu bulunamadı.")
 
-    # GEOID yoksa lat/lon → GEOID
     if "GEOID" not in df.columns or df["GEOID"].isna().all():
         log("ℹ️ 911 verisinde GEOID yok; lat/lon → GEOID hesaplanacak.")
-        df = ensure_geoid_from_latlon(df, CANDS["CENSUS"])
+        df = ensure_geoid_from_latlon(df, CENSUS_GEOJSON_CANDIDATES)
 
-    # date üret
     df["date"] = to_date(df[ts_col])
     df = df.dropna(subset=["GEOID","date"]).copy()
 
-    # Günlük sayım (GEOID × date)
     day = (df.groupby(["GEOID","date"], as_index=False)
              .size()
              .rename(columns={"size":"n_911_day"}))
 
-    # Rolling (sızıntısız: shift(1))
     day = day.sort_values(["GEOID","date"]).reset_index(drop=True)
 
     day["n_911_last1d"] = (
-        day.groupby("GEOID")["n_911_day"]
-           .transform(lambda s: s.shift(1).fillna(0))
+        day.groupby("GEOID")["n_911_day"].transform(lambda s: s.shift(1).fillna(0))
     ).astype("float32")
 
     def roll_sum(s: pd.Series, W: int) -> pd.Series:
@@ -223,24 +224,25 @@ def read_911_daily(FR_911_CANDIDATES, CENSUS_GEOJSON_CANDIDATES) -> pd.DataFrame
 def main():
     global CANDS  # ensure_geoid_from_latlon içinde kullanılıyor
 
-    # 0) ZIP varsa çıkar
     safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
 
-    # 1) Aday yollar
     CANDS = build_candidates()
 
-    # 2) 911 günlük özet
+    # Teşhis için: aday path’leri ve varlık durumu
+    for k, arr in CANDS.items():
+        print(f"🔎 Candidates[{k}]:")
+        for p in arr:
+            print("   -", p, "EXISTS" if Path(p).exists() else "")
+
     fr911_daily = read_911_daily(CANDS["FR_911"], CANDS["CENSUS"])
     log(f"📊 911 günlük özet: {fr911_daily.shape[0]:,} satır × {fr911_daily.shape[1]} sütun")
 
-    # 3) sf_crime.csv (girdi)
     crime_path = first_existing(CANDS["CRIME"])
     if crime_path is None:
-        raise FileNotFoundError("❌ sf_crime.csv bulunamadı.")
+        raise FileNotFoundError("❌ fr_crime.csv bulunamadı. (ENV: FR_CRIME_FILE ile override edebilirsin)")
     crime = pd.read_csv(crime_path, low_memory=False, dtype={"GEOID":"string"})
-    log(f"📥 sf_crime.csv: {crime_path} — satır: {len(crime):,}")
+    log(f"📥 crime csv: {crime_path} — satır: {len(crime):,}")
 
-    # 4) GEOID normalize / gerekirse lat-lon → GEOID
     try:
         gdf_blocks, tlen = _load_blocks(CANDS["CENSUS"])
     except Exception:
@@ -248,29 +250,24 @@ def main():
     if "GEOID" in crime.columns and crime["GEOID"].notna().any():
         crime["GEOID"] = normalize_geoid(crime["GEOID"], tlen)
     else:
-        log("ℹ️ sf_crime: GEOID yok; lat/lon → GEOID hesaplanacak.")
+        log("ℹ️ crime: GEOID yok; lat/lon → GEOID hesaplanacak.")
         crime = ensure_geoid_from_latlon(crime, CANDS["CENSUS"])
         crime["GEOID"] = normalize_geoid(crime["GEOID"], tlen)
 
-    # 5) DATE kolonu (olay saati ÖNEMSİZ; datetime → date)
     if "date" in crime.columns:
         crime["date"] = to_date(crime["date"])
     else:
         dt_col = next((c for c in ["datetime","event_datetime","occurred_at","timestamp"] if c in crime.columns), None)
         if dt_col is None:
-            raise ValueError("❌ sf_crime.csv içinde 'date' veya 'datetime' benzeri bir kolon yok.")
+            raise ValueError("❌ crime dosyasında 'date' veya 'datetime' benzeri bir kolon yok.")
         crime["date"] = to_date(crime[dt_col])
 
-    # 6) EVENTS_DAILY: (GEOID, date) ile 911 join
     keys = ["GEOID","date"]
     events_daily = crime.merge(fr911_daily, on=keys, how="left")
     for c in ["n_911_day","n_911_last1d","n_911_last3d","n_911_last7d"]:
         if c in events_daily.columns:
             events_daily[c] = pd.to_numeric(events_daily[c], errors="coerce").fillna(0)
 
-    # 7) GRID_DAILY: olayları GEOID×date topla + 911 özetlerini eşleştir
-    #    - crime_count_day: o gün GEOID içindeki olay sayısı
-    #    - Y_day: (crime_count_day > 0) ikili etiket (işine yarıyorsa)
     agg_crime = (events_daily
                  .groupby(keys, as_index=False)
                  .size()
@@ -283,7 +280,6 @@ def main():
         if c in grid_daily.columns:
             grid_daily[c] = pd.to_numeric(grid_daily[c], errors="coerce").fillna(0)
 
-    # 8) Yaz
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out_events = OUTPUT_DIR / OUTPUT_EVENTS_DAILY
     out_grid   = OUTPUT_DIR / OUTPUT_GRID_DAILY
@@ -291,7 +287,6 @@ def main():
     safe_save_csv(events_daily, str(out_events))
     safe_save_csv(grid_daily,   str(out_grid))
 
-    # 9) Kısa önizleme
     try:
         log("—— fr_crime_events_daily.csv — örnek —")
         cols = ["GEOID","date","n_911_day","n_911_last1d","n_911_last3d","n_911_last7d"]
