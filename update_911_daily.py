@@ -161,6 +161,16 @@ def read_911_daily(fr911_candidates, census_candidates) -> pd.DataFrame:
 def main():
     safe_unzip(ARTIFACT_ZIP, ARTIFACT_DIR)
     cands = build_candidates()
+    # 1) Adayların varlık durumunu göster (teşhis için)
+    print("== Candidates ==")
+    for key, arr in cands.items():
+        print(f"[{key}]")
+        for p in arr:
+            try:
+                exists = Path(p).exists()
+            except Exception:
+                exists = False
+            print("  -", p, "OK" if exists else "")
 
     # Teşhis: tüm aday listeleri ve varlık durumu
     for k, arr in cands.items():
