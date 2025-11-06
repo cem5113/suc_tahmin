@@ -1,7 +1,7 @@
-# scripts/enrich_police_gov_06_to_07.py
+# update_police_gov.py
 # Amaç: Suç verisini POLICE & GOVERNMENT noktalarıyla YALNIZCA GEOID üzerinden zenginleştirmek.
 # Not: 'date' hiç kullanılmaz; GEOID → centroid (veya lat/lon ortalaması) → en yakın polis/gov mesafesi hesaplanır.
-# Çıktı, giriş dosyasına göre 06→07 veya 08→09 olarak belirlenir; aksi halde *_pg.csv uzantısı kullanılır.
+# Çıktı, giriş dosyasına göre 06→07 olarak belirlenir; aksi halde *_pg.csv uzantısı kullanılır.
 
 import os
 from pathlib import Path
@@ -110,10 +110,7 @@ BASE_DIR  = "crime_prediction_data"
 Path(BASE_DIR).mkdir(exist_ok=True)
 
 CRIME_INPUT_CANDIDATES = [
-    os.path.join(BASE_DIR, "sf_crime_06.csv"),   # klasik akış: 06 -> 07
-    os.path.join(BASE_DIR, "sf_crime_08.csv"),   # yeni akış: 08 -> 09
-    os.path.join(BASE_DIR, "sf_crime_09.csv"),   # yeniden enrich senaryosu
-    os.path.join(BASE_DIR, "sf_crime.csv"),      # fallback
+    os.path.join(BASE_DIR, "sf_crime_06.csv"),   
 ]
 
 POLICE_CANDIDATES = [
@@ -141,8 +138,6 @@ if CRIME_IN is None:
 # Çıktı kuralı (date kullanılmaz; sadece dosya ismine bakar)
 if CRIME_IN.endswith("sf_crime_06.csv"):
     CRIME_OUT = os.path.join(BASE_DIR, "sf_crime_07.csv")
-elif CRIME_IN.endswith("sf_crime_08.csv"):
-    CRIME_OUT = os.path.join(BASE_DIR, "sf_crime_09.csv")
 else:
     stem = Path(CRIME_IN).stem  # sf_crime → sf_crime_pg.csv
     CRIME_OUT = os.path.join(BASE_DIR, f"{stem}_pg.csv")
