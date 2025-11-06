@@ -82,38 +82,24 @@ def is_lfs_pointer_file(p: Path) -> bool:
 # ✅ Panel ile tutarlılık: varsayılan GEOID uzunluğu 11
 DEFAULT_GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
 
-# Çalışma dizini ENV ile yönetilebilir — normalize + depo adıyla çakışmayı önle
-_raw_base = os.getenv("CRIME_DATA_DIR", "crime_prediction_data").strip().strip("/\\")
-repo_leaf = Path.cwd().name  # Actions: /work/<repo>/<repo>
-if not os.path.isabs(_raw_base) and Path(_raw_base).name == repo_leaf:
-    _raw_base = "."  # aynı isimle alt klasör açma
-BASE_DIR = str(Path(_raw_base).resolve()) if _raw_base != "." else "."
+# Çalışma dizini ENV ile yönetilebilir
+BASE_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
 Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
-
-log(f"📂 BASE_DIR = {Path(BASE_DIR).resolve()}")
 
 # 911 summary dosya adları
 LOCAL_NAME = "sf_911_last_5_year.csv"
-OUT_DIR = Path(os.getenv("CRIME_DATA_DIR", str(Path(BASE_DIR)))).resolve()
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-local_summary_path = OUT_DIR / LOCAL_NAME
+local_summary_path = Path(BASE_DIR) / LOCAL_NAME
 Y_NAME = "sf_911_last_5_year_y.csv"
-y_summary_path     = OUT_DIR / Y_NAME
+y_summary_path = Path(BASE_DIR) / Y_NAME
 
-# Crime grid (yalnızca BASE_DIR ve kök)
+# Crime grid
 CRIME_GRID_CANDIDATES = [
     Path(BASE_DIR) / "sf_crime_grid_full_labeled.csv",
     Path("./sf_crime_grid_full_labeled.csv"),
 ]
-merged_output_path = Path(os.getenv("DAILY_OUT", str(Path(BASE_DIR) / "sf_crime_01.csv")))
-if not merged_output_path.is_absolute():
-    merged_output_path = Path(BASE_DIR) / merged_output_path.name
+merged_output_path = Path(BASE_DIR) / "sf_crime_01.csv"
 
-# (opsiyonel ama faydalı: env’i ve hedefi loglayın)
-log(f"🧾 DAILY_OUT seen as: {os.getenv('DAILY_OUT', '(unset)')}")
-log(f"📝 Writing sf_crime_01 → {merged_output_path}")
-
-# Census blocks (komşu için — yalnızca BASE_DIR ve kök)
+# Census blocks (komşu için)
 CENSUS_CANDIDATES = [
     Path(BASE_DIR) / "sf_census_blocks_with_population.geojson",
     Path("./sf_census_blocks_with_population.geojson"),
@@ -204,7 +190,7 @@ def try_small_request(params, headers):
 def _load_blocks() -> tuple[gpd.GeoDataFrame, int]:
     census_path = next((p for p in CENSUS_CANDIDATES if p.exists()), None)
     if census_path is None:
-        raise FileNotFoundError("❌ Nüfus blokları GeoJSON yok (BASE_DIR veya kök dizinde).")
+        raise FileNotFoundError("❌ Nüfus blokları GeoJSON yok (crime_prediction_data/ veya kök).")
     gdf_blocks = gpd.read_file(census_path)
     if "GEOID" not in gdf_blocks.columns:
         cand = [c for c in gdf_blocks.columns if str(c).upper().startswith("GEOID")]
@@ -326,9 +312,9 @@ def summary_from_local(path: Path | str, min_date=None) -> pd.DataFrame:
 def ensure_local_911_base() -> Optional[Path]:
     """
     Tercih sırası:
-      1) BASE_DIR/ sf_911_last_5_year_y.csv (önceki full pipeline’dan)
-      2) BASE_DIR/ sf_911_last_5_year.csv
-      3) kök ./ alternatifleri
+      1) artifact/çalışma alanından sf_911_last_5_year_y.csv (önceki full pipeline’dan)
+      2) yerel sf_911_last_5_year.csv
+      3) yoksa None (release fallback kullanılacak)
     """
     y_candidates = [
         Path(BASE_DIR) / "sf_911_last_5_year_y.csv",
@@ -642,7 +628,7 @@ _hr_unique = (final_911[["GEOID","hr_key","date","911_request_count_hour_range"]
               .groupby(["GEOID","hr_key","date"], as_index=False, observed=True)["911_request_count_hour_range"].sum())
 _hr_unique = _hr_unique.rename(columns={"911_request_count_hour_range":"hr_cnt"}).sort_values(["GEOID","hr_key","date"]).reset_index(drop=True)
 
-for W in (3, 7):
+for W in ROLL_WINDOWS:
     _day_unique[f"911_geo_last{W}d"] = (
         _day_unique.groupby("GEOID")["daily_cnt"].transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
     ).astype("float32")
@@ -687,7 +673,7 @@ if neighbors_df is not None and not neighbors_df.empty:
     day_nbr = neighbors_df.merge(_day_unique.rename(columns={"GEOID":"nbr"}), on="nbr", how="left")
     day_nbr = day_nbr.groupby(["GEOID","date"], as_index=False, observed=True)["daily_cnt"].sum().rename(columns={"daily_cnt":"nbr_daily_cnt"})
     _neighbor_roll = day_nbr.sort_values(["GEOID","date"]).reset_index(drop=True)
-    for W in (3, 7):
+    for W in ROLL_WINDOWS:
         _neighbor_roll[f"911_neighbors_last{W}d"] = (
             _neighbor_roll.groupby("GEOID")["nbr_daily_cnt"].transform(lambda s: s.rolling(W, min_periods=1).sum().shift(1))
         ).astype("float32")
@@ -699,11 +685,11 @@ if neighbors_df is not None and not neighbors_df.empty:
 _enriched = final_911.merge(_hr_unique, on=["GEOID","hr_key","date"], how="left")
 _enriched = _enriched.merge(_day_unique, on=["GEOID","date"], how="left")
 if _neighbor_roll is not None:
-    _enriched = _enriched.merge(_neighbor_roll[["GEOID","date"] + [f"911_neighbors_last{W}d" for W in (3, 7)]], on=["GEOID","date"], how="left")
+    _enriched = _enriched.merge(_neighbor_roll[["GEOID","date"] + [f"911_neighbors_last{W}d" for W in ROLL_WINDOWS]], on=["GEOID","date"], how="left")
 
 crime_grid_path = next((p for p in CRIME_GRID_CANDIDATES if p.exists()), None)
 if crime_grid_path is None:
-    raise FileNotFoundError("❌ Suç grid yok: BASE_DIR/sf_crime_grid_full_labeled.csv (veya kökte).")
+    raise FileNotFoundError("❌ Suç grid yok: crime_prediction_data/sf_crime_grid_full_labeled.csv (veya kökte).")
 crime = pd.read_csv(crime_grid_path, dtype={"GEOID": str}, low_memory=False)
 log(f"📥 Suç grid yüklendi: {len(crime)} satır ({crime_grid_path})")
 log_shape(crime, "CRIME grid — ham")
@@ -730,7 +716,7 @@ else:
         "911_request_count_daily(before_24_hours)",
         "911_geo_last3d","911_geo_last7d",
         "911_geo_hr_last3d","911_geo_hr_last7d",
-    ] + ([f"911_neighbors_last{W}d" for W in (3, 7)] if _neighbor_roll is not None else [])
+    ] + ([f"911_neighbors_last{W}d" for W in ROLL_WINDOWS] if _neighbor_roll is not None else [])
     cal_agg = (_enriched.groupby(cal_keys, as_index=False, observed=True)[agg_cols]
                         .median(numeric_only=True))
     if "day_of_week" not in crime.columns:
@@ -750,7 +736,7 @@ fill_cols = [
     "911_request_count_daily(before_24_hours)",
     "911_geo_last3d","911_geo_last7d",
     "911_geo_hr_last3d","911_geo_hr_last7d",
-] + ([f"911_neighbors_last{W}d" for W in (3, 7)] if _neighbor_roll is not None else [])
+] + ([f"911_neighbors_last{W}d" for W in ROLL_WINDOWS] if _neighbor_roll is not None else [])
 for c in fill_cols:
     if c in merged.columns:
         merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0).astype("int32")
