@@ -2,7 +2,7 @@ name: Full SF Crime Pipeline
 
 on:
   schedule:
-    - cron: "0 14,15 * * *"   # SF 07:00: 14:00 UTC (yaz), 15:00 UTC (kış)
+    - cron: "0 14,15 * * *" # SF 07:00: 14:00 UTC (yaz), 15:00 UTC (kış)
   workflow_dispatch:
     inputs:
       persist:
@@ -14,7 +14,7 @@ on:
         description: "Manuel tetiklemede 07:00 kapısını YOK SAY"
         type: boolean
         default: true
-      top_k:
+      top_k: 
         description: "Stacking: her saat dilimi için önerilecek GEOID sayısı"
         default: "50"
 
@@ -27,22 +27,22 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CRIME_DATA_DIR: crime_prediction_data
+  CRIME_DATA_DIR: ${{ github.workspace }}
   GEOID_LEN: "11"
 
-  BACKFILL_DAYS: "0"
+  BACKFILL_DAYS: "0"   # ← Mevcut satır KALDI; override aşağıda yapılıyor
   SF_SODA_FETCH_STRATEGY: ${{ vars.SF_SODA_FETCH_STRATEGY || 'bulk' }}
-  SF_SODA_PAGE_LIMIT:    ${{ vars.SF_SODA_PAGE_LIMIT    || '50000' }}
-  SF_SODA_MAX_PAGES:     ${{ vars.SF_SODA_MAX_PAGES     || '100' }}
+  SF_SODA_PAGE_LIMIT: ${{ vars.SF_SODA_PAGE_LIMIT || '50000' }}
+  SF_SODA_MAX_PAGES: ${{ vars.SF_SODA_MAX_PAGES || '100' }}
 
-  SF911_API_URL:       ${{ vars.SF911_API_URL       || 'https://data.sfgov.org/resource/2zdj-bwza.json' }}
+  SF911_API_URL: ${{ vars.SF911_API_URL || 'https://data.sfgov.org/resource/2zdj-bwza.json' }}
   SF911_AGENCY_FILTER: ${{ vars.SF911_AGENCY_FILTER || 'agency like "%Police%"' }}
-  SF911_API_TOKEN:     ${{ secrets.SF911_API_TOKEN }}
-  SOCS_APP_TOKEN:      ${{ secrets.SOCS_APP_TOKEN }}
+  SF911_API_TOKEN: ${{ secrets.SF911_API_TOKEN }}
+  SOCS_APP_TOKEN: ${{ secrets.SOCS_APP_TOKEN }}
 
   PATROL_TOP_K: ${{ github.event.inputs.top_k || '50' }}
 
-  PATROL_HORIZON_DAYS: "3"
+  PATROL_HORIZON_DAYS: "1"
   WX_LOCATION: "san francisco"
   WX_UNIT: "us"
 
@@ -54,7 +54,6 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-
       - name: Checkout (with LFS)
         uses: actions/checkout@v4
         with:
@@ -70,6 +69,12 @@ jobs:
 
       - name: Ensure data dir
         run: mkdir -p "${CRIME_DATA_DIR}"
+
+      - name: Echo paths
+        run: |
+          pwd
+          echo "CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+          ls -lah "${CRIME_DATA_DIR}" || true
 
       # --- SF 07:00 kapısı (TZ ayarla + saat kontrolü) ---
       - name: Set runner timezone to America/Los_Angeles
@@ -104,6 +109,25 @@ jobs:
             echo "- Çalışma zamanı (SF): **$(date)**"
             echo "- Not: 07:00 kapısı nedeniyle adımlar atlandı. Manuel tetiklerken \`force=true\` verin."
           } >> $GITHUB_STEP_SUMMARY
+
+      # ================== EK: ENV BOOTSTRAP (mevcut satırları değiştirmeden override) ==================
+      - name: Bootstrap env overrides (BACKFILL & FRESHNESS)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          VARS_BACKFILL: ${{ vars.BACKFILL_DAYS }}           # org/repo → Settings → Variables → BACKFILL_DAYS
+          VARS_FRESH_LAG: ${{ vars.FRESHNESS_SF_MAX_LAG_DAYS }}
+        run: |
+          set -euo pipefail
+          # BACKFILL_DAYS öncelik: vars.BACKFILL_DAYS > mevcut env BACKFILL_DAYS > 30
+          BF="${VARS_BACKFILL:-${BACKFILL_DAYS:-30}}"
+          echo "BACKFILL_DAYS=${BF}" >> "$GITHUB_ENV"
+          echo "Resolved BACKFILL_DAYS=${BF}"
+
+          # FRESHNESS_SF_MAX_LAG_DAYS: vars > mevcut > 2
+          FL="${VARS_FRESH_LAG:-${FRESHNESS_SF_MAX_LAG_DAYS:-2}}"
+          echo "FRESHNESS_SF_MAX_LAG_DAYS=${FL}" >> "$GITHUB_ENV"
+          echo "Resolved FRESHNESS_SF_MAX_LAG_DAYS=${FL}"
+      # =================================================================================================
 
       - name: System deps for rtree (optional)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -142,7 +166,7 @@ jobs:
       - name: 00) Prefetch sf_crime_y.csv from previous successful run (artifact)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
-          GH_TOKEN: ${{ github.token }}              # gh CLI bunu otomatik kullanır; login YOK
+          GH_TOKEN: ${{ github.token }} # gh CLI bunu otomatik kullanır; login YOK
           ARTIFACT_NAME: sf-crime-pipeline-output
           WORKFLOW_NAME: Full SF Crime Pipeline
           TARGET_FILE: sf_crime_y.csv
@@ -213,14 +237,12 @@ jobs:
         with:
           path: ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
           key: 911-${{ runner.os }}-${{ github.run_number }}
-          restore-keys: |
-            911-${{ runner.os }}-
 
       # ✅ GH auth: login YOK (GH_TOKEN var)
       - name: Prefetch sf_911_last_5_year_y.csv from previous successful run (artifact)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
-          GH_TOKEN: ${{ github.token }}   # gh için non-interactive auth
+          GH_TOKEN: ${{ github.token }} # gh için non-interactive auth
           ARTIFACT_NAME: sf-crime-pipeline-output
           WORKFLOW_NAME: Full SF Crime Pipeline
           TARGET_FILE: sf_911_last_5_year_y.csv
@@ -273,17 +295,53 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
-          SF_SODA_PAGE_LIMIT:    ${{ env.SF_SODA_PAGE_LIMIT }}
-          SF_SODA_MAX_PAGES:     ${{ env.SF_SODA_MAX_PAGES }}
-          SF911_API_URL:         ${{ env.SF911_API_URL }}
-          SF911_AGENCY_FILTER:   ${{ env.SF911_AGENCY_FILTER }}
-          SF911_API_TOKEN:       ${{ env.SF911_API_TOKEN }}
-          SOCS_APP_TOKEN:        ${{ env.SOCS_APP_TOKEN }}
-          BACKFILL_DAYS:         ${{ env.BACKFILL_DAYS }}
+          SF_SODA_PAGE_LIMIT: ${{ env.SF_SODA_PAGE_LIMIT }}
+          SF_SODA_MAX_PAGES: ${{ env.SF_SODA_MAX_PAGES }}
+          SF911_API_URL: ${{ env.SF911_API_URL }}
+          SF911_AGENCY_FILTER: ${{ env.SF911_AGENCY_FILTER }}
+          SF911_API_TOKEN: ${{ env.SF911_API_TOKEN }}
+          SOCS_APP_TOKEN: ${{ env.SOCS_APP_TOKEN }}
+          BACKFILL_DAYS: ${{ env.BACKFILL_DAYS }}
+          DAILY_OUT: ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
         run: |
           set -e
           python -u update_911.py
+          
+      - name: 02.fix) Move root-level sf_crime_01.csv into CRIME_DATA_DIR if present
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+      
+          # 🔍 debug
+          pwd
+          echo "CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+      
+          SRC="sf_crime_01.csv"
+          DST="${CRIME_DATA_DIR}/sf_crime_01.csv"
+      
+          if [ -f "$SRC" ]; then
+            if [ "$(realpath "$SRC")" -ef "$(realpath "$DST")" ]; then
+              echo "ℹ️ sf_crime_01.csv zaten doğru yerde (same file); taşınmadı."
+            else
+              mkdir -p "${CRIME_DATA_DIR}"
+              mv -f "$SRC" "$DST"
+              echo "✅ Taşındı: $SRC → $DST"
+            fi
+          else
+            echo "ℹ️ Root'ta sf_crime_01.csv yok; adım atlandı."
+          fi
 
+      - name: 02.1) Verify sf_crime_01 presence & head
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          D="${CRIME_DATA_DIR}"
+          F1="${D}/sf_crime_01.csv"
+          echo "→ Beklenen dosya: $F1"
+          [ -f "$F1" ] || { echo "❌ sf_crime_01.csv yok! update_911.py loglarını kontrol et (DAILY_OUT doğru mu?)."; exit 2; }
+          echo "---- sf_crime_01.csv (head) ----"
+          head -n 5 "$F1" || true
+          
       - name: Restore 311 summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         uses: actions/cache@v4
@@ -394,6 +452,26 @@ jobs:
           echo "---- sf_population.csv (head) ----"
           head -n 5 "$DEST" || true
 
+      - name: 03.1) Verify sf_crime_01/02 presence & heads
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          D="${CRIME_DATA_DIR}"
+          F1="${D}/sf_crime_01.csv"
+          F2="${D}/sf_crime_02.csv"
+
+          echo "→ Beklenen dosyalar:"
+          echo "  - $F1"
+          echo "  - $F2"
+
+          [ -f "$F1" ] || { echo "❌ sf_crime_01.csv yok! update_911.py çıktısını kontrol et."; exit 2; }
+          [ -f "$F2" ] || { echo "❌ sf_crime_02.csv yok! update_311.py DAILY_IN/DAILY_OUT ve loglarını kontrol et."; exit 3; }
+
+          echo "---- sf_crime_01.csv (head) ----"
+          head -n 5 "$F1" || true
+          echo "---- sf_crime_02.csv (head) ----"
+          head -n 5 "$F2" || true
+
       - name: (Opsiyonel) sf_population.csv başlık normalize
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
@@ -421,10 +499,10 @@ jobs:
       - name: 04) Nüfus → sf_crime_03.csv (demografi + nüfus)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
-          POPULATION_PATH:  ${{ env.CRIME_DATA_DIR }}/sf_population.csv
+          POPULATION_PATH: ${{ env.CRIME_DATA_DIR }}/sf_population.csv
           CENSUS_GEO_LEVEL: ${{ env.CENSUS_GEO_LEVEL }}
-          ACS_YEAR:         ${{ env.ACS_YEAR }}
-          DEMOG_WHITELIST:  ${{ env.DEMOG_WHITELIST }}
+          ACS_YEAR: ${{ env.ACS_YEAR }}
+          DEMOG_WHITELIST: ${{ env.DEMOG_WHITELIST }}
         run: |
           set -e
           echo "---- update_population.py (ilk 30 satır) ----"
@@ -442,14 +520,38 @@ jobs:
         run: |
           set -e
           python -u update_train.py
+      
+      - name: POI enrich (GEOID-only)
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          CRIME_IN:  "${{ env.CRIME_DATA_DIR }}/sf_crime_05.csv"
+          CRIME_OUT: "${{ env.CRIME_DATA_DIR }}/sf_crime_06.csv"
+        run: |
+          set -euo pipefail
+          echo "CWD=$(pwd)"
+          echo "CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+          ls -lah "${CRIME_DATA_DIR}" || true
+          ls -lah "${CRIME_DATA_DIR}/sf_crime_05.csv" || { echo "❌ sf_crime_05.csv yok"; exit 2; }
+      
+          if [ -f update_poi.py ]; then
+            python -u update_poi.py
+          elif [ -f pipeline_make_sf_crime_06.py ]; then
+            python -u pipeline_make_sf_crime_06.py
+          else
+            echo "POI adımı bulunamadı"; exit 2
+          fi
 
-      - name: 07) POI zenginleştirme → sf_crime_06.csv
+      - name: 07.9) Assert sf_crime_06 presence (before police/gov)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
-          set -e
-          if [ -f update_poi.py ]; then python -u update_poi.py;
-          elif [ -f pipeline_make_sf_crime_06.py ]; then python -u pipeline_make_sf_crime_06.py;
-          else echo "POI adımı bulunamadı"; exit 2; fi
+          set -euo pipefail
+          D="${CRIME_DATA_DIR}"
+          F="${D}/sf_crime_06.csv"
+          echo "→ Beklenen: $F"
+          ls -lah "$D" | sed -n '1,120p' || true
+          [ -f "$F" ] || { echo "❌ sf_crime_06.csv yok! POI adımının DAILY_OUT/CRIME_OUT loglarını kontrol et."; exit 2; }
+          echo "---- sf_crime_06.csv (head) ----"
+          head -n 5 "$F" || true
 
       - name: 08) Polis & Devlet binaları → sf_crime_07.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -459,7 +561,7 @@ jobs:
           elif [ -f scripts/enrich_police_gov_06_to_07.py ]; then python -u scripts/enrich_police_gov_06_to_07.py;
           else echo "Polis/Gov adımı bulunamadı"; exit 2; fi
 
-      - name: 09) Hava durumu → sf_crime_08.csv
+      - name: 09) Hava durumu — sadece update
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
@@ -470,101 +572,39 @@ jobs:
           else
             echo "❌ Weather script not found"; exit 2
           fi
-          echo "sf_crime_08.csv — ilk 5 satır:"
-          head -n 5 "${CRIME_DATA_DIR}/sf_crime_08.csv" || head -n 5 sf_crime_08.csv || true
-
-      # 09.9) sf_crime_08.csv dosyasını CRIME_DATA_DIR altına yerleştir
-      - name: Normalize sf_crime_08 into CRIME_DATA_DIR
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          DEST="${CRIME_DATA_DIR}/sf_crime_08.csv"
-          mkdir -p "${CRIME_DATA_DIR}"
-          FOUND=""
-
-          for p in \
-            "crime_prediction_data/sf_crime_08.csv" \
-            "crime_data/sf_crime_08.csv" \
-            "sf_crime_08.csv" \
-            "outputs/sf_crime_08.csv"
-          do
-            if [ -f "$p" ]; then
-              if [ -e "$DEST" ] && [ "$p" -ef "$DEST" ]; then
-                echo "ℹ️ Zaten hedefte: $DEST"
-              else
-                cp -f "$p" "$DEST"
-                echo "✅ Copied: $p → $DEST"
-              fi
-              FOUND="yes"
-              break
-            fi
-          done
-
-          if [ -z "$FOUND" ]; then
-            echo "❌ sf_crime_08.csv not found in known locations"
-            exit 2
-          fi
-          echo "---- sf_crime_08.csv (head) ----"
-          head -n 5 "$DEST" || true
+          echo "sf_weather_5years.csv — ilk 5 satır:"
+          head -n 5 "${CRIME_DATA_DIR}/sf_weather_5years.csv" || head -n 5 sf_weather_5years.csv || true
 
       - name: Normalize grid outputs (put under CRIME_DATA_DIR)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p "${CRIME_DATA_DIR}"
+          DST="${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"
           CANDIDATES=(
             "sf_crime_grid_full_labeled.csv"
             "data/sf_crime_grid_full_labeled.csv"
             "outputs/sf_crime_grid_full_labeled.csv"
-            "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"
+            # "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"  # ← KALDIRILDI
           )
           FOUND=""
           for p in "${CANDIDATES[@]}"; do
             if [ -f "$p" ]; then
-              cp -f "$p" "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"
-              echo "✅ Grid kopyalandı: $p → ${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"
+              # Eğer zaten aynı dosyaysa kopyalama
+              if [ -e "$DST" ] && [ "$p" -ef "$DST" ]; then
+                echo "ℹ️ Grid zaten doğru yerde: $DST"
+                FOUND="yes"
+                break
+              fi
+              cp -f "$p" "$DST"
+              echo "✅ Grid kopyalandı: $p → $DST"
               FOUND="yes"
               break
             fi
           done
-          if [ -z "$FOUND" ]; then
+          if [ -z "${FOUND}" ]; then
             echo "⚠️ sf_crime_grid_full_labeled.csv bulunamadı; stacking bazı görünümleri atlayabilir."
           fi
-
-      - name: 10) sf_crime_09 üretimi (common.py)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -e
-          python - <<'PY'
-          import os
-          import pandas as pd
-          from pathlib import Path
-          from scripts.common import clean_and_save_crime_09
-
-          CRIME_DIR = os.getenv("CRIME_DATA_DIR","crime_prediction_data")
-          candidates = [
-              Path(CRIME_DIR) / "sf_crime_08.csv",
-              Path("crime_prediction_data") / "sf_crime_08.csv",
-              Path("crime_data") / "sf_crime_08.csv",
-              Path("sf_crime_08.csv"),
-              Path("outputs") / "sf_crime_08.csv",
-          ]
-          src_path = next((p for p in candidates if p.exists()), None)
-          if src_path is None:
-              raise FileNotFoundError("sf_crime_08.csv not found in known locations")
-          src = str(src_path)
-          dst = str(Path(CRIME_DIR)/"sf_crime_09.csv")
-
-          clean_and_save_crime_09(src, dst)
-          print("✅ sf_crime_09 hazır →", dst)
-          try:
-              df = pd.read_csv(dst, low_memory=False)
-              with pd.option_context("display.max_columns", None, "display.width", 2000):
-                  print("📄 sf_crime_09.csv — ilk 5 satır:")
-                  print(df.head(5).to_string(index=False))
-          except Exception as e:
-              print(f"⚠️ Önizleme okunamadı: {e}")
-          PY
 
       - name: 10.5) neighbors.csv (kullan/normalize/üret + kalite kontrol)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -782,7 +822,7 @@ jobs:
 
           echo "neighbors.csv (ilk 10 satır):"
           head -n 10 "${DEST}" || true
-
+          
       - name: 11) Install ML deps for stacking
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
@@ -796,23 +836,34 @@ jobs:
           STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
           ENABLE_SPATIAL_TE: "1"
           TE_ALPHA: "50"
-          NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+          NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
           ENABLE_TE_ABLATION: "1"
           ABLASYON_BASIS: "ohe"
+          PATROL_HORIZON_DAYS: ${{ env.PATROL_HORIZON_DAYS }}
+          PATROL_TOP_K: ${{ env.PATROL_TOP_K }}
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -e
+          echo "HORIZON=${PATROL_HORIZON_DAYS}, TOP_K=${PATROL_TOP_K}"
           if [ ! -f "${STACKING_DATASET}" ]; then
             echo "❌ STACKING_DATASET bulunamadı: ${STACKING_DATASET}"
             exit 2
           fi
           python -u stacking_risk_pipeline.py
-
-      - name: 13) Install extra deps for patrol
+      
+      - name: 12.1) Inspect risk_hourly dates
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
-          python -m pip install -U requests tzdata
+          echo "---- risk_hourly.csv (dates) ----"
+          if [ -f "${CRIME_DATA_DIR}/risk_hourly.csv" ]; then
+            cut -d, -f1 "${CRIME_DATA_DIR}/risk_hourly.csv" | head -n 30
+            echo "---- unique dates (summary) ----"
+            cut -d, -f1 "${CRIME_DATA_DIR}/risk_hourly.csv" | tail -n +2 | sort | uniq -c
+          else
+            echo "risk_hourly.csv bulunamadı"
+          fi
 
-      - name: 14) Produce yarin.csv & week.csv (Visual Crossing)
+      - name: 13) Produce yarin.csv & week.csv (Visual Crossing)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           VISUAL_CROSSING_API_KEY: ${{ secrets.VISUAL_CROSSING_API_KEY }}
@@ -881,7 +932,7 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          PATROL_TOP_K:   ${{ env.PATROL_TOP_K }}
+          PATROL_TOP_K: ${{ env.PATROL_TOP_K }}
           PATROL_HORIZON_DAYS: ${{ env.PATROL_HORIZON_DAYS }}
         run: |
           set -e
@@ -890,7 +941,7 @@ jobs:
           echo "---- patrol_recs_multi.csv (head) ----"
           head -n 20 "${CRIME_DATA_DIR}/patrol_recs_multi.csv" || true
 
-      - name: 16) Quick preview (stacking outputs)
+      - name: 14) Quick preview (stacking outputs)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           echo "risk_hourly* (ilk 5)"
@@ -900,7 +951,7 @@ jobs:
           echo "metrics_* (ilk 5)"
           head -n 5 ${CRIME_DATA_DIR}/metrics_*.csv 2>/dev/null || true
 
-      # 17) CSV → Parquet için bağımlılıklar
+      # 15) CSV → Parquet için bağımlılıklar
       - name: Install converter deps
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
@@ -918,6 +969,112 @@ jobs:
             --output parquet_out/ \
             --compression zstd \
             --stats
+
+      # ======================= NEW: FRESHNESS GUARDS & METADATA =======================
+      - name: Emit single-row “latest date” CSVs (with header)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pandas as pd
+          from pathlib import Path
+
+          base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
+
+          # Hedef dosyalar + olası tarih kolonları
+          targets = [
+            ("sf_crime.csv",                    ["incident_datetime","datetime","date"]),
+            ("sf_911_last_5_year.csv",          ["call_datetime","incident_datetime","date"]),
+            ("sf_311_last_5_years.csv",         ["requested_datetime","opened_date","date"]),
+            ("sf_weather_5years.csv",           ["date"]),
+            ("sf_crime_grid_full_labeled.csv",  ["date"]),
+            ("risk_hourly.csv",                 ["date"]),
+          ]
+
+          overview = []
+          for fname, candidates in targets:
+            fpath = base / fname
+            if not fpath.exists():
+              continue
+            try:
+              df_head = pd.read_csv(fpath, nrows=5000, low_memory=False)
+              rowcount = sum(1 for _ in open(fpath, 'r', encoding='utf-8', errors='ignore')) - 1
+            except Exception:
+              continue
+
+            col = next((c for c in candidates if c in df_head.columns), None)
+            if col is None:
+              continue
+
+            mx = pd.to_datetime(df_head[col], errors="coerce").dt.date.max()
+            if pd.isna(mx):
+              continue
+
+            latest_path = fpath.with_name(fpath.stem + "_latest.csv")
+            pd.DataFrame([{col: mx.isoformat()}]).to_csv(latest_path, index=False)
+
+            overview.append({
+              "file": fname,
+              "date_column": col,
+              "max_date": mx.isoformat(),
+              "rows_total_approx": rowcount if rowcount >= 0 else ""
+            })
+
+          if overview:
+            pd.DataFrame(overview, columns=["file","date_column","max_date","rows_total_approx"]).to_csv(base / "latest_overview.csv", index=False)
+          PY
+
+          echo "— latest_overview.csv (head) —"
+          head -n 10 "${CRIME_DATA_DIR}/latest_overview.csv" || true
+
+          echo "— produced *_latest.csv —"
+          ls -1 "${CRIME_DATA_DIR}"/*_latest.csv 2>/dev/null || true
+
+      - name: Sanity packlist (mtime + head)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          echo "== PACK CANDIDATES (mtime) =="
+          while IFS= read -r p; do
+            [ -f "$p" ] && printf "%-48s  %s\n" "$(basename "$p")" "$(stat -c %y "$p" 2>/dev/null || stat -f %Sm "$p")"
+          done <<EOF
+          ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_weather_5years.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
+          ${{ env.CRIME_DATA_DIR }}/risk_hourly.csv
+          EOF
+
+          echo "== quick heads =="
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_crime.csv" || true
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv" || true
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv" || true
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv" || true
+
+      - name: Write build info
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "run_number=${GITHUB_RUN_NUMBER}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "commit=${GITHUB_SHA}"
+            echo "branch=${GITHUB_REF_NAME}"
+            echo "built_at_utc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          } > "${CRIME_DATA_DIR}/_build_info.txt"
+          cat "${CRIME_DATA_DIR}/_build_info.txt"
+
+      - name: Clobber duplicates outside CRIME_DATA_DIR (optional)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          find . -type f -name 'sf_911_last_5_year*.csv' ! -path "./${{ env.CRIME_DATA_DIR }}/*" -delete || true
+          find . -type f -name 'sf_311_last_5_years*.csv' ! -path "./${{ env.CRIME_DATA_DIR }}/*" -delete || true
+      # ======================= /NEW =======================
 
       # Parquet'leri ayrı artifact olarak yükle
       - name: Upload Parquet artifact (opsiyonel)
@@ -938,7 +1095,6 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
             ${{ env.CRIME_DATA_DIR }}/sf_population.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_09.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_07.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_06.csv
@@ -968,68 +1124,3 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/week.csv
           if-no-files-found: warn
           retention-days: 14
-
-      - name: Commit & push (opsiyonel)
-        if: ${{ steps.gate.outputs.proceed == 'true' && github.event_name == 'workflow_dispatch' && github.event.inputs.persist == 'commit' }}
-        run: |
-          set -e
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "🔄 Full pipeline + stacking outputs [skip ci]" || echo "No changes"
-          git push || echo "Nothing to push"
-
-      # --- SENDGRID HTTP: Başarı bildirimi ---
-      - name: Notify success (SendGrid HTTP)
-        if: ${{ steps.gate.outputs.proceed == 'true' && success() }}
-        env:
-          SG_KEY: ${{ secrets.SENDGRID_API_KEY }}
-        run: |
-          if [ -z "$SG_KEY" ]; then echo "❌ SENDGRID_API_KEY yok/boş"; exit 1; fi
-          curl -s -X POST https://api.sendgrid.com/v3/mail/send \
-            -H "Authorization: Bearer $SG_KEY" \
-            -H "Content-Type: application/json" \
-            -d @- <<'EOF' -o /dev/stderr -w "\nHTTP:%{http_code}\n"
-          {
-            "personalizations":[ {"to":[ {"email":"cem5113@hotmail.com"}, {"email":"cemeroglu5113@gmail.com"} ]} ],
-            "from":{"email":"${{ secrets.SG_FROM }}","name":"SF Crime Pipeline"},
-            "reply_to":{"email":"cem5113@hotmail.com","name":"Cem"},
-            "subject":"✅ SF Crime Pipeline + Stacking başarı (#${{ github.run_number }})",
-            "categories":["sf-crime-pipeline","success"],
-            "content":[{"type":"text/html","value":"<p>Pipeline başarıyla tamamlandı.</p><ul><li>Run #: <b>${{ github.run_number }}</b></li><li>Run ID: <b>${{ github.run_id }}</b></li><li>Ref: <code>${{ github.ref }}</code></li><li>Runner local time (SF): <code>${{ env.RUN_LOCAL_TIME }}</code></li></ul><p>Çıktılar artifact olarak kaydedildi: <b>sf-crime-pipeline-output</b></p><p>Stacking dahil: <code>risk_hourly*</code>, <code>patrol_recs*</code>, <code>metrics_*</code>, <code>models/*.joblib</code></p><p><a href='${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'>Log ve detaylar</a></p>"}]
-          }
-          EOF
-
-      # --- SENDGRID HTTP: Hata bildirimi ---
-      - name: Notify failure (SendGrid HTTP)
-        if: ${{ steps.gate.outputs.proceed == 'true' && failure() }}
-        env:
-          SG_KEY: ${{ secrets.SENDGRID_API_KEY }}
-        run: |
-          if [ -z "$SG_KEY" ]; then echo "❌ SENDGRID_API_KEY yok/boş"; exit 1; fi
-          curl -s -X POST https://api.sendgrid.com/v3/mail/send \
-            -H "Authorization: Bearer $SG_KEY" \
-            -H "Content-Type: application/json" \
-            -d @- <<'EOF' -o /dev/stderr -w "\nHTTP:%{http_code}\n"
-          {
-            "personalizations":[ {"to":[ {"email":"cem5113@hotmail.com"}, {"email":"cemeroglu5113@gmail.com"} ]} ],
-            "from":{"email":"${{ secrets.SG_FROM }}","name":"SF Crime Pipeline"},
-            "reply_to":{"email":"cem5113@hotmail.com","name":"Cem"},
-            "subject":"❌ SF Crime Pipeline + Stacking başarısız (#${{ github.run_number }})",
-            "categories":["sf-crime-pipeline","failure"],
-            "content":[{"type":"text/html","value":"<p>Pipeline başarısız oldu.</p><ul><li>Run #: <b>${{ github.run_number }}</b></li><li>Run ID: <b>${{ github.run_id }}</b></li><li>Ref: <code>${{ github.ref }}</code></li><li>Runner local time (SF): <code>${{ env.RUN_LOCAL_TIME }}</code></li></ul><p><a href='${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'>Log ve detaylar</a></p>"}]
-          }
-          EOF
-
-      - name: Write run summary
-        if: ${{ steps.gate.outputs.proceed == 'true' && success() }}
-        run: |
-          {
-            echo "## SF Crime Pipeline (Stacking dahil)"
-            echo ""
-            echo "- Çalışma zamanı (SF): **$(date)**"
-            echo "- Çıktılar: \`sf_crime_01..09.csv\`, 911/311 özetleri, geojson"
-            echo "- Stacking: \`risk_hourly*\`, \`patrol_recs*\`, \`metrics_*\`, \`models/*.joblib\`"
-            echo "- Artifact adı: **sf-crime-pipeline-output**"
-            echo "- PATROL_TOP_K: **${PATROL_TOP_K}**"
-          } >> $GITHUB_STEP_SUMMARY
