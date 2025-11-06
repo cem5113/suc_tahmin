@@ -1,132 +1,183 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-make_neighbors_fr.py
---------------------
-fr_crime_08.csv + neighbors.csv → fr_crime_09.csv
-
-Komşuluklar yeniden hesaplanmaz; son neighbors.csv kullanılır.
-Her GEOID için komşu bölgelerdeki son 24h / 72h / 7d suç yoğunluğu hesaplanır.
-"""
 from __future__ import annotations
-import os
-from pathlib import Path
+import os, re, sys, math
 import pandas as pd
-from datetime import timedelta
+from pathlib import Path
 
-# === Klasör yapısı ===
-ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "crime_prediction_data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+# Geo stack (poligon için)
+try:
+    import geopandas as gpd
+    from shapely.geometry import Point
+except Exception:
+    gpd = None
 
-# === Girdi / Çıktı ===
-IN_CSV  = Path(os.environ.get("NEIGHBOR_INPUT_CSV",  str(DATA_DIR / "fr_crime_08.csv")))
-OUT_CSV = Path(os.environ.get("NEIGHBOR_OUTPUT_CSV", str(DATA_DIR / "fr_crime_09.csv")))
-
-# 🔁 1) BURASI: Ortam değişkeni + varsayılan kök dosya
-NEIGH_FILE = Path(os.environ.get("NEIGH_FILE", "neighbors.csv"))
-
-# === Parametreler ===
+CRIME_DIR = Path(os.environ.get("CRIME_DATA_DIR", "crime_prediction_data"))
 GEOID_LEN = int(os.environ.get("GEOID_LEN", "11"))
 
-def _norm_geoid(s: pd.Series, L: int = GEOID_LEN) -> pd.Series:
-    return (s.astype(str).str.extract(r"(\d+)", expand=False).str[:L].str.zfill(L))
+# Davranış bayrakları
+STRATEGY   = os.environ.get("NEIGHBOR_STRATEGY", "queen").lower()   # queen|rook|knn
+MIN_DEG    = int(os.environ.get("MIN_NEIGHBOR_DEG", "3"))
+KNN_K      = int(os.environ.get("KNN_K", "5"))
+OUT_PATH   = Path(os.environ.get("NEIGHBOR_FILE", str(CRIME_DIR / "neighbors.csv")))
 
-def _pick_col(cols, *cands):
-    low = {c.lower(): c for c in cols}
-    for c in cands:
-        if c.lower() in low:
-            return low[c.lower()]
+# Olası poligon/katman adayları
+POLY_HINT  = os.environ.get("NEIGHBOR_POLY", "")
+POLY_CANDIDATES = [p for p in [
+    POLY_HINT,
+    str(CRIME_DIR / "sf_grid.geojson"),
+    str(CRIME_DIR / "sf_crime_grid.geojson"),
+    str(CRIME_DIR / "sf_cells.geojson"),
+    # repo kökü de tara
+    "sf_grid.geojson", "sf_crime_grid.geojson", "sf_cells.geojson",
+] if p]
+
+GRID_CSV = Path(os.environ.get("STACKING_DATASET", str(CRIME_DIR / "sf_crime_grid_full_labeled.csv")))
+
+def _norm_geoid(s: pd.Series) -> pd.Series:
+    return (s.astype(str)
+              .str.extract(r"(\d+)", expand=False)
+              .str.zfill(GEOID_LEN))
+
+def _find_geoid_col(df: pd.DataFrame) -> str | None:
+    low = {re.sub(r"[^a-z0-9]","", c.lower()): c for c in df.columns}
+    return low.get("geoid") or low.get("geoid10") or low.get("geographyid") or low.get("tractce")
+
+def _find_latlon_cols(df: pd.DataFrame):
+    low = {re.sub(r"[^a-z0-9]","", c.lower()): c for c in df.columns}
+    lat = low.get("lat") or low.get("latitude") or low.get("centroidlat")
+    lon = low.get("lon") or low.get("lng") or low.get("longitude") or low.get("centroidlon")
+    return lat, lon
+
+def _symmetrize(df):
+    rev = df.rename(columns={"geoid":"neighbor","neighbor":"geoid"})
+    return (pd.concat([df, rev], ignore_index=True)
+              .drop_duplicates()
+              .query("geoid != neighbor"))
+
+def _ensure_min_degree(df, geos, k=KNN_K, min_deg=MIN_DEG):
+    # derece hesabı
+    deg = df.groupby("geoid")["neighbor"].nunique()
+    need = set(deg.index[deg < min_deg])
+    if not need:
+        return df
+
+    # KNN ile tamamla (N^2 güvenli; hücre sayısı makul)
+    # geos: DataFrame(geoid, x, y)
+    idx = {g:i for i,g in enumerate(geos["geoid"])}
+    XY = geos[["x","y"]].to_numpy()
+    import numpy as np
+    from numpy.linalg import norm
+
+    rows = []
+    for g in need:
+        i = idx[g]
+        d = norm(XY - XY[i], axis=1)
+        order = np.argsort(d)
+        # ilk eleman kendisi; atla
+        picks = []
+        for j in order[1: 1+k*2]:  # biraz geniş seç
+            gj = geos.iloc[j]["geoid"]
+            if gj != g:
+                picks.append(gj)
+            if len(picks) >= k:
+                break
+        rows += [(g, n) for n in picks]
+
+    knn_df = pd.DataFrame(rows, columns=["geoid","neighbor"])
+    all_df = _symmetrize(pd.concat([df, knn_df], ignore_index=True).drop_duplicates())
+    return all_df
+
+def _neighbors_from_polygons(poly_path: str) -> pd.DataFrame | None:
+    if gpd is None:
+        return None
+    try:
+        gdf = gpd.read_file(poly_path)
+    except Exception:
+        return None
+
+    gcol = _find_geoid_col(gdf)
+    if not gcol or "geometry" not in gdf.columns:
+        return None
+
+    gdf = gdf[[gcol, "geometry"]].rename(columns={gcol:"geoid"}).copy()
+    gdf["geoid"] = _norm_geoid(gdf["geoid"])
+    gdf = gdf[~gdf["geometry"].is_empty & gdf["geometry"].notna()].reset_index(drop=True)
+
+    # hızlı komşuluk (sindex.query_bulk)
+    predicate = "touches" if STRATEGY in ("rook","queen") else "touches"
+    pairs = gdf.sindex.query_bulk(gdf.geometry, predicate=predicate)
+    # pairs: (lhs_idx, rhs_idx)
+    i, j = pairs
+    m = pd.DataFrame({"i": i, "j": j})
+    m = m[m["i"] < m["j"]]  # diagonal ve çift tekrarları at
+    df = pd.DataFrame({
+        "geoid":   gdf.loc[m["i"], "geoid"].to_numpy(),
+        "neighbor":gdf.loc[m["j"], "geoid"].to_numpy(),
+    })
+    df = _symmetrize(df.drop_duplicates())
+    return df
+
+def _centroid_table(poly_df: pd.DataFrame | None, grid_csv: Path) -> pd.DataFrame | None:
+    # Poligon varsa centroid’ten x,y; yoksa grid CSV’de lat/lon ara
+    if poly_df is not None and gpd is not None:
+        c = poly_df.copy()
+        c["x"] = c["geometry"].centroid.x
+        c["y"] = c["geometry"].centroid.y
+        return pd.DataFrame({"geoid": c["geoid"], "x": c["x"], "y": c["y"]})
+
+    if grid_csv.exists():
+        df = pd.read_csv(grid_csv, low_memory=False, dtype=str)
+        gcol = _find_geoid_col(df)
+        lat, lon = _find_latlon_cols(df)
+        if gcol and lat and lon:
+            tmp = df[[gcol, lat, lon]].rename(columns={gcol:"geoid", lat:"lat", lon:"lon"})
+            tmp["geoid"] = _norm_geoid(tmp["geoid"])
+            tmp["x"] = pd.to_numeric(tmp["lon"], errors="coerce")
+            tmp["y"] = pd.to_numeric(tmp["lat"], errors="coerce")
+            tmp = tmp[["geoid","x","y"]].dropna()
+            return tmp
     return None
 
-# === Ana akış ===
 def main():
-    if not IN_CSV.exists():
-        raise FileNotFoundError(f"Girdi bulunamadı: {IN_CSV}")
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # 🔁 2) BURASI: Dosya var mı? Yoksa bilgi ver
-    if not NEIGH_FILE.exists():
-        raise FileNotFoundError(f"Komşuluk dosyası bulunamadı: {NEIGH_FILE.resolve()}")
-
-    print(f"▶︎ {IN_CSV.name} + {NEIGH_FILE.name} → {OUT_CSV.name}")
-
-    # 1️⃣ Veri yükleme
-    df = pd.read_csv(IN_CSV, low_memory=False)
-    dcol = _pick_col(df.columns, "datetime", "date", "timestamp", "time")
-    gcol = _pick_col(df.columns, "geoid", "GEOID", "geography_id", "insee", "iris")
-
-    if not gcol:
-        raise RuntimeError("GEOID kolonu bulunamadı")
-
-    df["geoid"] = _norm_geoid(df[gcol])
-
-    if not dcol:
-        raise RuntimeError("Tarih kolonu (datetime/date/timestamp) bulunamadı")
-    df["datetime"] = pd.to_datetime(df[dcol], errors="coerce")
-
-    # Suç sayısı
-    ccol = _pick_col(df.columns, "crime_count", "Y_label", "label", "target")
-    if not ccol:
-        ccol = "crime_count"
-        df[ccol] = 0
-    df["crime_count"] = pd.to_numeric(df[ccol], errors="coerce").fillna(0).astype(int)
-
-    # 2️⃣ Komşuluk verisi
-    # 🔁 3) BURASI: Okurken de NEIGH_FILE kullan
-    nb = pd.read_csv(NEIGH_FILE, dtype=str).dropna()
-    s = _pick_col(nb.columns, "geoid", "src", "source")
-    t = _pick_col(nb.columns, "neighbor", "dst", "target")
-    if not s or not t:
-        raise RuntimeError(f"neighbors.csv başlıkları anlaşılamadı: {nb.columns.tolist()}")
-
-    nb = nb.rename(columns={s: "geoid", t: "neighbor"})[["geoid", "neighbor"]].dropna()
-    for c in ("geoid", "neighbor"):
-        nb[c] = _norm_geoid(nb[c])
-
-    if nb.empty:
-        raise RuntimeError("❌ neighbors.csv boş görünüyor — komşuluk hesaplanamamış.")
-
-    # 3️⃣ Sadece suç işlenmiş satırlar (verimlilik için)
-    crimes = df[df["crime_count"] > 0][["geoid", "datetime"]].copy()
-
-    # 4️⃣ Tüm komşu suçlarını (merge + filtreleme) ile hesapla
-    merged = nb.merge(crimes, left_on="neighbor", right_on="geoid", suffixes=("", "_nei"))
-    merged = merged.rename(columns={"datetime": "neighbor_time", "geoid": "GEOID"}).drop(columns=["geoid_nei"])
-
-    # 5️⃣ Her GEOID için 24h, 72h, 7d filtreleri
-    results = []
-    for g, group in df.groupby("geoid"):
-        base_times = group["datetime"]
-        if g not in merged["GEOID"].values:
-            results.extend([(g, t, 0, 0, 0) for t in base_times])
+    # 1) Poligonlardan dene
+    poly_df = None
+    for p in POLY_CANDIDATES:
+        if not p:
             continue
+        try:
+            dfp = _neighbors_from_polygons(p)
+            if dfp is not None and len(dfp) > 0:
+                poly_df = gpd.read_file(p) if gpd is not None else None
+                nb = dfp
+                break
+        except Exception:
+            continue
+    else:
+        nb = pd.DataFrame(columns=["geoid","neighbor"])
 
-        neigh_events = merged.loc[merged["GEOID"] == g, "neighbor_time"]
-        for t in base_times:
-            t1, t3, t7 = t - timedelta(hours=24), t - timedelta(hours=72), t - timedelta(days=7)
-            n24 = ((neigh_events <= t) & (neigh_events >= t1)).sum()
-            n72 = ((neigh_events <= t) & (neigh_events >= t3)).sum()
-            n7d = ((neigh_events <= t) & (neigh_events >= t7)).sum()
-            results.append((g, t, n24, n72, n7d))
+    # 2) Centroid tablosu
+    cent = _centroid_table(poly_df, GRID_CSV)
 
-    nei_df = pd.DataFrame(results, columns=["geoid", "datetime", "neighbor_crime_24h", "neighbor_crime_72h", "neighbor_crime_7d"])
+    # 3) Eğer poligon komşuluğu zayıf/boşsa, KNN ile tamamla
+    if cent is not None:
+        nb = _ensure_min_degree(nb, cent, k=KNN_K, min_deg=MIN_DEG)
 
-    # 6️⃣ Birleştir ve kaydet
-    out = df.merge(nei_df, on=["geoid", "datetime"], how="left")
-    for c in ["neighbor_crime_24h", "neighbor_crime_72h", "neighbor_crime_7d"]:
-        out[c] = out[c].fillna(0).astype(int)
-
-    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(OUT_CSV, index=False)
-    print(f"✅ {OUT_CSV.name} oluşturuldu → {len(out):,} satır, {out.shape[1]} sütun")
+    # Son temizlik
+    if len(nb) == 0:
+        # son çare: boş bir iskelet
+        nb = pd.DataFrame(columns=["geoid","neighbor"])
+    nb["geoid"]    = _norm_geoid(nb["geoid"])
+    nb["neighbor"] = _norm_geoid(nb["neighbor"])
+    nb = (_symmetrize(nb)
+            .drop_duplicates()
+            .sort_values(["geoid","neighbor"])
+         )
+    nb.to_csv(OUT_PATH, index=False, encoding="utf-8")
+    # kısa özet
+    deg = nb.groupby("geoid")["neighbor"].nunique()
+    print(f"neighbors.csv yazıldı → {OUT_PATH} | n_edges={len(nb)} | n_nodes={len(deg)} | min_deg={int(deg.min()) if len(deg) else 0} | mean_deg={round(float(deg.mean()),2) if len(deg) else 0.0}")
 
 if __name__ == "__main__":
     main()
-    # === fr_crime_09.csv'nin ilk 5 satırını göster ve kaydet ===
-    try:
-        df_out = pd.read_csv(OUT_CSV)
-        print("\n📊 fr_crime_09.csv — ilk 5 satır:")
-        print(df_out.head())
-
-    except Exception as e:
-        print(f"⚠️ Önizleme yüklenemedi: {e}")
