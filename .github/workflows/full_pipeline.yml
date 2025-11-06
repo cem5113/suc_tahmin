@@ -578,19 +578,26 @@ jobs:
       - name: Normalize grid outputs (put under CRIME_DATA_DIR)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p "${CRIME_DATA_DIR}"
+          DST="${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"
           CANDIDATES=(
             "sf_crime_grid_full_labeled.csv"
             "data/sf_crime_grid_full_labeled.csv"
             "outputs/sf_crime_grid_full_labeled.csv"
-            "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"
+            # "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"  # ← KALDIRILDI
           )
           FOUND=""
           for p in "${CANDIDATES[@]}"; do
             if [ -f "$p" ]; then
-              cp -f "$p" "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"
-              echo "✅ Grid kopyalandı: $p → ${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"
+              # Eğer zaten aynı dosyaysa kopyalama
+              if [ -e "$DST" ] && [ "$p" -ef "$DST" ]; then
+                echo "ℹ️ Grid zaten doğru yerde: $DST"
+                FOUND="yes"
+                break
+              fi
+              cp -f "$p" "$DST"
+              echo "✅ Grid kopyalandı: $p → $DST"
               FOUND="yes"
               break
             fi
