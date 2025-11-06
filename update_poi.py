@@ -24,41 +24,19 @@ except Exception:
     STRtree = None
 
 # ================== 0) YOLLAR ==================
-BASE_DIR  = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
+BASE_DIR       = "crime_prediction_data"
 POI_GEOJSON_1  = os.path.join(BASE_DIR, "sf_pois.geojson")
 POI_GEOJSON_2  = os.path.join(".",       "sf_pois.geojson")        # fallback
 BLOCK_PATH_1   = os.path.join(BASE_DIR, "sf_census_blocks_with_population.geojson")
 BLOCK_PATH_2   = os.path.join(".",       "sf_census_blocks_with_population.geojson")  # fallback
 POI_CLEAN_CSV  = os.path.join(BASE_DIR, "sf_pois_cleaned_with_geoid.csv")
 POI_RISK_JSON  = os.path.join(BASE_DIR, "risky_pois_dynamic.json")
-CRIME_IN  = os.getenv("CRIME_IN",  os.path.join(BASE_DIR, "sf_crime_05.csv"))
-CRIME_OUT = os.getenv("CRIME_OUT", os.path.join(BASE_DIR, "sf_crime_06.csv"))
+CRIME_IN       = os.path.join(BASE_DIR, "sf_crime_05.csv")
+CRIME_OUT      = os.path.join(BASE_DIR, "sf_crime_06.csv")
 
-Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
+Path(BASE_DIR).mkdir(exist_ok=True)
 
 # ================== YARDIMCI ==================
-def _first_exists(*paths):
-    for p in paths:
-        if p and os.path.exists(p):
-            return p
-    return None
-
-if not os.path.exists(CRIME_IN):
-    candidates = [
-        CRIME_IN,
-        os.path.join(BASE_DIR, "sf_crime_05.csv"),
-        os.path.join(BASE_DIR, "sf_crime_03.csv"),
-        os.path.join(BASE_DIR, "sf_crime_02.csv"),
-        os.path.join(BASE_DIR, "sf_crime.csv"),
-        "sf_crime_05.csv", "sf_crime_03.csv", "sf_crime_02.csv", "sf_crime.csv",
-    ]
-    resolved = _first_exists(*candidates)
-    if resolved:
-        print(f"ℹ️ CRIME_IN bulunamadı, ilk mevcut aday seçildi → {resolved}")
-        CRIME_IN = resolved
-    else:
-        raise FileNotFoundError(f"❌ Suç girdisi bulunamadı. Denenenler: {candidates}")
-
 def _ensure_parent(path: str):
     Path(os.path.dirname(path) or ".").mkdir(parents=True, exist_ok=True)
 
