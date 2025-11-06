@@ -423,7 +423,8 @@ else:
 
 if raw_new is not None and not raw_new.empty:
     df_new = raw_new.copy()
-    # incident_datetime yoksa üret
+
+    # ---- incident_datetime üret ----
     if "incident_datetime" not in df_new.columns:
         if "incident_date" in df_new.columns and "incident_time" in df_new.columns:
             df_new["incident_datetime"] = pd.to_datetime(
@@ -433,13 +434,45 @@ if raw_new is not None and not raw_new.empty:
             df_new["incident_datetime"] = pd.to_datetime(df_new["incident_date"], errors="coerce")
         elif "datetime" in df_new.columns:
             df_new["incident_datetime"] = pd.to_datetime(df_new["datetime"], errors="coerce")
-    # UTC→SF
-    df_new["datetime"] = pd.to_datetime(df_new["incident_datetime"], utc=True, errors="coerce").dt.tz_convert(SF_TZ)
-    # yerel tarih/saat
-    df_new["date"] = df_new["datetime"].dt.date
-    df_new["time"] = df_new["datetime"].dt.strftime("%H:%M:%S")
+
+    # ---- Koordinatları onar (point/location alanlarından çek) ----
+    def _parse_point_like(s):
+        try:
+            # dict {"coordinates":[lon,lat]} olabiliyor
+            if isinstance(s, dict) and "coordinates" in s:
+                lon, lat = s["coordinates"]
+                return pd.Series({"longitude": float(lon), "latitude": float(lat)})
+            # "POINT (-122.41 37.77)" veya "-122.41, 37.77" gibi olabilir
+            txt = str(s)
+            m = re.search(r"(-?\d+\.\d+)[ ,]+(-?\d+\.\d+)", txt)
+            if m:
+                a, b = float(m.group(1)), float(m.group(2))
+                # heüristik: |lat| genelde 37~38, |lon| 122 civarı (mutlak daha büyük olan lon)
+                lon, lat = (a, b) if abs(a) > abs(b) else (b, a)
+                return pd.Series({"longitude": lon, "latitude": lat})
+        except Exception:
+            pass
+        return pd.Series({"longitude": np.nan, "latitude": np.nan})
+
+    if ("latitude" not in df_new.columns) or ("longitude" not in df_new.columns):
+        if "point" in df_new.columns:
+            coords = df_new["point"].apply(_parse_point_like)
+            for c in ("latitude","longitude"):
+                if c not in df_new.columns:
+                    df_new[c] = coords[c]
+        elif "location" in df_new.columns:
+            coords = df_new["location"].apply(_parse_point_like)
+            for c in ("latitude","longitude"):
+                if c not in df_new.columns:
+                    df_new[c] = coords[c]
+
+    # ---- Zaman türet ----
+    df_new["datetime"]   = pd.to_datetime(df_new["incident_datetime"], utc=True, errors="coerce").dt.tz_convert(SF_TZ)
+    df_new["date"]       = df_new["datetime"].dt.date
+    df_new["time"]       = df_new["datetime"].dt.strftime("%H:%M:%S")
     df_new["event_hour"] = df_new["datetime"].dt.hour
-    # id
+
+    # ---- ID üret ----
     id_cols = [c for c in ["row_id","incident_id","incident_number","cad_number"] if c in df_new.columns]
     if id_cols:
         s = df_new[id_cols[0]].astype(str)
@@ -448,24 +481,48 @@ if raw_new is not None and not raw_new.empty:
         df_new["id"] = s
     else:
         df_new["id"] = np.nan
+
+    # ID fallback — lat/lon varsa onları kullan, yoksa datetime+category ile üret
     mask = df_new["id"].isna() | (df_new["id"].astype(str) == "nan")
     if mask.any():
-        df_new.loc[mask, "id"] = (
-            df_new.loc[mask, "datetime"].astype(str) + "_" +
-            df_new.loc[mask, "latitude"].round(6).astype(str) + "_" +
-            df_new.loc[mask, "longitude"].round(6).astype(str)
-        )
+        if {"latitude","longitude"}.issubset(df_new.columns):
+            df_new.loc[mask, "id"] = (
+                df_new.loc[mask, "datetime"].astype(str) + "_" +
+                df_new.loc[mask, "latitude"].round(6).astype(str) + "_" +
+                df_new.loc[mask, "longitude"].round(6).astype(str)
+            )
+        else:
+            base = df_new.loc[mask, "datetime"].astype(str)
+            if "incident_number" in df_new.columns:
+                base = base + "_" + df_new.loc[mask, "incident_number"].astype(str)
+            elif "incident_id" in df_new.columns:
+                base = base + "_" + df_new.loc[mask, "incident_id"].astype(str)
+            if "category" in df_new.columns:
+                base = base + "_" + df_new.loc[mask, "category"].astype(str)
+            df_new.loc[mask, "id"] = base
+
     df_new["id"] = df_new["id"].astype(str)
-    # kolon seçimi & bbox
+
+    # ---- Kolon seçimi ----
     df_new = df_new.rename(columns={"incident_category":"category","incident_subcategory":"subcategory"})
     keep_cols = [c for c in ["id","date","time","event_hour","latitude","longitude","category","subcategory"] if c in df_new.columns]
     df_new = df_new[keep_cols]
-    df_new = df_new.dropna(subset=["latitude","longitude","id","date"])
-    min_lon, min_lat, max_lon, max_lat = SF_BBOX
-    df_new = df_new[df_new["latitude"].between(min_lat, max_lat)]
-    df_new = df_new[df_new["longitude"].between(min_lon, max_lon)]
-    # GEOID eşlemesi
-    if gdf_blocks is not None:
+
+    # ---- Güvenli dropna: sadece mevcut alanlar üzerinden ----
+    subset_cols = [c for c in ["id","date","latitude","longitude"] if c in df_new.columns]
+    if subset_cols:
+        df_new = df_new.dropna(subset=subset_cols)
+
+    # ---- BBOX filtresi (sadece lat/lon varsa) ----
+    if {"latitude","longitude"}.issubset(df_new.columns):
+        min_lon, min_lat, max_lon, max_lat = SF_BBOX
+        df_new = df_new[df_new["latitude"].between(min_lat, max_lat)]
+        df_new = df_new[df_new["longitude"].between(min_lon, max_lon)]
+    else:
+        print("⚠️ Koordinat sütunları yok; BBOX filtresi atlandı.")
+
+    # ---- GEOID eşlemesi (sadece lat/lon varsa) ----
+    if gdf_blocks is not None and {"latitude","longitude"}.issubset(df_new.columns):
         gdf_blocks = (gdf_blocks.set_crs("EPSG:4326") if gdf_blocks.crs is None else gdf_blocks.to_crs("EPSG:4326"))
         gdfp = gpd.GeoDataFrame(df_new, geometry=gpd.points_from_xy(df_new["longitude"], df_new["latitude"]), crs="EPSG:4326")
         gdfp = gpd.sjoin(gdfp, gdf_blocks[["GEOID","geometry"]], how="left", predicate="within")
@@ -473,8 +530,9 @@ if raw_new is not None and not raw_new.empty:
         gdfp["GEOID"] = gdfp["GEOID"].astype(str).str.extract(r"(\d+)")[0].str[:DEFAULT_GEOID_LEN]
         df_new = pd.DataFrame(gdfp)
     else:
-        df_new["GEOID"] = df_new.get("GEOID", np.nan)
-        df_new["GEOID"] = df_new["GEOID"].astype(str).str.extract(r"(\d+)")[0].str[:DEFAULT_GEOID_LEN]
+        # lat/lon yoksa GEOID eşlemesi mümkün değil; sonraki adımlar grid/centroid ile dolduracak
+        if "GEOID" not in df_new.columns:
+            df_new["GEOID"] = np.nan
 else:
     df_new = pd.DataFrame()
 
