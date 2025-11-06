@@ -44,7 +44,7 @@ NEIGHBOR_RADIUS_M = float(os.getenv("NEIGHBOR_RADIUS_M", "500"))
 # ➜ İstediğin akış: 1) Artifact'tan sf_crime_y.csv, 2) releases/latest sf_crime.csv
 CRIME_BASE_URL = os.getenv(
     "CRIME_CSV_URL",
-    "https://github.com/cem5113/crime_prediction_data/releases/latest/download/sf_crime.csv"  # Fallback
+    "https://github.com/cem5113/crime_prediction_data/releases/latest/download/sf_crime.csv"  # Fallback (auto-latest)
 )
 CRIME_API_URL = os.getenv("CRIME_API_URL", "https://data.sfgov.org/resource/wg3w-h783.json")
 SFCRIME_APP_TOKEN = os.getenv("SFCRIME_API_TOKEN", "")
@@ -506,12 +506,10 @@ df_all = df_all[df_all["date"] >= start_date_5y]
 
 df_all["date"] = pd.to_datetime(df_all["date"], errors="coerce")
 df_all["time"] = df_all["time"].astype(str).fillna("00:00:00")
-df_all["date_local"]   = df_all["datetime"].dt.date                    
-df_all["hour_local"]   = df_all["datetime"].dt.strftime("%H:00")        
-df_all["datehour_key"] = (
-    df_all["GEOID"].astype(str).str.zfill(DEFAULT_GEOID_LEN) + "|" +
-    df_all["datetime"].dt.strftime("%Y-%m-%d %H:00")
-)
+df_all["datetime"] = pd.to_datetime(df_all["date"].dt.strftime("%Y-%m-%d") + " " + df_all["time"], errors="coerce")
+df_all = df_all.dropna(subset=["datetime"]).copy()
+df_all["datetime"] = df_all["datetime"].dt.floor("h")
+
 # TZ sabitle
 try:
     df_all["datetime"] = df_all["datetime"].dt.tz_localize(SF_TZ)
@@ -562,14 +560,8 @@ safe_save(df_all.drop(columns=["date_only"], errors="ignore"), _out_target)
 try:
     print(f"{Path(_out_target).name} — ilk 5 satır")
     print(df_all.head(5).to_string(index=False))
-
-    cols_preview = [c for c in ["id","GEOID","datetime","date_local","hour_local","datehour_key","category"] if c in df_all.columns]
-    if cols_preview:
-        print("\nÖnizleme (tarih anahtarları ile):")
-        print(df_all.head(5)[cols_preview].to_string(index=False))
 except Exception:
     pass
-
 
 # crime_prediction_data/ kopyaları:
 try:
@@ -927,4 +919,3 @@ except Exception as e:
 print("\n✅ Tüm işlem tamamlandı. Dosyalar güncellendi.")
 print(df_final["crime_count"].isna().sum(), "— crime_count NaN sayısı")
 print(df_final["crime_mix"].isna().sum(), "— crime_mix NaN sayısı")
-
