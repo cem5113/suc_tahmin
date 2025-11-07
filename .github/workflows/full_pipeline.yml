@@ -25,13 +25,12 @@ permissions:
 concurrency:
   group: full-pipeline-${{ github.ref }}
   cancel-in-progress: true
-
 env:
   CRIME_DATA_DIR: ${{ github.workspace }}
   GEOID_LEN: "11"
-  CENSUS_GEO_LEVEL: "tract"   # ← 11 hane zorlanır; NaN problemi biter
-  ACS_YEAR: "2023"
-  DEMOG_WHITELIST: ""
+  ACS_YEAR: ${{ vars.ACS_YEAR || 'LATEST' }}
+  DEMOG_WHITELIST: ${{ vars.DEMOG_WHITELIST || '' }}
+  CENSUS_GEO_LEVEL: ${{ vars.CENSUS_GEO_LEVEL || 'tract' }} 
 
   BACKFILL_DAYS: "0"
   SF_SODA_FETCH_STRATEGY: ${{ vars.SF_SODA_FETCH_STRATEGY || 'bulk' }}
