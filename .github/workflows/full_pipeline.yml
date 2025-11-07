@@ -420,6 +420,20 @@ jobs:
             python -u scripts/update_311.py
           fi
 
+      - name: Upload 311 CSVs
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sf-crime-pipeline-output
+          if-no-files-found: warn
+          path: |
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_3h.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_y.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_year.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_year_y.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_02.csv
+
       - name: Ensure population CSV (local file)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
