@@ -38,26 +38,21 @@ EV_IN    = os.getenv("FR_EVENTS_DAILY_IN",  "crime_prediction_data/fr_crime_even
 EV_OUT   = os.getenv("FR_EVENTS_DAILY_OUT", "crime_prediction_data/fr_crime_events_daily.csv").strip()
 
 N311_IN  = os.getenv("FR_311_DAILY_IN", "").strip()
-DATE_COL_ENV = (os.getenv("FR_311_DATE_COL", "") or "").strip()  # kullanıcı "date" ya da başka bir ad geçebilir
+DATE_COL_ENV = (os.getenv("FR_311_DATE_COL", "") or "").strip()
 GEO_COL  = (os.getenv("FR_311_GEOID_COL", "GEOID") or "GEOID").strip()
 
 def _parse_float_env(key: str, default: float) -> float:
-    raw = os.getenv(key, "")
-    s = str(raw).strip()
-    if s == "":
-        return default
-    try:
-        return float(s)
-    except Exception:
-        return default
+    s = str(os.getenv(key, "")).strip()
+    if s == "": return default
+    try: return float(s)
+    except Exception: return default
 
 WIN_Q = _parse_float_env("FR_311_WINSOR_Q", 0.0)   # 0 → kapalı
+# EMA alfası
 EMA_ALPHAS = []
-_raw_alphas = os.getenv("FR_311_EMA_ALPHAS", "0.3,0.6")
-for tok in str(_raw_alphas).split(","):
+for tok in str(os.getenv("FR_311_EMA_ALPHAS","0.3,0.6")).split(","):
     tok = tok.strip()
-    if not tok:
-        continue
+    if not tok: continue
     try:
         a = float(tok)
         if 0.0 < a < 1.0:
@@ -96,27 +91,31 @@ def _winsorize_upper(series: pd.Series, q: float) -> pd.Series:
 def _choose_date_column(df: pd.DataFrame) -> str:
     """
     Env’de verilen DATE_COL varsa onu kullanır, yoksa yaygın adaylar arasından
-    veri çakışması olmadan en fazla non-null sağlayanı seçer.
+    en fazla non-null sağlayanı seçer.
     """
     candidates_ordered = []
-    # 1) Env öncelik
     if DATE_COL_ENV:
         candidates_ordered.append(DATE_COL_ENV)
-    # 2) Yaygın varyantlar
+
+    # Yaygın varyantlar (311 setlerinde sık görülenler dahil)
     common = [
-        "date", "created_date", "createddate", "created time", "created_time",
-        "request_datetime", "requested_datetime", "open_dt", "opened",
+        "date",
+        "requested_datetime", "requested_date",
+        "request_datetime", "request_date",
+        "opened_date", "open_dt", "opened",
+        "created_date", "created_datetime", "createddate",
         "timestamp", "datetime"
     ]
     for c in common:
         if c not in candidates_ordered:
             candidates_ordered.append(c)
-    # Sadece df'de var olanları filtrele
+
     in_df = [c for c in candidates_ordered if c in df.columns]
     if not in_df:
-        raise SystemExit(f"❌ 311 kaynağında tarih kolonu bulunamadı. Env FR_311_DATE_COL='{DATE_COL_ENV}',"
-                         f" adaylar: {common}, mevcut kolonlar: {list(df.columns)}")
-    # En çok non-null sayan kolonu seç
+        raise SystemExit(f"❌ 311 kaynağında tarih kolonu bulunamadı. "
+                         f"Env FR_311_DATE_COL='{DATE_COL_ENV}', adaylar: {common}, "
+                         f"mevcut kolonlar: {list(df.columns)}")
+
     scores = {c: df[c].notna().sum() for c in in_df}
     picked = max(scores, key=scores.get)
     log(f"📅 311 tarih kolonu: '{picked}' (env='{DATE_COL_ENV or '-'}', adaylar={in_df}, non_null={scores[picked]})")
@@ -163,10 +162,10 @@ def make_311_daily_counts(df311: pd.DataFrame) -> pd.DataFrame:
     if GEO_COL not in df311.columns:
         raise SystemExit(f"❌ 311 kaynağında {GEO_COL} yok.")
 
-    # Datetime parse → sadece gün
+    # Datetime parse → sadece gün (TZ-aware/naive her iki durumda güvenli)
     s = pd.to_datetime(df311[date_col], errors="coerce", utc=True)
     if s.notna().any():
-        dcol = s.dt.tz_convert(None).dt.date if getattr(s.dt, "tz", None) is not None else s.dt.date
+        dcol = s.dt.tz_convert(None).dt.date
     else:
         dcol = pd.to_datetime(df311[date_col], errors="coerce").dt.date
 
@@ -206,23 +205,25 @@ def make_311_features(g_daily: pd.DataFrame, cal_dates: pd.DataFrame) -> pd.Data
     merged = merged.sort_values(["GEOID","date"]).reset_index(drop=True)
     m = merged.set_index(["GEOID","date"]).sort_index()
 
-    # === 🔧 FIX: EMA hesapları (group_keys=False) + direct values atama ===
+    # ==== SIZINTI-KAPALI ÖZELLİKLER ====
+    # Tüm pencereler geçmişi kullansın diye series'i shift(1) ile öteleriz.
+    base = m["n311"].groupby(level=0).shift(1).fillna(0.0)
+
+    # EMA (yalnızca geçmiş günler)
     for a in EMA_ALPHAS:
         col = f"n311_ema_a{int(a*10)}"
-        ema = (
-            m["n311"]
-            .groupby(level=0, group_keys=False)              # ← ekstra seviye ekleme
-            .apply(lambda s: s.ewm(alpha=a, adjust=False).mean())
+        m[col] = (
+            base.groupby(level=0)
+                .transform(lambda s: s.ewm(alpha=a, adjust=False).mean())
+                .values
         )
-        # Aynı sırada olduğundan doğrudan values ile atıyoruz
-        m[col] = ema.values
 
-    # Basit pencereler (değişmedi)
-    m["n311_prev_1d"] = (m["n311"].groupby(level=0).shift(1)).fillna(0.0)
+    # Basit pencereler (yalnızca geçmiş günler)
+    m["n311_prev_1d"] = base
     m["n311_sum_3d"]  = (
-        m["n311"].groupby(level=0)
-        .rolling(window=3, min_periods=1).sum()
-        .reset_index(level=0, drop=True)
+        base.groupby(level=0)
+            .transform(lambda s: s.rolling(window=3, min_periods=1).sum())
+            .values
     )
 
     return m.reset_index()
@@ -254,6 +255,7 @@ def merge_into_grid_events(feats: pd.DataFrame, grid: pd.DataFrame, evts: pd.Dat
         after_e = e2.shape
         log(f"🔗 EVENTS merge (date-based): {before_e} → {after_e}")
     else:
+        # Events'te 'date' yoksa GEOID medyanıyla doldur (yumuşak fallback)
         agg = feats.groupby("GEOID", as_index=False).median(numeric_only=True)
         before_e = e2.shape
         e2 = e2.merge(agg, on="GEOID", how="left")
@@ -278,7 +280,7 @@ def main():
     grid, evts = load_grid_events()
     df311 = load_311_source()
 
-    g_daily = make_311_daily_counts(df311)      # tarih sütunu otomatik seçiliyor
+    g_daily = make_311_daily_counts(df311)
     cal     = build_calendar_dates(grid)
     feats   = make_311_features(g_daily, cal) if len(cal) else pd.DataFrame()
 
