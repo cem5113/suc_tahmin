@@ -231,27 +231,6 @@ jobs:
           set -e
           python -u update_crime.py
 
-      - name: Prepack MUST-HAVE CSVs (911/311) 
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          for f in \
-            "${CRIME_DATA_DIR}/sf_911_last_5_year.csv" \
-            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"; do
-            [ -f "$f" ] || { echo "❌ Missing: $f"; exit 2; }
-            echo "OK: $f  → size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")"
-            head -n 3 "$f" || true
-          done
-
-      - name: Check 911 csvs before upload
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -e
-          echo "[GLOB] 911 base summaries"
-          ls -l "${CRIME_DATA_DIR}"/sf_911_last_5_year*.csv || true
-          echo "[HEAD] sf_crime_01.csv"
-          head -n 3 "${CRIME_DATA_DIR}/sf_crime_01.csv" || true
-
       - name: Restore 911 summary cache
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         uses: actions/cache@v4
@@ -259,6 +238,7 @@ jobs:
           path: ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
           key: 911-${{ runner.os }}-${{ github.run_number }}
 
+      # ✅ GH auth: login YOK (GH_TOKEN var)
       - name: Prefetch sf_911_last_5_year_y.csv from previous successful run (artifact)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
@@ -422,18 +402,8 @@ jobs:
           if [ -z "${FOUND}" ]; then
             echo "ℹ️ ${TARGET_FILE} önceki artifact’larda bulunamadı; update_311.py kendi akışıyla devam edecek."
           fi
+
       # 311: aynı şekilde bulk çekim
-      - name: Check 311 csvs before upload
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -e
-          echo "[HEADS] sf_crime_02.csv"
-          head -n 3 "${CRIME_DATA_DIR}/sf_crime_02.csv" || true
-          echo "[GLOB] sf_311_last_5_year*.csv"
-          ls -l "${CRIME_DATA_DIR}"/sf_311_last_5_year*.csv || true
-          echo "[GLOB] sf_311_last_5_years*.csv"
-          ls -l "${CRIME_DATA_DIR}"/sf_311_last_5_years*.csv || true
-      
       - name: 03) 311 → sf_crime_02.csv (bulk 50k)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
@@ -443,79 +413,12 @@ jobs:
           SOCS_APP_TOKEN:        ${{ env.SOCS_APP_TOKEN }}
           BACKFILL_DAYS:         ${{ env.BACKFILL_DAYS }}
         run: |
-          set -euo pipefail
+          set -e
           if [ -f update_311.py ]; then
             python -u update_311.py
           else
             python -u scripts/update_311.py
           fi
-
-      # 03.fix) 911 → kanonik isimle CRIME_DATA_DIR'de garanti et
-      - name: 03.fix) Materialize 911 CSVs into CRIME_DATA_DIR
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          mkdir -p "${CRIME_DATA_DIR}"
-          CANDS_911=(
-            "sf_911_last_5_year.csv"
-            "data/sf_911_last_5_year.csv"
-            "outputs/sf_911_last_5_year.csv"
-            "_tmp_911.csv"
-            "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
-            "${CRIME_DATA_DIR}/_tmp_911.csv"
-          )
-          FOUND=""
-          for p in "${CANDS_911[@]}"; do
-            [ -f "$p" ] || continue
-            # _tmp ise kanonik isme çevir
-            if [[ "$(basename "$p")" == "_tmp_911.csv" ]]; then
-              cp -f "$p" "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
-            else
-              cp -f "$p" "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
-            fi
-            echo "✅ 911 ana özet: $p → ${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
-            FOUND="yes"; break
-          done
-          # varsa Y ve latest'i de toparla
-          for p in \
-            sf_911_last_5_year_y.csv data/sf_911_last_5_year_y.csv outputs/sf_911_last_5_year_y.csv \
-            ${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv; do
-            [ -f "$p" ] && cp -f "$p" "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
-          done
-          for p in sf_911_last_5_year_latest.csv ${CRIME_DATA_DIR}/sf_911_last_5_year_latest.csv; do
-            [ -f "$p" ] && cp -f "$p" "${CRIME_DATA_DIR}/sf_911_last_5_year_latest.csv"
-          done
-          ls -lh "${CRIME_DATA_DIR}" | sed -n '1,200p'
-      
-      # 03.fix) 311 → kanonik isimle CRIME_DATA_DIR'de garanti et
-      - name: 03.fix) Move 311 CSVs into CRIME_DATA_DIR if needed
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          mkdir -p "${CRIME_DATA_DIR}"
-          CANDS_311_MAIN=(
-            "sf_311_last_5_years.csv" "data/sf_311_last_5_years.csv" "outputs/sf_311_last_5_years.csv"
-            "sf_311_last_5_year.csv"  "data/sf_311_last_5_year.csv"  "outputs/sf_311_last_5_year.csv"
-            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
-          )
-          for p in "${CANDS_311_MAIN[@]}"; do
-            [ -f "$p" ] || continue
-            cp -f "$p" "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
-            echo "✅ 311 ana özet: $p → ${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
-            break
-          done
-          CANDS_311Y=(
-            "sf_311_last_5_years_y.csv" "data/sf_311_last_5_years_y.csv" "outputs/sf_311_last_5_years_y.csv"
-            "sf_311_last_5_year_y.csv"  "data/sf_311_last_5_year_y.csv"  "outputs/sf_311_last_5_year_y.csv"
-            "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv"
-          )
-          for p in "${CANDS_311Y[@]}"; do
-            [ -f "$p" ] && { cp -f "$p" "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv"; break; }
-          done
-          for p in sf_311_last_5_years_latest.csv ${CRIME_DATA_DIR}/sf_311_last_5_years_latest.csv; do
-            [ -f "$p" ] && cp -f "$p" "${CRIME_DATA_DIR}/sf_311_last_5_years_latest.csv"
-          done
-          ls -lh "${CRIME_DATA_DIR}" | sed -n '1,200p'
 
       - name: Ensure population CSV (local file)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -572,30 +475,21 @@ jobs:
       - name: (Opsiyonel) sf_population.csv başlık normalize
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
-          set -euo pipefail
           python - <<'PY'
-          import os
-          import pandas as pd
+          import os, pandas as pd
           p = os.path.join(os.environ["CRIME_DATA_DIR"], "sf_population.csv")
-          if not os.path.exists(p):
-              raise SystemExit(0)
           df = pd.read_csv(p)
-          # Kolonları lower map'le
-          lmap = {c.lower(): c for c in df.columns}
+          low = {c.lower(): c for c in df.columns}
 
           # GEOID standardizasyonu
-          if 'geoid' not in lmap and 'geography_id' in lmap:
-              df.rename(columns={lmap['geography_id']: 'GEOID'}, inplace=True)
-              lmap = {c.lower(): c for c in df.columns}
-          elif 'geoid' in lmap and lmap['geoid'] != 'GEOID':
-              df.rename(columns={lmap['geoid']: 'GEOID'}, inplace=True)
-              lmap = {c.lower(): c for c in df.columns}
+          if 'geoid' not in low and 'geography_id' in low:
+              df.rename(columns={low['geography_id']: 'GEOID'}, inplace=True)
 
           # Nüfus sütununu 'population' yap
           for cand in ['population','total_population','b01003_001e','estimate','total','value']:
-              if cand in lmap:
+              if cand in low:
                   if 'population' not in df.columns:
-                      df.rename(columns={lmap[cand]: 'population'}, inplace=True)
+                      df.rename(columns={low[cand]: 'population'}, inplace=True)
                   break
 
           df.to_csv(p, index=False)
@@ -681,65 +575,6 @@ jobs:
           echo "sf_weather_5years.csv — ilk 5 satır:"
           head -n 5 "${CRIME_DATA_DIR}/sf_weather_5years.csv" || head -n 5 sf_weather_5years.csv || true
 
-      - name: 09.1) Merge weather into sf_crime_07 → sf_crime_08.csv
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-        run: |
-          set -euo pipefail
-          PYTHONUNBUFFERED=1 python - <<'PY'
-          import os, pandas as pd
-          from pathlib import Path
-
-          base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
-          f07  = base/"sf_crime_07.csv"
-          wcsv = base/"sf_weather_5years.csv"
-          f08  = base/"sf_crime_08.csv"
-
-          if not f07.exists():
-              raise SystemExit("❌ sf_crime_07.csv yok (polis/gov adımı başarısız mı?).")
-          if not wcsv.exists():
-              raise SystemExit("❌ sf_weather_5years.csv yok (09 weather adımını kontrol et).")
-
-          df = pd.read_csv(f07, low_memory=False)
-          wx = pd.read_csv(wcsv, low_memory=False)
-
-          cols = {c.lower(): c for c in df.columns}
-          date_col = None
-          for c in ["date","incident_date","incident_datetime","datetime","event_hour"]:
-              if c in cols:
-                  date_col = cols[c]; break
-          if date_col is None:
-              raise SystemExit("❌ sf_crime_07.csv içinde tarih alanı bulunamadı.")
-
-          df["__date__"] = pd.to_datetime(df[date_col], errors="coerce").dt.date
-          wcols = {c.lower(): c for c in wx.columns}
-          if "date" not in wcols:
-              raise SystemExit("❌ sf_weather_5years.csv içinde 'date' kolonu yok.")
-          wx["__date__"] = pd.to_datetime(wx[wcols["date"]], errors="coerce").dt.date
-
-          keep = ["date","tempmax","tempmin","precip","precipprob","windspeed","humidity","description","icon"]
-          keep = [wcols[k] for k in keep if k in wcols]
-          wx_keep = wx[["__date__"] + keep].copy()
-
-          out = df.merge(wx_keep, on="__date__", how="left")
-          out.drop(columns=["__date__"], inplace=True, errors="ignore")
-
-          tmp = f08.with_suffix(".csv.tmp")
-          out.to_csv(tmp, index=False)
-          os.replace(tmp, f08)
-          print(f"✅ sf_crime_08.csv yazıldı → {f08} | rows={len(out)} | cols={len(out.columns)}")
-          PY
-
-      - name: 09.2) Verify sf_crime_08.csv presence & head
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          F="${CRIME_DATA_DIR}/sf_crime_08.csv"
-          [ -f "$F" ] || { echo "❌ sf_crime_08.csv yok! 09.1 merge adımını kontrol et."; exit 2; }
-          echo "---- sf_crime_08.csv (head) ----"
-          head -n 5 "$F" || true
-
       - name: Normalize grid outputs (put under CRIME_DATA_DIR)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
@@ -750,10 +585,12 @@ jobs:
             "sf_crime_grid_full_labeled.csv"
             "data/sf_crime_grid_full_labeled.csv"
             "outputs/sf_crime_grid_full_labeled.csv"
+            # "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"  # ← KALDIRILDI
           )
           FOUND=""
           for p in "${CANDIDATES[@]}"; do
             if [ -f "$p" ]; then
+              # Eğer zaten aynı dosyaysa kopyalama
               if [ -e "$DST" ] && [ "$p" -ef "$DST" ]; then
                 echo "ℹ️ Grid zaten doğru yerde: $DST"
                 FOUND="yes"
@@ -768,22 +605,6 @@ jobs:
           if [ -z "${FOUND}" ]; then
             echo "⚠️ sf_crime_grid_full_labeled.csv bulunamadı; stacking bazı görünümleri atlayabilir."
           fi
-
-      - name: Prepack required files check
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          REQ=(
-            "${CRIME_DATA_DIR}/sf_crime.csv"
-            "${CRIME_DATA_DIR}/sf_crime_08.csv"
-            "${CRIME_DATA_DIR}/sf_crime_07.csv"
-            "${CRIME_DATA_DIR}/sf_crime_06.csv"
-            "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"
-          )
-          for f in "${REQ[@]}"; do
-            [ -f "$f" ] || { echo "❌ Missing required: $f"; exit 2; }
-          done
-          echo "✅ Required files ok."
 
       - name: 10.5) neighbors.csv (kullan/normalize/üret + kalite kontrol)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -1211,126 +1032,28 @@ jobs:
           echo "— produced *_latest.csv —"
           ls -1 "${CRIME_DATA_DIR}"/*_latest.csv 2>/dev/null || true
 
-      # -----------------------------------------------------------
-      # Sanity packlist (mtime + head) — GÜNCEL
-      # -----------------------------------------------------------
       - name: Sanity packlist (mtime + head)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
-        shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-      
           echo "== PACK CANDIDATES (mtime) =="
-      
-          PACK=(
-            "${CRIME_DATA_DIR}/sf_crime.csv"
-            "${CRIME_DATA_DIR}/sf_crime_y.csv"
-            ${CRIME_DATA_DIR}/sf_911_last_5_year*.csv
-            ${CRIME_DATA_DIR}/sf_311_last_5_year*.csv
-            ${CRIME_DATA_DIR}/sf_311_last_5_years*.csv
-            "${CRIME_DATA_DIR}/sf_weather_5years.csv"
-            "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv"
-            "${CRIME_DATA_DIR}/risk_hourly.csv"
-          )
-      
-          for p in "${PACK[@]}"; do
-            if [ -f "$p" ]; then
-              # Linux (GNU stat) önce denenir; macOS runner olursa BSD stat'a düşer
-              MTIME="$(stat -c '%y' "$p" 2>/dev/null || stat -f '%Sm' "$p" 2>/dev/null || echo 'n/a')"
-              printf "%-40s  %s\n" "$(basename "$p")" "$MTIME"
-            fi
-          done
-      
+          while IFS= read -r p; do
+            [ -f "$p" ] && printf "%-48s  %s\n" "$(basename "$p")" "$(stat -c %y "$p" 2>/dev/null || stat -f %Sm "$p")"
+          done <<EOF
+          ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_weather_5years.csv
+          ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
+          ${{ env.CRIME_DATA_DIR }}/risk_hourly.csv
+          EOF
+
           echo "== quick heads =="
-          head -n 3 "${CRIME_DATA_DIR}/sf_crime.csv"                 || true
-          head -n 3 "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"       || true
-          head -n 3 "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"     || true
-          head -n 3 "${CRIME_DATA_DIR}/sf_crime_01.csv"              || true
-          head -n 3 "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"      || true
-          head -n 3 "${CRIME_DATA_DIR}/sf_crime_grid_full_labeled.csv" || true
-
-      # -----------------------------------------------------------
-      # Optional outputs fallback (header-only stubs) — GÜNCEL
-      # -----------------------------------------------------------
-      - name: Optional outputs fallback (header-only stubs)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "${CRIME_DATA_DIR}"
-      
-          # Başlıklı boş CSV üret; yalnızca uyarıları susturmak için (analitiklerde kullanılmamalı)
-          touch_stub () {
-            local f="$1"; shift
-            if [ ! -f "$f" ]; then
-              printf "%s\n" "$*" > "$f"
-              echo "ℹ️ stub yazıldı: $f"
-            fi
-          }
-      
-          # 911/311 özet “_y” dosyaları yoksa stub
-          touch_stub "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"    "date,count"
-          touch_stub "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv"   "date,count"
-      
-          # Hava durumu “_y” yoksa stub
-          touch_stub "${CRIME_DATA_DIR}/sf_weather_5years_y.csv"     "date,tempmax,tempmin,precip"
-
-      # -----------------------------------------------------------
-      # Sanity: 911/311 presence & freshness (SF tz) 
-      # -----------------------------------------------------------
-      - name: Sanity: 911/311 presence & freshness (SF tz)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os, sys, pandas as pd
-          from datetime import datetime, timedelta
-          from zoneinfo import ZoneInfo
-      
-          base = os.environ["CRIME_DATA_DIR"]
-          targets = [
-            (os.path.join(base, "sf_911_last_5_year.csv"),
-             ["call_datetime","incident_datetime","datetime","date"]),
-            (os.path.join(base, "sf_311_last_5_years.csv"),
-             ["requested_datetime","opened_date","created_date","date"])
-          ]
-      
-          SF = ZoneInfo("America/Los_Angeles")
-          today = datetime.now(SF).date()
-          max_lag = int(os.getenv("FRESHNESS_SF_MAX_LAG_DAYS","2"))
-          min_ok = today - timedelta(days=max_lag)
-      
-          def preview(path, cols):
-            if not os.path.exists(path):
-              print(f"❌ Missing expected file: {path}", file=sys.stderr)
-              sys.exit(2)
-            try:
-              df = pd.read_csv(path, nrows=5000)
-            except Exception as e:
-              print(f"❌ Failed to read {path}: {e}", file=sys.stderr)
-              sys.exit(2)
-      
-            dt = None
-            for c in cols:
-              if c in df.columns:
-                s = pd.to_datetime(df[c], errors="coerce")
-                if s.notna().any():
-                  dt = s.max().date()
-                  break
-      
-            rows = len(df)
-            print(f"📄 {os.path.basename(path)} rows={rows}")
-            if dt is None:
-              print(f"⚠️ No parseable datetime in {path} (first 5000 rows).", file=sys.stderr)
-            else:
-              print(f"📅 {os.path.basename(path)} max_date={dt}")
-              if dt < min_ok:
-                print(f"⚠️ Stale ({dt} < {min_ok}) → check updater.", file=sys.stderr)
-      
-          for p, cols in targets:
-            preview(p, cols)
-          PY
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_crime.csv" || true
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv" || true
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv" || true
+          head -n 3 "${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv" || true
 
       - name: Write build info
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -1351,6 +1074,7 @@ jobs:
           set -euo pipefail
           find . -type f -name 'sf_911_last_5_year*.csv' ! -path "./${{ env.CRIME_DATA_DIR }}/*" -delete || true
           find . -type f -name 'sf_311_last_5_years*.csv' ! -path "./${{ env.CRIME_DATA_DIR }}/*" -delete || true
+      # ======================= /NEW =======================
 
       # Parquet'leri ayrı artifact olarak yükle
       - name: Upload Parquet artifact (opsiyonel)
@@ -1361,42 +1085,35 @@ jobs:
           path: parquet_out/
           if-no-files-found: warn
 
-      - name: Upload artifact
+      # ---- ÇIKTILAR ----
+      - name: Upload artifact (varsayılan)
         if: ${{ steps.gate.outputs.proceed == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.persist == 'artifact')) }}
         uses: actions/upload-artifact@v4
         with:
           name: sf-crime-pipeline-output
-          if-no-files-found: warn
-          retention-days: 14
           path: |
-            # --- 911/311 (explicit garanti) ---
-            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year_y.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_y.csv
-      
-            # --- diğerleri ---
             ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_02.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_03.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_04.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_05.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_06.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_07.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
             ${{ env.CRIME_DATA_DIR }}/sf_population.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_pois_cleaned_with_geoid.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_07.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_06.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_05.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_04.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_03.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_02.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years*.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_y.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year_y.csv
             ${{ env.CRIME_DATA_DIR }}/sf_bus_stops_with_geoid.csv
             ${{ env.CRIME_DATA_DIR }}/sf_train_stops_with_geoid.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_pois_cleaned_with_geoid.csv
             ${{ env.CRIME_DATA_DIR }}/sf_weather_5years.csv
             ${{ env.CRIME_DATA_DIR }}/sf_weather_5years_y.csv
             ${{ env.CRIME_DATA_DIR }}/*.geojson
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_year*.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years*.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year*.csv
             ${{ env.CRIME_DATA_DIR }}/risk_hourly*.csv
             ${{ env.CRIME_DATA_DIR }}/patrol_recs*.csv
             ${{ env.CRIME_DATA_DIR }}/metrics_*.csv
@@ -1405,4 +1122,5 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/oof_base_probs*.npz
             ${{ env.CRIME_DATA_DIR }}/yarin.csv
             ${{ env.CRIME_DATA_DIR }}/week.csv
-      
+          if-no-files-found: warn
+          retention-days: 14
