@@ -231,48 +231,25 @@ jobs:
           set -e
           python -u update_crime.py
 
-      # 02) 911 çıktıları üret
       - name: 02) 911 → sf_crime_01.csv
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
-          python -u update_911.py
-      
-      # 02.1) 911 dosyalarını aynı artefact'a ekle
-      - name: Upload 911 CSVs
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: sf-crime-pipeline-output
-          if-no-files-found: warn
-          path: |
-            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year_y.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_911_recent.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
-      
-      # 03) 311 çıktıları üret
-      - name: 03) 311 → sf_crime_02.csv
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -e
-          python -u update_311.py
-      
-      # 03.1) 311 dosyalarını AYNI artefact'a ekle
-      - name: Upload 311 CSVs
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: sf-crime-pipeline-output   # ← aynı isim → aynı artifact'a ekler
-          if-no-files-found: warn
-          path: |
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_3h.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_y.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_year.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_year_y.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_crime_02.csv
+          if [ -f update_911.py ]; then
+            python -u update_911.py
+          else
+            python -u scripts/update_911.py
+          fi
 
+      # -------------------- 311 --------------------
+      - name: 03) 311 → sf_crime_02.csv
+        run: |
+          set -e
+          if [ -f update_311.py ]; then
+            python -u update_311.py
+          else
+            python -u scripts/update_311.py
+          fi
+          
       - name: 04) Nüfus → sf_crime_03.csv (demografi + nüfus)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
