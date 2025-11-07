@@ -236,7 +236,7 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
-          python -u scripts/update_911.py
+          python -u update_911.py
       
       # 02.1) 911 dosyalarını aynı artefact'a ekle
       - name: Upload 911 CSVs
@@ -256,7 +256,7 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
-          python -u scripts/update_311.py
+          python -u update_311.py
       
       # 03.1) 311 dosyalarını AYNI artefact'a ekle
       - name: Upload 311 CSVs
