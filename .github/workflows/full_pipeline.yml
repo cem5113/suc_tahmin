@@ -246,18 +246,26 @@ jobs:
           CANDS=(
             "sf_911_last_5_year.csv"
             "sf_911_last_5_year_y.csv"
+            "sf_911_last_5_year.csv.gz"
+            "sf_911_last_5_year_y.csv.gz"
             "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
             "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
+            "${CRIME_DATA_DIR}/sf_911_last_5_year.csv.gz"
+            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv.gz"
             "data/sf_911_last_5_year.csv"
             "data/sf_911_last_5_year_y.csv"
+            "data/sf_911_last_5_year.csv.gz"
+            "data/sf_911_last_5_year_y.csv.gz"
             "outputs/sf_911_last_5_year.csv"
             "outputs/sf_911_last_5_year_y.csv"
+            "outputs/sf_911_last_5_year.csv.gz"
+            "outputs/sf_911_last_5_year_y.csv.gz"
           )
           for p in "${CANDS[@]}"; do
             if [ -f "$p" ]; then
               base="$(basename "$p")"
-              # aynı dosya mı? → kopyalama
-              if [ "$p" -ef "${CRIME_DATA_DIR}/${base}" ]; then
+              # aynı dosya mı? → atla
+              if [ -e "${CRIME_DATA_DIR}/${base}" ] && [ "$p" -ef "${CRIME_DATA_DIR}/${base}" ]; then
                 echo "skip (same file): $p"
                 continue
               fi
@@ -286,18 +294,26 @@ jobs:
           CANDS=(
             "sf_311_last_5_years.csv"
             "sf_311_last_5_years_y.csv"
+            "sf_311_last_5_years.csv.gz"
+            "sf_311_last_5_years_y.csv.gz"
             "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
             "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv"
+            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv.gz"
+            "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv.gz"
             "data/sf_311_last_5_years.csv"
             "data/sf_311_last_5_years_y.csv"
+            "data/sf_311_last_5_years.csv.gz"
+            "data/sf_311_last_5_years_y.csv.gz"
             "outputs/sf_311_last_5_years.csv"
             "outputs/sf_311_last_5_years_y.csv"
+            "outputs/sf_311_last_5_years.csv.gz"
+            "outputs/sf_311_last_5_years_y.csv.gz"
           )
           for p in "${CANDS[@]}"; do
             if [ -f "$p" ]; then
               base="$(basename "$p")"
-              # aynı dosya mı?
-              if [ "$p" -ef "${CRIME_DATA_DIR}/${base}" ]; then
+              # aynı dosya mı? → atla
+              if [ -e "${CRIME_DATA_DIR}/${base}" ] && [ "$p" -ef "${CRIME_DATA_DIR}/${base}" ]; then
                 echo "skip (same file): $p"
                 continue
               fi
@@ -914,7 +930,30 @@ jobs:
           set -euo pipefail
           find . -type f -name 'sf_911_last_5_year*.csv' ! -path "./${{ env.CRIME_DATA_DIR }}/*" -delete || true
           find . -type f -name 'sf_311_last_5_years*.csv' ! -path "./${{ env.CRIME_DATA_DIR }}/*" -delete || true
-      # ======================= /NEW =======================
+
+      - name: Pre-upload assert (911/311 must exist)
+        run: |
+          set -euo pipefail
+          echo "=== Listing ${CRIME_DATA_DIR} ==="
+          ls -lah "${CRIME_DATA_DIR}" || true
+
+          req=( "sf_911_last_5_year.csv" "sf_911_last_5_year_y.csv"
+                "sf_311_last_5_years.csv" "sf_311_last_5_years_y.csv" )
+          missing=0
+          for f in "${req[@]}"; do
+            p="${CRIME_DATA_DIR}/${f}"
+            if [ ! -f "$p" ]; then
+              echo "❌ MISSING: $p"
+              missing=$((missing+1))
+            else
+              echo "✅ FOUND: $p"
+              head -n 2 "$p" || true
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "❌ Pre-upload assert failed: $missing required file(s) missing."
+            exit 66
+          fi
 
       # Parquet'leri ayrı artifact olarak yükle
       - name: Upload Parquet artifact (opsiyonel)
@@ -931,6 +970,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sf-crime-pipeline-output
+          if-no-files-found: error
+          retention-days: 14
           path: |
             ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
@@ -944,10 +985,17 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_crime_02.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years*.csv
+
+            # 311 — hem sabit hem wildcard
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
             ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_y.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years*.csv
+
+            # 911 — hem sabit hem wildcard
             ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
             ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year_y.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year*.csv
+
             ${{ env.CRIME_DATA_DIR }}/sf_bus_stops_with_geoid.csv
             ${{ env.CRIME_DATA_DIR }}/sf_train_stops_with_geoid.csv
             ${{ env.CRIME_DATA_DIR }}/sf_pois_cleaned_with_geoid.csv
@@ -962,5 +1010,4 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/oof_base_probs*.npz
             ${{ env.CRIME_DATA_DIR }}/yarin.csv
             ${{ env.CRIME_DATA_DIR }}/week.csv
-          if-no-files-found: warn
-          retention-days: 14
+
