@@ -113,15 +113,24 @@ if not pop_val_col:
     raise RuntimeError("Nüfus CSV’de nüfus değeri için bir kolon bulunamadı (örn. population/B01003_001E/estimate).")
 
 # ----------------------------- Level & Keys -----------------------------
+# ----------------------------- Level & Keys -----------------------------
 crime_len = _mode_len(_digits_only(crime[crime_geoid_col]))
 pop_len   = _mode_len(_digits_only(pop[pop_geoid_col]))
 
 if CENSUS_GEO_LEVEL in MAP_LEN:
     join_len = MAP_LEN[CENSUS_GEO_LEVEL]
 else:
-    # auto: veriye göre makul birleşik anahtar uzunluğu
-    # Daha ince veriyi daha kaba seviyeye toplayabiliriz; county ise 5’te birleşir.
-    join_len = min(max(5, crime_len), max(5, pop_len))
+    if pop_len >= 11:
+        join_len = 11
+    elif pop_len == 5 or crime_len == 5:
+        join_len = 5
+    else:
+        join_len = min(max(5, crime_len), max(5, pop_len))
+
+# Pop >=11 iken yanlışlıkla <11 seçildiyse güvenlik yükseltmesi:
+if join_len < 11 and pop_len >= 11:
+    print("⚠️ Uyarı: pop GEOID uzunluğu >=11 iken join_len<11 seçildi; 11'e yükseltildi.")
+    join_len = 11
 
 print(f"[info] crime GEO len≈{crime_len} | pop GEO len≈{pop_len} | join_len={join_len} ({_level_name(join_len)})")
 
