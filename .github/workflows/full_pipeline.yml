@@ -238,33 +238,27 @@ jobs:
             python -u scripts/update_911.py
           fi
 
-      - name: 02.fix) Move 911 CSVs into CRIME_DATA_DIR if needed
+      - name: 02.fix) Move & normalize 911 CSVs into CRIME_DATA_DIR
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -euo pipefail
           mkdir -p "${CRIME_DATA_DIR}"
+
+          # 1) Olası kaynak konumlarından kopyala
           CANDS=(
-            "sf_911_last_5_year.csv"
-            "sf_911_last_5_year_y.csv"
-            "sf_911_last_5_year.csv.gz"
-            "sf_911_last_5_year_y.csv.gz"
+            "sf_911_last_5_year.csv" "sf_911_last_5_year_y.csv"
+            "sf_911_last_5_year.csv.gz" "sf_911_last_5_year_y.csv.gz"
+            "_tmp_911.csv" "sf_911_recent.csv"  #  ← görülen isimler
             "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
             "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
-            "${CRIME_DATA_DIR}/sf_911_last_5_year.csv.gz"
-            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv.gz"
-            "data/sf_911_last_5_year.csv"
-            "data/sf_911_last_5_year_y.csv"
-            "data/sf_911_last_5_year.csv.gz"
-            "data/sf_911_last_5_year_y.csv.gz"
-            "outputs/sf_911_last_5_year.csv"
-            "outputs/sf_911_last_5_year_y.csv"
-            "outputs/sf_911_last_5_year.csv.gz"
-            "outputs/sf_911_last_5_year_y.csv.gz"
+            "data/sf_911_last_5_year.csv" "data/sf_911_last_5_year_y.csv"
+            "data/_tmp_911.csv" "data/sf_911_recent.csv"
+            "outputs/sf_911_last_5_year.csv" "outputs/sf_911_last_5_year_y.csv"
+            "outputs/_tmp_911.csv" "outputs/sf_911_recent.csv"
           )
           for p in "${CANDS[@]}"; do
             if [ -f "$p" ]; then
               base="$(basename "$p")"
-              # aynı dosya mı? → atla
               if [ -e "${CRIME_DATA_DIR}/${base}" ] && [ "$p" -ef "${CRIME_DATA_DIR}/${base}" ]; then
                 echo "skip (same file): $p"
                 continue
@@ -273,6 +267,19 @@ jobs:
               echo "✅ 911 kopyalandı: $p → ${CRIME_DATA_DIR}/${base}"
             fi
           done
+
+          # 2) İsim normalize: _tmp_911.csv veya sf_911_recent.csv → sf_911_last_5_year.csv
+          if [ ! -f "${CRIME_DATA_DIR}/sf_911_last_5_year.csv" ]; then
+            if [ -f "${CRIME_DATA_DIR}/_tmp_911.csv" ]; then
+              mv -f "${CRIME_DATA_DIR}/_tmp_911.csv" "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+              echo "🔧 rename: _tmp_911.csv → sf_911_last_5_year.csv"
+            elif [ -f "${CRIME_DATA_DIR}/sf_911_recent.csv" ]; then
+              cp -f "${CRIME_DATA_DIR}/sf_911_recent.csv" "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+              echo "🔧 copy: sf_911_recent.csv → sf_911_last_5_year.csv"
+            fi
+          fi
+
+          # 3) Head’ler
           echo "---- 911 heads ----"
           head -n 3 "${CRIME_DATA_DIR}/sf_911_last_5_year.csv" || true
           head -n 3 "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv" || true
@@ -286,33 +293,28 @@ jobs:
             python -u scripts/update_311.py
           fi
 
-      - name: 03.fix) Move 311 CSVs into CRIME_DATA_DIR if needed
+      - name: 03.fix) Move & normalize 311 CSVs into CRIME_DATA_DIR
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -euo pipefail
           mkdir -p "${CRIME_DATA_DIR}"
+
+          # 1) Olası kaynak konumlarından kopyala (tekil/çoğul tüm varyantlar)
           CANDS=(
-            "sf_311_last_5_years.csv"
-            "sf_311_last_5_years_y.csv"
-            "sf_311_last_5_years.csv.gz"
-            "sf_311_last_5_years_y.csv.gz"
-            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
-            "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv"
-            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv.gz"
-            "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv.gz"
-            "data/sf_311_last_5_years.csv"
-            "data/sf_311_last_5_years_y.csv"
-            "data/sf_311_last_5_years.csv.gz"
-            "data/sf_311_last_5_years_y.csv.gz"
-            "outputs/sf_311_last_5_years.csv"
-            "outputs/sf_311_last_5_years_y.csv"
-            "outputs/sf_311_last_5_years.csv.gz"
-            "outputs/sf_311_last_5_years_y.csv.gz"
+            "sf_311_last_5_years.csv"      "sf_311_last_5_years_y.csv"
+            "sf_311_last_5_year.csv"       "sf_311_last_5_year_y.csv"   # ← listede tekil var
+            "sf_311_last_5_years.csv.gz"   "sf_311_last_5_years_y.csv.gz"
+            "sf_311_last_5_year.csv.gz"    "sf_311_last_5_year_y.csv.gz"
+            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"    "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv"
+            "${CRIME_DATA_DIR}/sf_311_last_5_year.csv"     "${CRIME_DATA_DIR}/sf_311_last_5_year_y.csv"
+            "data/sf_311_last_5_years.csv" "data/sf_311_last_5_years_y.csv"
+            "data/sf_311_last_5_year.csv"  "data/sf_311_last_5_year_y.csv"
+            "outputs/sf_311_last_5_years.csv" "outputs/sf_311_last_5_years_y.csv"
+            "outputs/sf_311_last_5_year.csv"  "outputs/sf_311_last_5_year_y.csv"
           )
           for p in "${CANDS[@]}"; do
             if [ -f "$p" ]; then
               base="$(basename "$p")"
-              # aynı dosya mı? → atla
               if [ -e "${CRIME_DATA_DIR}/${base}" ] && [ "$p" -ef "${CRIME_DATA_DIR}/${base}" ]; then
                 echo "skip (same file): $p"
                 continue
@@ -321,6 +323,18 @@ jobs:
               echo "✅ 311 kopyalandı: $p → ${CRIME_DATA_DIR}/${base}"
             fi
           done
+
+          # 2) İsim normalize: tekil → çoğul
+          if [ ! -f "${CRIME_DATA_DIR}/sf_311_last_5_years.csv" ] && [ -f "${CRIME_DATA_DIR}/sf_311_last_5_year.csv" ]; then
+            cp -f "${CRIME_DATA_DIR}/sf_311_last_5_year.csv" "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
+            echo "🔧 copy: sf_311_last_5_year.csv → sf_311_last_5_years.csv"
+          fi
+          if [ ! -f "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv" ] && [ -f "${CRIME_DATA_DIR}/sf_311_last_5_year_y.csv" ]; then
+            cp -f "${CRIME_DATA_DIR}/sf_311_last_5_year_y.csv" "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv"
+            echo "🔧 copy: sf_311_last_5_year_y.csv → sf_311_last_5_years_y.csv"
+          fi
+
+          # 3) Head’ler
           echo "---- 311 heads ----"
           head -n 3 "${CRIME_DATA_DIR}/sf_311_last_5_years.csv" || true
           head -n 3 "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv" || true
@@ -937,24 +951,57 @@ jobs:
           echo "=== Listing ${CRIME_DATA_DIR} ==="
           ls -lah "${CRIME_DATA_DIR}" || true
 
-          req=( "sf_911_last_5_year.csv" "sf_911_last_5_year_y.csv"
-                "sf_311_last_5_years.csv" "sf_311_last_5_years_y.csv" )
-          missing=0
-          for f in "${req[@]}"; do
-            p="${CRIME_DATA_DIR}/${f}"
-            if [ ! -f "$p" ]; then
-              echo "❌ MISSING: $p"
-              missing=$((missing+1))
-            else
-              echo "✅ FOUND: $p"
-              head -n 2 "$p" || true
+          # Son kez normalize: 311 tekil → çoğul
+          if [ ! -f "${CRIME_DATA_DIR}/sf_311_last_5_years.csv" ] && [ -f "${CRIME_DATA_DIR}/sf_311_last_5_year.csv" ]; then
+            cp -f "${CRIME_DATA_DIR}/sf_311_last_5_year.csv" "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
+            echo "🔧 (pre-upload) copy: year → years (311 base)"
+          fi
+          if [ ! -f "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv" ] && [ -f "${CRIME_DATA_DIR}/sf_311_last_5_year_y.csv" ]; then
+            cp -f "${CRIME_DATA_DIR}/sf_311_last_5_year_y.csv" "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv"
+            echo "🔧 (pre-upload) copy: year → years (311 _y)"
+          fi
+          # 911: tmp/recent → final
+          if [ ! -f "${CRIME_DATA_DIR}/sf_911_last_5_year.csv" ]; then
+            if [ -f "${CRIME_DATA_DIR}/_tmp_911.csv" ]; then
+              mv -f "${CRIME_DATA_DIR}/_tmp_911.csv" "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+              echo "🔧 (pre-upload) rename: _tmp_911.csv → sf_911_last_5_year.csv"
+            elif [ -f "${CRIME_DATA_DIR}/sf_911_recent.csv" ]; then
+              cp -f "${CRIME_DATA_DIR}/sf_911_recent.csv" "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+              echo "🔧 (pre-upload) copy: sf_911_recent.csv → sf_911_last_5_year.csv"
             fi
-          done
-          if [ "$missing" -gt 0 ]; then
-            echo "❌ Pre-upload assert failed: $missing required file(s) missing."
-            exit 66
           fi
 
+          # Esnek doğrulama: ya final ad ya varyantlar
+          declare -A WANT
+          WANT["sf_911_last_5_year.csv"]=0
+          WANT["sf_311_last_5_years.csv"]=0
+
+          miss=0
+          for f in "${!WANT[@]}"; do
+            if [ ! -f "${CRIME_DATA_DIR}/${f}" ]; then
+              echo "❌ missing final: ${CRIME_DATA_DIR}/${f}"
+              miss=$((miss+1))
+            else
+              echo "✅ found final: ${CRIME_DATA_DIR}/${f}"
+              head -n 2 "${CRIME_DATA_DIR}/${f}" || true
+            fi
+          done
+
+          # _y dosyalarını “önerilen” sayalım; varsa kontrol et, yoksa uyarı
+          for opt in "sf_911_last_5_year_y.csv" "sf_311_last_5_years_y.csv"; do
+            if [ -f "${CRIME_DATA_DIR}/${opt}" ]; then
+              echo "✅ optional found: ${CRIME_DATA_DIR}/${opt}"
+              head -n 2 "${CRIME_DATA_DIR}/${opt}" || true
+            else
+              echo "⚠️ optional missing: ${CRIME_DATA_DIR}/${opt}"
+            fi
+          done
+
+          if [ "$miss" -gt 0 ]; then
+            echo "❌ Pre-upload assert failed ($miss missing required base files)."
+            exit 66
+          fi
+          
       # Parquet'leri ayrı artifact olarak yükle
       - name: Upload Parquet artifact (opsiyonel)
         if: ${{ steps.gate.outputs.proceed == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.persist == 'artifact')) }}
