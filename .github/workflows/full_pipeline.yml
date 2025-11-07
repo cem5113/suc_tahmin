@@ -231,6 +231,18 @@ jobs:
           set -e
           python -u update_crime.py
 
+      - name: Prepack MUST-HAVE CSVs (911/311) 
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          for f in \
+            "${CRIME_DATA_DIR}/sf_911_last_5_year.csv" \
+            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"; do
+            [ -f "$f" ] || { echo "❌ Missing: $f"; exit 2; }
+            echo "OK: $f  → size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")"
+            head -n 3 "$f" || true
+          done
+
       - name: Check 911 csvs before upload
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
@@ -247,7 +259,6 @@ jobs:
           path: ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
           key: 911-${{ runner.os }}-${{ github.run_number }}
 
-      # ✅ GH auth: login YOK (GH_TOKEN var)
       - name: Prefetch sf_911_last_5_year_y.csv from previous successful run (artifact)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
@@ -1350,8 +1361,7 @@ jobs:
           path: parquet_out/
           if-no-files-found: warn
 
-      # ---- ÇIKTILAR ----
-      - name: Upload artifact 
+      - name: Upload artifact
         if: ${{ steps.gate.outputs.proceed == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.persist == 'artifact')) }}
         uses: actions/upload-artifact@v4
         with:
@@ -1359,7 +1369,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           path: |
-            # --- Çekirdek suç csv'leri
+            # --- 911/311 (explicit garanti) ---
+            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year_y.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_y.csv
+      
+            # --- diğerleri ---
             ${{ env.CRIME_DATA_DIR }}/sf_crime.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_02.csv
@@ -1371,8 +1387,6 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_y.csv
-      
-            # --- Nüfus / POI / Ulaşım / Hava
             ${{ env.CRIME_DATA_DIR }}/sf_population.csv
             ${{ env.CRIME_DATA_DIR }}/sf_pois_cleaned_with_geoid.csv
             ${{ env.CRIME_DATA_DIR }}/sf_bus_stops_with_geoid.csv
@@ -1380,33 +1394,15 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_weather_5years.csv
             ${{ env.CRIME_DATA_DIR }}/sf_weather_5years_y.csv
             ${{ env.CRIME_DATA_DIR }}/*.geojson
-      
-            # --- 311 (tekil/çoğul varyantları + latest)
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_y.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_latest.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_year.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_year_y.csv
             ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_year*.csv
             ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years*.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_3h.csv
-      
-            # --- 911 (ana + Y + latest/recent)
-            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year_y.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year_latest.csv
-            ${{ env.CRIME_DATA_DIR }}/sf_911_recent.csv
             ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year*.csv
-      
-            # --- Risk / Devriye / Metrikler / Modeller
             ${{ env.CRIME_DATA_DIR }}/risk_hourly*.csv
             ${{ env.CRIME_DATA_DIR }}/patrol_recs*.csv
             ${{ env.CRIME_DATA_DIR }}/metrics_*.csv
             ${{ env.CRIME_DATA_DIR }}/models/*.joblib
             ${{ env.CRIME_DATA_DIR }}/ablation_spatial_te.csv
             ${{ env.CRIME_DATA_DIR }}/oof_base_probs*.npz
-      
-            # --- Yardımcı özetler
             ${{ env.CRIME_DATA_DIR }}/yarin.csv
             ${{ env.CRIME_DATA_DIR }}/week.csv
       
