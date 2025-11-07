@@ -89,16 +89,32 @@ def _hour_from_range(s: str) -> int:
 def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    # date
+    # --- 1) DATE türet ---
     if "date" in out.columns:
         out["date"] = pd.to_datetime(out["date"], errors="coerce")
     elif "datetime" in out.columns:
         out["date"] = pd.to_datetime(out["datetime"], errors="coerce")
+    elif "hr_key" in out.columns:
+        s = out["hr_key"].astype(str)
+        # En yaygın kalıplar: 'YYYY-MM-DD HH', 'YYYY-MM-DD', 'YYYYMMDDHH', 'YYYYMMDD'
+        # Önce doğrudan parse etmeyi dene:
+        dt = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
+        if dt.notna().mean() <= 0.5:
+            # Temizle → sadece rakamlar
+            z = s.str.replace(r"[^0-9]", "", regex=True)
+            def _to_iso(z_):
+                if len(z_) >= 10:  # YYYYMMDDHH
+                    return f"{z_[:4]}-{z_[4:6]}-{z_[6:8]} {z_[8:10]}:00:00"
+                if len(z_) >= 8:   # YYYYMMDD
+                    return f"{z_[:4]}-{z_[4:6]}-{z_[6:8]} 00:00:00"
+                return None
+            dt = pd.to_datetime(z.map(_to_iso), errors="coerce")
+        out["date"] = dt
     else:
         out["date"] = pd.NaT
 
-    # hour_range normalize / impute
-    def hr_from_event_hour(s):
+    # --- 2) HOUR_RANGE türet/normalize ---
+    def _hr_from_event_hour(s):
         h = pd.to_numeric(s, errors="coerce").fillna(0).astype(int) % 24
         start = (h // 3) * 3
         end = (start + 3) % 24
@@ -111,17 +127,24 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
             hr[0].astype(float).astype(int).map("{:02d}".format) + "-" +
             hr[1].astype(float).astype(int).map("{:02d}".format)
         )
-        # kalan NaN'ler için event_hour kullan
         miss = out["hour_range"].isna()
         if miss.any() and "event_hour" in out.columns:
-            out.loc[miss, "hour_range"] = hr_from_event_hour(out.loc[miss, "event_hour"])
+            out.loc[miss, "hour_range"] = _hr_from_event_hour(out.loc[miss, "event_hour"])
     elif "event_hour" in out.columns:
-        out["hour_range"] = hr_from_event_hour(out["event_hour"])
+        out["hour_range"] = _hr_from_event_hour(out["event_hour"])
     else:
-        out["hour_range"] = np.nan
+        # hr_key biçimi 'YYYY-MM-DD HH' ise buradan saat çıkar
+        if "hr_key" in out.columns:
+            hh = out["hr_key"].astype(str).str.extract(r"\b(\d{1,2})\b")[0]
+            if hh.notna().any():
+                out["hour_range"] = _hr_from_event_hour(hh)
+            else:
+                out["hour_range"] = np.nan
+        else:
+            out["hour_range"] = np.nan
 
     return out
-
+  
 def _load_neighbors(path: str):
     """
     Komşuluk dosyası opsiyonel. Format örnekleri:
@@ -633,6 +656,11 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     # Yaz: risk_hourly.csv (post_patrol.py bunu bekliyor)
     risk_hourly_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
     risk_multi.to_csv(risk_hourly_path, index=False)
+  
+      try:
+          risk_multi.to_parquet(os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.parquet"), index=False)
+      except Exception as e:
+          print(f"[WARN] risk_hourly parquet yazılamadı: {e}")
 
     # Seviyeleri hızlı etiketlemek istiyorsanız (opsiyonel):
     # q80 = risk_multi["risk_score"].quantile(0.8)
@@ -661,6 +689,10 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
                 rec_path = os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.csv")
                 recs.to_csv(rec_path, index=False)
                 print(f"Patrol recs → {rec_path}")
+                        try:
+                            recs.to_parquet(os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.parquet"), index=False)
+                        except Exception as e:
+                            print(f"[WARN] patrol_recs parquet yazılamadı: {e}")
         else:
             print("ℹ️ Tek-gün patrol özeti atlandı (tarih yok).")
 
@@ -724,6 +756,22 @@ if __name__ == "__main__":
     counts, nums, cats = build_feature_lists(df)
     all_feats = list(dict.fromkeys(counts + nums + cats))
 
+    if "GEOID" in df.columns:
+        df["GEOID"] = df["GEOID"].astype(str).str.extract(r"(\d+)")[0].str[-GEOID_LEN:].str.zfill(GEOID_LEN)
+
+    # --- is_* bayraklarını 0/1'e çevir
+    for col in [c for c in df.columns if c.startswith("is_")] + [
+        "is_weekend","is_night","is_school_hour","is_business_hour",
+        "is_near_police","is_near_government"
+    ]:
+        if col in df.columns:
+            if df[col].dtype == object:
+                m = df[col].astype(str).str.lower().map({
+                    "true":1,"yes":1,"y":1,"false":0,"no":0,"n":0,"1":1,"0":0
+                })
+                df[col] = pd.to_numeric(m.fillna(df[col]), errors="coerce")
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+  
     # Leakage avcısı
     sus, info = find_leaky_numeric_features(df, all_feats, df["Y_label"].astype(int))
     if sus:
