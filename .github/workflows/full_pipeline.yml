@@ -238,6 +238,31 @@ jobs:
             python -u scripts/update_911.py
           fi
 
+      - name: 02.fix) Move 911 CSVs into CRIME_DATA_DIR if needed
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${CRIME_DATA_DIR}"
+          CANDS=(
+            "sf_911_last_5_year.csv"
+            "sf_911_last_5_year_y.csv"
+            "${CRIME_DATA_DIR}/sf_911_last_5_year.csv"
+            "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv"
+            "data/sf_911_last_5_year.csv"
+            "data/sf_911_last_5_year_y.csv"
+            "outputs/sf_911_last_5_year.csv"
+            "outputs/sf_911_last_5_year_y.csv"
+          )
+          for p in "${CANDS[@]}"; do
+            if [ -f "$p" ]; then
+              cp -f "$p" "${CRIME_DATA_DIR}/"
+              echo "✅ 911 kopyalandı: $p → ${CRIME_DATA_DIR}/"
+            fi
+          done
+          echo "---- 911 heads ----"
+          head -n 3 "${CRIME_DATA_DIR}/sf_911_last_5_year.csv" || true
+          head -n 3 "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv" || true
+
       # -------------------- 311 --------------------
       - name: 03) 311 → sf_crime_02.csv
         run: |
@@ -247,6 +272,31 @@ jobs:
           else
             python -u scripts/update_311.py
           fi
+
+      - name: 03.fix) Move 311 CSVs into CRIME_DATA_DIR if needed
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${CRIME_DATA_DIR}"
+          CANDS=(
+            "sf_311_last_5_years.csv"
+            "sf_311_last_5_years_y.csv"
+            "${CRIME_DATA_DIR}/sf_311_last_5_years.csv"
+            "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv"
+            "data/sf_311_last_5_years.csv"
+            "data/sf_311_last_5_years_y.csv"
+            "outputs/sf_311_last_5_years.csv"
+            "outputs/sf_311_last_5_years_y.csv"
+          )
+          for p in "${CANDS[@]}"; do
+            if [ -f "$p" ]; then
+              cp -f "$p" "${CRIME_DATA_DIR}/"
+              echo "✅ 311 kopyalandı: $p → ${CRIME_DATA_DIR}/"
+            fi
+          done
+          echo "---- 311 heads ----"
+          head -n 3 "${CRIME_DATA_DIR}/sf_311_last_5_years.csv" || true
+          head -n 3 "${CRIME_DATA_DIR}/sf_311_last_5_years_y.csv" || true
           
       - name: 04) Nüfus → sf_crime_03.csv (demografi + nüfus)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -574,6 +624,33 @@ jobs:
 
           echo "neighbors.csv (ilk 10 satır):"
           head -n 10 "${DEST}" || true
+
+      - name: 10.6) sf_crime_07 → sf_crime_08 (komşuluk ekleme)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+        run: |
+          set -e
+          [ -f "${CRIME_DATA_DIR}/sf_crime_07.csv" ] || { echo "❌ sf_crime_07.csv yok"; exit 2; }
+          [ -f "${NEIGH_FILE}" ] || { echo "❌ neighbors.csv yok: ${NEIGH_FILE}"; exit 3; }
+
+          # Doğru betik yolunu bul ve çalıştır
+          if [ -f scripts/make_neighbors.py ]; then
+            PY=scripts/make_neighbors.py
+          elif [ -f make_neighbors.py ]; then
+            PY=make_neighbors.py
+          else
+            echo "❌ make_neighbors.py bulunamadı (scripts/ altında olmalı)."
+            exit 4
+          fi
+
+          python -u "$PY"
+
+          # Çıktıyı doğrula
+          [ -f "${CRIME_DATA_DIR}/sf_crime_08.csv" ] || { echo "❌ sf_crime_08.csv oluşmadı"; exit 5; }
+          echo "---- sf_crime_08.csv (head) ----"
+          head -n 10 "${CRIME_DATA_DIR}/sf_crime_08.csv" || true
           
       - name: 11) Install ML deps for stacking
         if: ${{ steps.gate.outputs.proceed == 'true' }}
