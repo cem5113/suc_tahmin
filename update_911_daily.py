@@ -56,7 +56,9 @@ CRIME_DATA_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).reso
 INPUT_CRIME_FILENAME = os.getenv("FR_CRIME_FILE", "sf_crime.csv")               # olay-bazlı suç verisi
 OUTPUT_EVENTS_DAILY  = os.getenv("FR_EVENTS_DAILY_OUT", "fr_crime_events_daily.csv")
 OUTPUT_GRID_DAILY    = os.getenv("FR_GRID_DAILY_OUT",   "fr_crime_grid_daily.csv")
-OUTPUT_DIR           = Path(os.getenv("FR_OUTPUT_DIR", "crime_prediction_data"))
+
+# 🔧 ÖNEMLİ: Tüm çıktıları artifact’a girmesi için DOĞRUDAN CRIME_DATA_DIR altına yaz.
+OUTPUT_DIR           = CRIME_DATA_DIR
 
 # 911 kaynağı (RELEASE dosyası)
 ENV_911 = os.getenv("FR_911", "").strip()
@@ -98,7 +100,7 @@ def read_911_daily() -> pd.DataFrame:
 
     df = df.dropna(subset=["GEOID", "date"]).copy()
 
-    # Günlük sayımlar + kaydırmalı pencereler
+    # Günlük sayımlar + kaydırmalı pencereler (sızıntı yok: shift(1))
     day = (
         df.groupby(["GEOID", "date"], as_index=False)
           .size()
@@ -153,6 +155,9 @@ def read_crime_events() -> pd.DataFrame:
 
 # ========================== Main ==========================
 def main():
+    log(f"📂 CRIME_DATA_DIR = {CRIME_DATA_DIR}")
+    log(f"📂 OUTPUT_DIR     = {OUTPUT_DIR}")
+
     # 911 günlük özet
     fr911_daily = read_911_daily()
     log(f"📊 911 günlük özet: {fr911_daily.shape[0]:,} satır × {fr911_daily.shape[1]} sütun")
