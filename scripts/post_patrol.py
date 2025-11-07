@@ -1,213 +1,133 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-post_patrol.py
-- risk_hourly.csv'yi okur
-- ENV'den PATROL_HORIZON_DAYS ve PATROL_TOP_K'yi alır
-- (opsiyonel) yarin.csv ve week.csv'yi date üzerinden birleştirir
-- Yarından başlayarak ufuk boyunca her saat için en riskli TOP_K GEOID'i seçer
-- Çıktı: crime_prediction_data/patrol_recs_multi.csv
+GEOID komşuluk dosyası üretir.
+- Veri setindeki GEOID uzunluğu (GEOID_LEN) ile uyumlu hale getirir.
+- Poligon katmanındaki GEOID alanını otomatik bulur (veya POLY_GEO_COL ile zorla).
+- Eşleşmeyi hem 'ilk L' hem 'son L' den dener; en yüksek örtüşmeyi seçer.
+- Queen contiguity (en az bir nokta temas) ile komşuluk kurar.
+Çıktı: crime_prediction_data/neighbors.csv  (iki sütun: GEOID,neighbor)
 """
 
 import os
 from pathlib import Path
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+import re
 import pandas as pd
+import geopandas as gpd
 
-# --- Ortam / yollar ---
-CRIME_DATA_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
-CRIME_DIR = Path(CRIME_DATA_DIR)
-CRIME_DIR.mkdir(parents=True, exist_ok=True)
+CRIME_DIR    = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
+DATASET      = os.getenv("STACKING_DATASET", str(Path(CRIME_DIR) / "sf_crime_grid_full_labeled.csv"))
+GEOID_LEN    = int(os.getenv("GEOID_LEN", "11"))
+OUT_PATH     = str(Path(CRIME_DIR) / "neighbors.csv")
+POLY_FILE    = os.getenv("POLY_FILE", "").strip()      # ör: crime_prediction_data/sf_census_blocks_with_population.geojson
+POLY_GEO_COL = os.getenv("POLY_GEO_COL", "").strip()   # ör: GEOID
 
-RISK_PATH = CRIME_DIR / "risk_hourly.csv"
-OUT_PATH  = CRIME_DIR / "patrol_recs_multi.csv"
+# ---------- yardımcılar ----------
+def _only_digits(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.replace(r"\D+", "", regex=True)
 
-# --- Parametreler (ENV) ---
-SF_TZ = ZoneInfo("America/Los_Angeles")
-HORIZON_DAYS = int(os.getenv("PATROL_HORIZON_DAYS", "1"))  # ufuk (gün)
-TOP_K        = int(os.getenv("PATROL_TOP_K", "50"))        # saat başına öneri sayısı
+def _norm_left(s: pd.Series, L: int) -> pd.Series:
+    d = _only_digits(s)
+    return d.str.slice(0, L).str.zfill(L)
 
-# --- Yardımcılar ---
-def _lower_map(cols):
-    return {c.lower(): c for c in cols}
+def _norm_right(s: pd.Series, L: int) -> pd.Series:
+    d = _only_digits(s)
+    return d.str[-L:].str.zfill(L)
 
-def _ensure_date_hour(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Esnek tarih/saat kolonu tespiti:
-    - 'date' + 'hour' varsa direkt kullanır
-    - 'timestamp' / 'datetime' / 'dt' / 'ts' varsa bunlardan date+hour üretir
-    - 'day' veya 'ds' varsa 'date' gibi kabul eder
-    """
-    low = _lower_map(df.columns)
+def _geo_candidates(cols):
+    # GEOID alanı için olası isimler (öncelik sırası)
+    pri = [
+        "geoid", "geoid20", "geoid10",
+        "tract_geoid", "tractgeoid", "tractid", "tract",
+        "geo_id", "geoid_t", "geoid_tract",
+        "block_geoid", "blockid", "blockce", "blockce10", "blockce20"
+    ]
+    cl = {c.lower(): c for c in cols}
+    for k in pri:
+        if k in cl:
+            return cl[k]
+    for c in cols:
+        if re.search(r"geo|tract|block", c, re.I):
+            return c
+    return None
 
-    # Tarih kolonu adayı
-    date_col = None
-    for cand in ("date", "day", "ds"):
-        if cand in low:
-            date_col = low[cand]
-            break
+def load_dataset_keys() -> set[str]:
+    if not os.path.exists(DATASET):
+        raise SystemExit(f"Veri seti yok: {DATASET}")
+    df = pd.read_csv(DATASET, dtype={"GEOID": str}, low_memory=False)
+    if "GEOID" not in df.columns:
+        raise SystemExit("STACKING_DATASET içinde 'GEOID' kolonu yok.")
+    keys = _only_digits(df["GEOID"]).str[-GEOID_LEN:].str.zfill(GEOID_LEN).unique().tolist()
+    return set(keys)
 
-    # Saat kolonu adayı
-    hour_col = None
-    for cand in ("hour", "hr", "hh"):
-        if cand in low:
-            hour_col = low[cand]
-            break
+def find_polygon_layer(keys: set[str]):
+    cands = [Path(POLY_FILE)] if POLY_FILE else []
+    if not cands:
+        for e in ("*.geojson","*.gpkg","*.shp","*.parquet"):
+            cands += list(Path(CRIME_DIR).glob(e))
 
-    # Zaman damgası kolonu adayı
-    ts_col = None
-    for cand in ("timestamp", "datetime", "dt", "ts"):
-        if cand in low:
-            ts_col = low[cand]
-            break
+    best = None
+    best_overlap = 0
+    best_mode = None  # "left" or "right"
+    best_geocol = None
 
-    if ts_col and (date_col is None or hour_col is None):
-        # Zaman damgasından date + hour türet
-        ts = pd.to_datetime(df[ts_col], errors="coerce", utc=False)
-        # timezone yoksa SF olarak kabul edelim (tahmin)
+    for p in cands:
         try:
-            # Eğer aware değilse tz_localize yapmaz; yoksa convert
-            if ts.dt.tz is None:
-                ts = ts.dt.tz_localize(SF_TZ)
-            else:
-                ts = ts.dt.tz_convert(SF_TZ)
+            gdf = gpd.read_file(p)
+            geocol = POLY_GEO_COL or _geo_candidates(list(gdf.columns))
+            if not geocol:
+                continue
+            series = gdf[geocol].astype(str)
+            left  = set(_norm_left(series,  GEOID_LEN).unique())
+            right = set(_norm_right(series, GEOID_LEN).unique())
+            ol = len(keys & left)
+            or_ = len(keys & right)
+            if max(ol, or_) > best_overlap:
+                best = p
+                best_overlap = max(ol, or_)
+                best_mode = "left" if ol >= or_ else "right"
+                best_geocol = geocol
         except Exception:
-            pass
-        df["date"] = ts.dt.strftime("%Y-%m-%d")
-        df["hour"] = ts.dt.hour
-        date_col, hour_col = "date", "hour"
-
-    # Eğer hala date yoksa hata
-    if date_col is None:
-        raise SystemExit("risk_hourly.csv içinde tarih kolonu bulunamadı (date/day/ds ya da timestamp türetilemedi).")
-    if hour_col is None:
-        # Saat yoksa 0 kabul edelim (günlük aggr. durumları için)
-        df["hour"] = 0
-        hour_col = "hour"
-
-    # Normalize tipler
-    df[hour_col] = pd.to_numeric(df[hour_col], errors="coerce").fillna(0).astype(int)
-    # date'i iso string halinde tutalım
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce").dt.date.astype("string")
-
-    # risk skor kolonu tespiti
-    risk_col = None
-    for cand in ("risk_score", "prob", "score", "p", "yhat"):
-        if cand in low:
-            risk_col = low[cand]
-            break
-    if risk_col is None:
-        # olası tek bir sayısal skoru bulmayı deneyelim
-        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-        # hour ve muhtemel id/sayac kolonlarını çıkar
-        bad = set([hour_col])
-        cand_list = [c for c in numeric_cols if c not in bad]
-        if not cand_list:
-            raise SystemExit("risk_hourly.csv içinde risk skoru için sayısal bir kolon bulunamadı.")
-        risk_col = cand_list[0]
-
-    # geoid kolonu
-    geoid_col = None
-    for cand in ("geoid", "GEOID", "id", "cell_id", "geo"):
-        if cand.lower() in low:
-            geoid_col = low[cand.lower()]
-            break
-    if geoid_col is None:
-        raise SystemExit("risk_hourly.csv içinde GEOID kolonu bulunamadı (geoid/GEOID/id...).")
-
-    # Standart isimlerle döndür
-    out = df.rename(columns={
-        date_col: "date",
-        hour_col: "hour",
-        risk_col: "risk_score",
-        geoid_col: "geoid",
-    }).copy()
-
-    # türler
-    out["date"] = out["date"].astype(str)  # "YYYY-MM-DD"
-    out["hour"] = out["hour"].astype(int)
-    out["risk_score"] = pd.to_numeric(out["risk_score"], errors="coerce")
-    out = out.dropna(subset=["risk_score"])
-    return out
-
-def _merge_weather(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    yarin.csv ve week.csv varsa, 'date' üstünden left-join yapar.
-    Çakışan kolon adlarını otomatik ayırmak için suffix kullanır.
-    Yoksa dokunmaz.
-    """
-    ypath = CRIME_DIR / "yarin.csv"
-    wpath = CRIME_DIR / "week.csv"
-    merged = df
-
-    def _safe_merge(left, right_path, suffix):
-        if right_path.exists():
-            try:
-                r = pd.read_csv(right_path)
-                if "date" in r.columns:
-                    r["date"] = pd.to_datetime(r["date"], errors="coerce").dt.date.astype("string")
-                return left.merge(r, on="date", how="left", suffixes=("", suffix))
-            except Exception:
-                return left
-        return left
-
-    merged = _safe_merge(merged, ypath, "_t")
-    merged = _safe_merge(merged, wpath, "_w")
-    return merged
-
-def main():
-    if not RISK_PATH.exists():
-        raise SystemExit(f"risk_hourly.csv bulunamadı: {RISK_PATH}")
-
-    print(f"[post_patrol] HORIZON_DAYS={HORIZON_DAYS}, TOP_K={TOP_K}")
-    print(f"[post_patrol] RISK_PATH={RISK_PATH}")
-
-    # 1) Risk verisini oku ve standartlaştır
-    risk = pd.read_csv(RISK_PATH, low_memory=False)
-    risk = _ensure_date_hour(risk)
-
-    # 2) Ufku hesapla (yarından başlayarak)
-    today_sf  = datetime.now(SF_TZ).date()
-    start_day = today_sf + timedelta(days=1)
-    end_day   = start_day + timedelta(days=HORIZON_DAYS - 1)
-
-    mask = (risk["date"] >= start_day.isoformat()) & (risk["date"] <= end_day.isoformat())
-    risk_h = risk.loc[mask].copy()
-    if risk_h.empty:
-        # veri yoksa son çare: mevcut günleri kullan (geliştirme/deneme kolaylığı)
-        risk_h = risk.copy()
-
-    # 3) (Opsiyonel) hava verisini ekle
-    risk_h = _merge_weather(risk_h)
-
-    # 4) Saat saat sıralama ve TOP_K seçimi
-    out_parts = []
-    for (d, h), g in risk_h.groupby(["date", "hour"], sort=True):
-        g = g.sort_values("risk_score", ascending=False).head(TOP_K).copy()
-        if g.empty:
             continue
-        g["rank"] = range(1, len(g) + 1)
-        out_parts.append(g)
 
-    if not out_parts:
-        # hiç parça çıkmadıysa boş CSV yazalım
-        pd.DataFrame(columns=["date", "hour", "geoid", "risk_score", "rank"]).to_csv(OUT_PATH, index=False)
-        print(f"[post_patrol] UYARI: Seçim çıkmadı, boş dosya yazıldı → {OUT_PATH}")
-        return
+    if not best or best_overlap == 0:
+        raise SystemExit("Polygon katmanı bulunamadı: crime_prediction_data içinde GEOID örtüşmesi yakalanamadı.")
+    print(f"✅ Poligon: {best.name} | GEOID sütunu: {best_geocol} | normalize: {best_mode} {GEOID_LEN}")
+    return str(best), best_geocol, best_mode
 
-    patrol = pd.concat(out_parts, ignore_index=True)
-    # Sıralı çıktı (d, h, rank)
-    patrol = patrol.sort_values(["date", "hour", "rank"]).reset_index(drop=True)
+def build_neighbors(poly_path: str, geocol: str, mode: str, keys: set[str]):
+    gdf = gpd.read_file(poly_path)[[geocol, "geometry"]].copy()
+    gdf["GKEY"] = _norm_left(gdf[geocol], GEOID_LEN) if mode == "left" else _norm_right(gdf[geocol], GEOID_LEN)
+    gdf = gdf[gdf["GKEY"].isin(keys)].dropna(subset=["geometry"]).reset_index(drop=True)
 
-    # 5) Yaz
-    patrol.to_csv(OUT_PATH, index=False)
-    print(f"[post_patrol] ✅ Yazıldı → {OUT_PATH} | rows={len(patrol)}")
+    # metrik CRS + spatial index
     try:
-        print(patrol.head(10).to_string(index=False))
+        gdf = gdf.to_crs(3857)
     except Exception:
         pass
+    sidx = gdf.sindex
+
+    pairs = set()
+    for i, geom in enumerate(gdf.geometry):
+        for j in sidx.intersection(geom.bounds):
+            if j <= i:
+                continue
+            g2 = gdf.geometry.iloc[j]
+            # Queen contiguity: sınır veya köşe teması
+            if geom.touches(g2) or geom.boundary.intersects(g2.boundary):
+                gi = gdf["GKEY"].iloc[i]; gj = gdf["GKEY"].iloc[j]
+                if gi != gj:
+                    pairs.add((gi, gj)); pairs.add((gj, gi))
+
+    out = pd.DataFrame(sorted(pairs), columns=["GEOID", "neighbor"])
+    Path(CRIME_DIR).mkdir(parents=True, exist_ok=True)
+    out.to_csv(OUT_PATH, index=False)
+    print(f"✅ Neighbors → {OUT_PATH} | edge_count={len(out)}")
+    if not out.empty:
+        print(out.head(10).to_string(index=False))
+    return OUT_PATH
 
 if __name__ == "__main__":
-    main()
+    keys = load_dataset_keys()
+    poly_path, geocol, mode = find_polygon_layer(keys)
+    build_neighbors(poly_path, geocol, mode, keys)
