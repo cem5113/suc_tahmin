@@ -1,4 +1,8 @@
-# update_911.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# update_911.py — 911 özetini üretir/günceller ve sf_crime_grid_full_labeled.csv ile birleştirip sf_crime_01.csv yazar.
+# TÜM ÇIKTILAR OUT_DIR (= CRIME_DATA_DIR) ALTINA DÜŞER.
+
 from __future__ import annotations
 import os, re, io, time, requests
 from datetime import datetime, timedelta, timezone
@@ -9,16 +13,14 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 
-# zoneinfo güvenli import (SF saat dilimi), olmazsa zarifçe devre dışı
+# ============================================================================
+# TZ / LOG / HELPERS
+# ============================================================================
 try:
     import zoneinfo
     SF_TZ = zoneinfo.ZoneInfo("America/Los_Angeles")
 except Exception:
     SF_TZ = None
-
-# =========================
-# LOG / HELPERS
-# =========================
 
 def log(msg: str):
     print(msg, flush=True)
@@ -75,46 +77,40 @@ def is_lfs_pointer_file(p: Path) -> bool:
     except Exception:
         return False
 
-# =========================
+# ============================================================================
 # CONFIG & PATHS
-# =========================
-
-# ✅ Panel ile tutarlılık: varsayılan GEOID uzunluğu 11
+# ============================================================================
 DEFAULT_GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
 
-# Çalışma dizini ENV ile yönetilebilir — normalize + depo adıyla çakışmayı önle
+# BASE_DIR (sadece okuma adayları için kullanıyoruz)
 _raw_base = os.getenv("CRIME_DATA_DIR", "crime_prediction_data").strip().strip("/\\")
 repo_leaf = Path.cwd().name  # Actions: /work/<repo>/<repo>
 if not os.path.isabs(_raw_base) and Path(_raw_base).name == repo_leaf:
-    _raw_base = "."  # aynı isimle alt klasör açma
+    _raw_base = "."
 BASE_DIR = str(Path(_raw_base).resolve()) if _raw_base != "." else "."
 Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
-
 log(f"📂 BASE_DIR = {Path(BASE_DIR).resolve()}")
 
-# 911 summary dosya adları
-LOCAL_NAME = "sf_911_last_5_year.csv"
+# OUT_DIR (ARTIFACT KÖKÜ): TÜM ÇIKTILAR BURAYA
 OUT_DIR = Path(os.getenv("CRIME_DATA_DIR", str(Path(BASE_DIR)))).resolve()
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# 911 summary dosya adları (OUT_DIR altında)
+LOCAL_NAME = "sf_911_last_5_year.csv"
 local_summary_path = OUT_DIR / LOCAL_NAME
 Y_NAME = "sf_911_last_5_year_y.csv"
 y_summary_path     = OUT_DIR / Y_NAME
 
-# Crime grid (yalnızca BASE_DIR ve kök)
-CRIME_GRID_CANDIDATES = [
-    Path(BASE_DIR) / "sf_crime_grid_full_labeled.csv",
-    Path("./sf_crime_grid_full_labeled.csv"),
-]
-merged_output_path = Path(os.getenv("DAILY_OUT", str(Path(BASE_DIR) / "sf_crime_01.csv")))
+# sf_crime_01.csv (OUT_DIR altında)
+merged_output_path = Path(os.getenv("DAILY_OUT", str(OUT_DIR / "sf_crime_01.csv")))
 if not merged_output_path.is_absolute():
-    merged_output_path = Path(BASE_DIR) / merged_output_path.name
-
-# (opsiyonel ama faydalı: env’i ve hedefi loglayın)
+    merged_output_path = OUT_DIR / merged_output_path.name
 log(f"🧾 DAILY_OUT seen as: {os.getenv('DAILY_OUT', '(unset)')}")
 log(f"📝 Writing sf_crime_01 → {merged_output_path}")
 
-# Census blocks (komşu için — yalnızca BASE_DIR ve kök)
+# Census blocks (komşu/ensure_geoid için) — OUT_DIR öncelikli
 CENSUS_CANDIDATES = [
+    OUT_DIR / "sf_census_blocks_with_population.geojson",
     Path(BASE_DIR) / "sf_census_blocks_with_population.geojson",
     Path("./sf_census_blocks_with_population.geojson"),
 ]
@@ -140,17 +136,34 @@ RAW_911_URL_CANDIDATES = [
     "https://github.com/cem5113/crime_prediction_data/releases/download/v1.0.1/sf_911_last_5_year.csv",
 ]
 
+# Komşu ayarları
+ENABLE_NEIGHBORS  = os.getenv("ENABLE_NEIGHBORS", "1").lower() in ("1","true","yes","on")
+NEIGHBOR_METHOD   = os.getenv("NEIGHBOR_METHOD", "touches")  # touches | radius
+NEIGHBOR_RADIUS_M = float(os.getenv("NEIGHBOR_RADIUS_M", "500"))
+
+# SF BBOX (lat/lon temizliği için)
+SF_BBOX = (-123.2, 37.6, -122.3, 37.9)
+
+# ============================================================================
+# IO HELPERS
+# ============================================================================
+def read_large_csv_in_chunks(path, usecols=None, chunksize=200_000):
+    try:
+        it = pd.read_csv(path, low_memory=False, dtype={"GEOID": "string"}, usecols=usecols, chunksize=chunksize)
+        return pd.concat(it, ignore_index=True)
+    except ValueError:
+        it = pd.read_csv(path, low_memory=False, dtype={"GEOID": "string"}, chunksize=chunksize)
+        return pd.concat(it, ignore_index=True)
+
 def _pick_working_release_url(candidates: list[str]) -> str:
     """
-    Aday release URL'lerini sırayla dener; erişilebilir ve LFS pointer olmayan
-    ilkini döndürür. Hiçbiri olmazsa RuntimeError fırlatır.
+    Aday release URL'lerini sırayla dener; erişilebilir ve LFS pointer olmayan ilkini döndürür.
     """
     for u in candidates:
         if not u:
             continue
         try:
             r = requests.get(u, timeout=20)
-            # Git LFS pointer'ları genelde çok küçük olur ve başında 'git-lfs' geçer
             if r.ok and r.content and len(r.content) > 200 and b"git-lfs" not in r.content[:200].lower():
                 log(f"⬇️ Release kaynağı seçildi: {u}")
                 return u
@@ -160,51 +173,13 @@ def _pick_working_release_url(candidates: list[str]) -> str:
             log(f"⚠️ Ulaşılamadı: {u} ({e})")
     raise RuntimeError("❌ Hiçbir release 911 URL’i erişilebilir değil.")
 
-# Komşu ayarları
-ENABLE_NEIGHBORS  = os.getenv("ENABLE_NEIGHBORS", "1").lower() in ("1","true","yes","on")
-NEIGHBOR_METHOD   = os.getenv("NEIGHBOR_METHOD", "touches")  # touches | radius
-NEIGHBOR_RADIUS_M = float(os.getenv("NEIGHBOR_RADIUS_M", "500"))
-
-# BBOX temizliği
-SF_BBOX = (-123.2, 37.6, -122.3, 37.9)
-
-# Zaman pencereleri (rolling)
-ROLL_WINDOWS = (3, 7)
-
-# --- KOMBİNE KAYIT HELPER ---
-def save_911_both(df: pd.DataFrame):
-    """911 özetini hem normal ada hem _y ada kaydet."""
-    safe_save_csv(df, str(local_summary_path))
-    safe_save_csv(df, str(y_summary_path))
-    log(f"💾 911 özet yazıldı → {local_summary_path.name} & {y_summary_path.name} (satır={len(df)})")
-
-# =========================
-# IO HELPERS
-# =========================
-
-def read_large_csv_in_chunks(path, usecols=None, chunksize=200_000):
-    try:
-        it = pd.read_csv(path, low_memory=False, dtype={"GEOID": "string"}, usecols=usecols, chunksize=chunksize)
-        return pd.concat(it, ignore_index=True)
-    except ValueError:
-        it = pd.read_csv(path, low_memory=False, dtype={"GEOID": "string"}, chunksize=chunksize)
-        return pd.concat(it, ignore_index=True)
-
-# =========================
-# 911 FETCH & SUMMARY
-# =========================
-
-def try_small_request(params, headers):
-    p = dict(params)
-    p["$limit"], p["$offset"] = 1, 0
-    r = requests.get(SF911_API_URL, headers=headers, params=p, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    return r
-
+# ============================================================================
+# GEO / BLOCKS
+# ============================================================================
 def _load_blocks() -> tuple[gpd.GeoDataFrame, int]:
     census_path = next((p for p in CENSUS_CANDIDATES if p.exists()), None)
     if census_path is None:
-        raise FileNotFoundError("❌ Nüfus blokları GeoJSON yok (BASE_DIR veya kök dizinde).")
+        raise FileNotFoundError("❌ Nüfus blokları GeoJSON yok (OUT_DIR/BASE_DIR/kök).")
     gdf_blocks = gpd.read_file(census_path)
     if "GEOID" not in gdf_blocks.columns:
         cand = [c for c in gdf_blocks.columns if str(c).upper().startswith("GEOID")]
@@ -256,6 +231,9 @@ def ensure_geoid(df: pd.DataFrame) -> pd.DataFrame:
     out = out.dropna(subset=["GEOID"]).copy()
     return out
 
+# ============================================================================
+# SUMMARY BUILDERS
+# ============================================================================
 def make_standard_summary(raw: pd.DataFrame) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame(columns=["GEOID","date","hour_range","911_request_count_hour_range","911_request_count_daily(before_24_hours)"])
@@ -284,8 +262,6 @@ def make_standard_summary(raw: pd.DataFrame) -> pd.DataFrame:
     cols_tail = [c for c in ["date","hour_range","GEOID"] if c in out.columns]
     cols = [c for c in out.columns if c not in cols_tail] + cols_tail
     return out[cols]
-
-# -------------------- LOCAL BASE (artifact/regular) & RELEASE ------------------
 
 def summary_from_local(path: Path | str, min_date=None) -> pd.DataFrame:
     log(f"📥 Yerel 911 tabanı okunuyor: {path}")
@@ -323,44 +299,11 @@ def summary_from_local(path: Path | str, min_date=None) -> pd.DataFrame:
         std = std[std["date"] >= min_date]
     return std
 
-def ensure_local_911_base() -> Optional[Path]:
-    """
-    Tercih sırası:
-      1) BASE_DIR/ sf_911_last_5_year_y.csv (önceki full pipeline’dan)
-      2) BASE_DIR/ sf_911_last_5_year.csv
-      3) kök ./ alternatifleri
-    """
-    y_candidates = [
-        Path(BASE_DIR) / "sf_911_last_5_year_y.csv",
-        Path("./sf_911_last_5_year_y.csv"),
-        Path("outputs/sf_911_last_5_year_y.csv"),
-    ]
-    for p in y_candidates:
-        if p.exists():
-            if p.suffix == ".csv" and is_lfs_pointer_file(p):
-                continue
-            log(f"📦 911 base (preferred Y) bulundu: {p}")
-            return p
-
-    regular_candidates = [
-        Path(BASE_DIR) / "sf_911_last_5_year.csv",
-        Path("./sf_911_last_5_year.csv"),
-    ]
-    for p in regular_candidates:
-        if p.exists():
-            if p.suffix == ".csv" and is_lfs_pointer_file(p):
-                continue
-            log(f"📦 911 base (regular) bulundu: {p}")
-            return p
-
-    return None
-
-# ------------------------- RELEASE → BASE SUMMARY ----------------------------
-
 def summary_from_release(url: str, min_date=None) -> pd.DataFrame:
     log(f"⬇️ Release 911 özeti indiriliyor: {url}")
     r = requests.get(url, timeout=120); r.raise_for_status()
-    tmp = Path(BASE_DIR) / "_tmp_911.csv"; ensure_parent(str(tmp))
+    tmp = OUT_DIR / "_tmp_911.csv"  # OUT_DIR altına indir
+    ensure_parent(str(tmp))
     tmp.write_bytes(r.content)
     df = pd.read_csv(tmp, low_memory=False, dtype={"GEOID":"string"})
     is_already_summary = ( {"date","hour_range"}.issubset(df.columns)
@@ -372,7 +315,6 @@ def summary_from_release(url: str, min_date=None) -> pd.DataFrame:
         df["date"] = to_date(df["date"])
         if "GEOID" in df.columns:
             df["GEOID"] = normalize_geoid(df["GEOID"], DEFAULT_GEOID_LEN)
-        # hour_range normalize
         def _fmt_hr(hr):
             m = re.match(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$", str(hr))
             if not m: return None
@@ -394,7 +336,53 @@ def summary_from_release(url: str, min_date=None) -> pd.DataFrame:
         std = std[std["date"] >= min_date]
     return std
 
-# ----------------------- API INCREMENT (RANGE) --------------------------------
+# ============================================================================
+# LOCAL BASE / RELEASE SEÇİMİ
+# ============================================================================
+def ensure_local_911_base() -> Optional[Path]:
+    """
+    Tercih sırası:
+      1) OUT_DIR/ sf_911_last_5_year_y.csv
+      2) BASE_DIR/ sf_911_last_5_year_y.csv
+      3) kök ./ alternatifleri
+      4) OUT_DIR/ ve BASE_DIR/ regular
+    """
+    y_candidates = [
+        OUT_DIR / "sf_911_last_5_year_y.csv",
+        Path(BASE_DIR) / "sf_911_last_5_year_y.csv",
+        Path("./sf_911_last_5_year_y.csv"),
+        Path("outputs/sf_911_last_5_year_y.csv"),
+    ]
+    for p in y_candidates:
+        if p.exists():
+            if p.suffix == ".csv" and is_lfs_pointer_file(p):
+                continue
+            log(f"📦 911 base (preferred Y) bulundu: {p}")
+            return p
+
+    regular_candidates = [
+        OUT_DIR / "sf_911_last_5_year.csv",
+        Path(BASE_DIR) / "sf_911_last_5_year.csv",
+        Path("./sf_911_last_5_year.csv"),
+    ]
+    for p in regular_candidates:
+        if p.exists():
+            if p.suffix == ".csv" and is_lfs_pointer_file(p):
+                continue
+            log(f"📦 911 base (regular) bulundu: {p}")
+            return p
+
+    return None
+
+# ============================================================================
+# INCREMENTAL FETCH (RANGE)
+# ============================================================================
+def try_small_request(params, headers):
+    p = dict(params)
+    p["$limit"], p["$offset"] = 1, 0
+    r = requests.get(SF911_API_URL, headers=headers, params=p, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+    return r
 
 def fetch_range_all_chunks(start_day, end_day) -> Optional[pd.DataFrame]:
     dt_candidates = ["received_time","received_datetime","date","datetime","call_datetime","received_dttm","call_date"]
@@ -434,7 +422,8 @@ def fetch_range_all_chunks(start_day, end_day) -> Optional[pd.DataFrame]:
             break
         log(f"    + {len(df)} satır (range-page={page}, offset={offset})")
         pieces.append(df)
-        if len(df) < CHUNK_LIMIT: break
+        if len(df) < CHUNK_LIMIT:
+            break
         offset += CHUNK_LIMIT; page += 1; time.sleep(SLEEP_BETWEEN_REQS)
     if not pieces: return None
     return pd.concat(pieces, ignore_index=True)
@@ -529,7 +518,7 @@ def write_recent_csv(raw: pd.DataFrame, hours: int = SF911_RECENT_HOURS):
     if lon_col: out["lon"] = pd.to_numeric(tmp[lon_col], errors="coerce")
     out = out[out["ts"] >= cutoff].copy()
 
-    path = Path(BASE_DIR) / "sf_911_recent.csv"
+    path = OUT_DIR / "sf_911_recent.csv"
     safe_save_csv(out, str(path))
     log(f"ℹ️ sf_911_recent.csv yazıldı (son {hours} saat): {len(out)} satır")
 
@@ -553,30 +542,30 @@ def incremental_summary(start_day: datetime.date, end_day: datetime.date) -> pd.
         log(f"⚠️ ensure_geoid sırasında hata: {e}; GEOID’siz özet üretilecek")
     return make_standard_summary(raw)
 
-# =========================
-# MAIN: LOCAL (Y/regular) → FALLBACK RELEASE + INCREMENT → ENRICH → MERGE
-# =========================
-
+# ============================================================================
+# MAIN — LOCAL/RELEASE → INCREMENT → ENRICH → MERGE
+# ============================================================================
 five_years_ago = datetime.now(timezone.utc).date() - timedelta(days=5*365)
 
 log(f"📁 911 yerel özet yolu: {local_summary_path}")
 
-# 1) Önce yerel tabanı dene (artifact'tan gelen Y öncelikli)
+# 1) Önce yerel tabanı dene (artifact -> OUT_DIR öncelikli)
 base_csv_path = ensure_local_911_base()
 if base_csv_path is not None:
     final_911 = summary_from_local(base_csv_path, min_date=five_years_ago)
-    save_911_both(final_911)
+    safe_save_csv(final_911, str(local_summary_path))
+    safe_save_csv(final_911, str(y_summary_path))
     log(f"✅ Yerel 911 özet kaydedildi → {local_summary_path} & {y_summary_path} (satır: {len(final_911)})")
 else:
     # 2) Release fallback (Y URL'leri öncelikli)
     release_url = _pick_working_release_url(RAW_911_URL_CANDIDATES)
     final_911 = summary_from_release(release_url, min_date=five_years_ago)
-    save_911_both(final_911)
+    safe_save_csv(final_911, str(local_summary_path))
+    safe_save_csv(final_911, str(y_summary_path))
     log(f"✅ Release özet kaydedildi → {local_summary_path} & {y_summary_path} (satır: {len(final_911)})")
 
 # 3) Max tarihten bugüne SF saatine göre artımlı aralık seç
 base_max_date = to_date(final_911["date"]).max() if not final_911.empty else None
-
 today_sf = (datetime.now(SF_TZ) if SF_TZ is not None else datetime.now()).date()
 if base_max_date is None:
     fetch_start, fetch_end = today_sf, today_sf
@@ -599,7 +588,8 @@ if inc is not None and not inc.empty:
                              .sort_values(subset_cols if subset_cols else ["date"])
                              .drop_duplicates(subset=subset_cols if subset_cols else ["date"], keep="last"))
     final_911 = final_911[final_911["date"] >= five_years_ago]
-    save_911_both(final_911)
+    safe_save_csv(final_911, str(local_summary_path))
+    safe_save_csv(final_911, str(y_summary_path))
     log(f"💾 911 özet GÜNCELLENDİ (base+API) → {local_summary_path} & {y_summary_path} (+{len(final_911)-before:,} satır)")
 else:
     log("ℹ️ API tarafında yeni gün yok veya boş döndü; taban veri geçerli.")
@@ -611,9 +601,7 @@ if final_911 is None or final_911.empty:
 # =========================
 # STANDARDIZE + DERIVED KEYS (hr_key, dow, season)
 # =========================
-
 hr_pat = re.compile(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
-
 def _hr_key_from_range(hr):
     m = hr_pat.match(str(hr))
     return int(m.group(1)) % 24 if m else None
@@ -633,7 +621,6 @@ log_date_range(final_911, "date", "911")
 # =========================
 # ROLLING (3g/7g) — GEOID ve GEOID×hr_key
 # =========================
-
 _day_unique = (final_911[["GEOID","date","911_request_count_daily(before_24_hours)"]]
                .drop_duplicates(subset=["GEOID","date"]))
 _day_unique = _day_unique.sort_values(["GEOID","date"]).rename(columns={"911_request_count_daily(before_24_hours)":"daily_cnt"}).reset_index(drop=True)
@@ -653,7 +640,6 @@ for W in (3, 7):
 # =========================
 # KOMŞU GEOID ÖZELLİKLERİ (günlük baz)
 # =========================
-
 def build_neighbors(method: str = "touches", radius_m: float = 500.0) -> pd.DataFrame:
     gdf_blocks, _ = _load_blocks()
     tracts = gdf_blocks.dissolve(by="GEOID", as_index=False)
@@ -695,21 +681,25 @@ if neighbors_df is not None and not neighbors_df.empty:
 # =========================
 # MERGE STRATEJİSİ
 # =========================
-
 _enriched = final_911.merge(_hr_unique, on=["GEOID","hr_key","date"], how="left")
 _enriched = _enriched.merge(_day_unique, on=["GEOID","date"], how="left")
 if _neighbor_roll is not None:
     _enriched = _enriched.merge(_neighbor_roll[["GEOID","date"] + [f"911_neighbors_last{W}d" for W in (3, 7)]], on=["GEOID","date"], how="left")
 
+# Crime grid arama — OUT_DIR öncelikli
+CRIME_GRID_CANDIDATES = [
+    OUT_DIR / "sf_crime_grid_full_labeled.csv",
+    Path(BASE_DIR) / "sf_crime_grid_full_labeled.csv",
+    Path("./sf_crime_grid_full_labeled.csv"),
+]
 crime_grid_path = next((p for p in CRIME_GRID_CANDIDATES if p.exists()), None)
 if crime_grid_path is None:
-    raise FileNotFoundError("❌ Suç grid yok: BASE_DIR/sf_crime_grid_full_labeled.csv (veya kökte).")
+    raise FileNotFoundError("❌ Suç grid yok: OUT_DIR/BASE_DIR/kök'te sf_crime_grid_full_labeled.csv.")
 crime = pd.read_csv(crime_grid_path, dtype={"GEOID": str}, low_memory=False)
 log(f"📥 Suç grid yüklendi: {len(crime)} satır ({crime_grid_path})")
 log_shape(crime, "CRIME grid — ham")
 
 crime["GEOID"] = normalize_geoid(crime["GEOID"], DEFAULT_GEOID_LEN)
-
 if "event_hour" not in crime.columns:
     raise ValueError("❌ Suç grid dosyasında 'event_hour' yok.")
 crime["hr_key"] = ((pd.to_numeric(crime["event_hour"], errors="coerce").fillna(0).astype(int)) // 3) * 3
@@ -755,10 +745,28 @@ for c in fill_cols:
     if c in merged.columns:
         merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0).astype("int32")
 
+# === YAZ — OUT_DIR’e (artifact kökü) ===
 safe_save_csv(merged, str(merged_output_path))
 log_shape(merged, "CRIME⨯911 (kayıt öncesi)")
 log(f"✅ Suç + 911 birleştirmesi tamamlandı → {merged_output_path}")
 
+# === Normalize: kritik dosyaların OUT_DIR altında olduğundan emin ol (no-op olabilir)
+try:
+    for p in [
+        local_summary_path, y_summary_path,
+        OUT_DIR / "sf_crime_01.csv",    # DAILY_OUT default adı
+        merged_output_path
+    ]:
+        if p.exists():
+            dst = OUT_DIR / p.name
+            if p.resolve() != dst.resolve():
+                dst.write_bytes(p.read_bytes())
+                log(f"📦 Normalize kopya: {p} → {dst}")
+    log("📦 911 çıktıları OUT_DIR altında hazır.")
+except Exception as e:
+    log(f"⚠️ Normalize skip: {e}")
+
+# Örnek kayıt
 try:
     print(merged.head(5).to_string(index=False))
 except Exception:
