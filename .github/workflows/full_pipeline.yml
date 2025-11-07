@@ -255,15 +255,20 @@ jobs:
           )
           for p in "${CANDS[@]}"; do
             if [ -f "$p" ]; then
+              base="$(basename "$p")"
+              # aynı dosya mı? → kopyalama
+              if [ "$p" -ef "${CRIME_DATA_DIR}/${base}" ]; then
+                echo "skip (same file): $p"
+                continue
+              fi
               cp -f "$p" "${CRIME_DATA_DIR}/"
-              echo "✅ 911 kopyalandı: $p → ${CRIME_DATA_DIR}/"
+              echo "✅ 911 kopyalandı: $p → ${CRIME_DATA_DIR}/${base}"
             fi
           done
           echo "---- 911 heads ----"
           head -n 3 "${CRIME_DATA_DIR}/sf_911_last_5_year.csv" || true
           head -n 3 "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv" || true
 
-      # -------------------- 311 --------------------
       - name: 03) 311 → sf_crime_02.csv
         run: |
           set -e
@@ -290,8 +295,14 @@ jobs:
           )
           for p in "${CANDS[@]}"; do
             if [ -f "$p" ]; then
+              base="$(basename "$p")"
+              # aynı dosya mı?
+              if [ "$p" -ef "${CRIME_DATA_DIR}/${base}" ]; then
+                echo "skip (same file): $p"
+                continue
+              fi
               cp -f "$p" "${CRIME_DATA_DIR}/"
-              echo "✅ 311 kopyalandı: $p → ${CRIME_DATA_DIR}/"
+              echo "✅ 311 kopyalandı: $p → ${CRIME_DATA_DIR}/${base}"
             fi
           done
           echo "---- 311 heads ----"
