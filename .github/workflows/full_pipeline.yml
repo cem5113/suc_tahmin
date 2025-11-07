@@ -49,10 +49,6 @@ env:
   WX_LOCATION: "san francisco"
   WX_UNIT: "us"
 
-  ACS_YEAR: ${{ vars.ACS_YEAR || 'LATEST' }}
-  DEMOG_WHITELIST: ${{ vars.DEMOG_WHITELIST || '' }}
-  CENSUS_GEO_LEVEL: ${{ vars.CENSUS_GEO_LEVEL || 'auto' }}
-
 jobs:
   run:
     runs-on: ubuntu-latest
