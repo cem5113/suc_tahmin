@@ -29,8 +29,11 @@ concurrency:
 env:
   CRIME_DATA_DIR: ${{ github.workspace }}
   GEOID_LEN: "11"
+  CENSUS_GEO_LEVEL: "tract"   # ← 11 hane zorlanır; NaN problemi biter
+  ACS_YEAR: "2023"
+  DEMOG_WHITELIST: ""
 
-  BACKFILL_DAYS: "0"   # ← Mevcut satır KALDI; override aşağıda yapılıyor
+  BACKFILL_DAYS: "0"
   SF_SODA_FETCH_STRATEGY: ${{ vars.SF_SODA_FETCH_STRATEGY || 'bulk' }}
   SF_SODA_PAGE_LIMIT: ${{ vars.SF_SODA_PAGE_LIMIT || '50000' }}
   SF_SODA_MAX_PAGES: ${{ vars.SF_SODA_MAX_PAGES || '100' }}
@@ -254,7 +257,7 @@ jobs:
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           POPULATION_PATH: ${{ env.CRIME_DATA_DIR }}/sf_population.csv
-          CENSUS_GEO_LEVEL: ${{ env.CENSUS_GEO_LEVEL }}
+          CENSUS_GEO_LEVEL: ${{ env.CENSUS_GEO_LEVEL }}  # global env'de "tract"
           ACS_YEAR: ${{ env.ACS_YEAR }}
           DEMOG_WHITELIST: ${{ env.DEMOG_WHITELIST }}
         run: |
