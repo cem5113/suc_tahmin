@@ -231,200 +231,39 @@ jobs:
           set -e
           python -u update_crime.py
 
-      - name: Restore 911 summary cache
+      # 02) 911 çıktıları üret
+      - name: 02) 911 → sf_crime_01.csv
         if: ${{ steps.gate.outputs.proceed == 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
-          key: 911-${{ runner.os }}-${{ github.run_number }}
-
-      # ✅ GH auth: login YOK (GH_TOKEN var)
-      - name: Prefetch sf_911_last_5_year_y.csv from previous successful run (artifact)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }} # gh için non-interactive auth
-          ARTIFACT_NAME: sf-crime-pipeline-output
-          WORKFLOW_NAME: Full SF Crime Pipeline
-          TARGET_FILE: sf_911_last_5_year_y.csv
-          OUT_DIR: crime_prediction_data
-        run: |
-          set -euo pipefail
-
-          mkdir -p "${OUT_DIR}"
-          if [ -f "${OUT_DIR}/${TARGET_FILE}" ]; then
-            echo "ℹ️ ${OUT_DIR}/${TARGET_FILE} zaten var, indirme atlandı."
-            exit 0
-          fi
-
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y unzip >/dev/null
-
-          if ! command -v gh >/dev/null; then
-            type -p curl >/dev/null && sudo curl -sSL https://raw.githubusercontent.com/cli/cli/trunk/script/install.sh | sh
-          fi
-          gh --version || true
-          gh auth status || true
-
-          mkdir -p _prev
-          FOUND=""
-          for RID in $(gh run list -R "${GITHUB_REPOSITORY}" \
-                        --workflow "${WORKFLOW_NAME}" --status success \
-                        -L 10 --json databaseId -q '.[].databaseId'); do
-            echo "🔎 Run #$RID içinde ${TARGET_FILE} aranıyor…"
-            rm -rf "_prev/$RID" && mkdir -p "_prev/$RID"
-            if gh run download -R "${GITHUB_REPOSITORY}" "$RID" \
-                 -n "${ARTIFACT_NAME}" -D "_prev/$RID" >/dev/null 2>&1; then
-              F=$(find "_prev/$RID" -type f -iname "${TARGET_FILE}" | head -n1 || true)
-              if [ -n "${F:-}" ]; then
-                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"
-                echo "✅ Bulundu ve kopyalandı: $F → ${OUT_DIR}/${TARGET_FILE}"
-                FOUND="yes"
-                break
-              fi
-            else
-              echo "  ↪️ Artifact indirilemedi veya yok (#$RID)."
-            fi
-          done
-
-          if [ -z "${FOUND}" ]; then
-            echo "ℹ️ ${TARGET_FILE} önceki artifact’larda bulunamadı; script release fallback kullanacak."
-          fi
-
-      # 911: gün gün yerine bulk (limit=50k)
-      - name: 02) 911 → sf_crime_01.csv (bulk 50k)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        env:
-          SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
-          SF_SODA_PAGE_LIMIT: ${{ env.SF_SODA_PAGE_LIMIT }}
-          SF_SODA_MAX_PAGES: ${{ env.SF_SODA_MAX_PAGES }}
-          SF911_API_URL: ${{ env.SF911_API_URL }}
-          SF911_AGENCY_FILTER: ${{ env.SF911_AGENCY_FILTER }}
-          SF911_API_TOKEN: ${{ env.SF911_API_TOKEN }}
-          SOCS_APP_TOKEN: ${{ env.SOCS_APP_TOKEN }}
-          BACKFILL_DAYS: ${{ env.BACKFILL_DAYS }}
-          DAILY_OUT: ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
         run: |
           set -e
-          python -u update_911.py
-          
-      - name: 02.fix) Move root-level sf_crime_01.csv into CRIME_DATA_DIR if present
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
+          python -u scripts/update_911.py
       
-          # 🔍 debug
-          pwd
-          echo "CRIME_DATA_DIR=${CRIME_DATA_DIR}"
-      
-          SRC="sf_crime_01.csv"
-          DST="${CRIME_DATA_DIR}/sf_crime_01.csv"
-      
-          if [ -f "$SRC" ]; then
-            if [ "$(realpath "$SRC")" -ef "$(realpath "$DST")" ]; then
-              echo "ℹ️ sf_crime_01.csv zaten doğru yerde (same file); taşınmadı."
-            else
-              mkdir -p "${CRIME_DATA_DIR}"
-              mv -f "$SRC" "$DST"
-              echo "✅ Taşındı: $SRC → $DST"
-            fi
-          else
-            echo "ℹ️ Root'ta sf_crime_01.csv yok; adım atlandı."
-          fi
-
-      - name: 02.1) Verify sf_crime_01 presence & head
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          D="${CRIME_DATA_DIR}"
-          F1="${D}/sf_crime_01.csv"
-          echo "→ Beklenen dosya: $F1"
-          [ -f "$F1" ] || { echo "❌ sf_crime_01.csv yok! update_911.py loglarını kontrol et (DAILY_OUT doğru mu?)."; exit 2; }
-          echo "---- sf_crime_01.csv (head) ----"
-          head -n 5 "$F1" || true
-          
-      - name: Restore 311 summary cache
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
-          key: 311-${{ runner.os }}-${{ github.run_number }}
-          restore-keys: |
-            311-${{ runner.os }}-
-
-      # ✅ YENİ: 311 özet dosyası için artifact prefetch (GH login YOK)
-      - name: Prefetch sf_311_last_5_years_y.csv from previous successful run (artifact)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT_NAME: sf-crime-pipeline-output
-          WORKFLOW_NAME: Full SF Crime Pipeline
-          TARGET_FILE: sf_311_last_5_years_y.csv
-          OUT_DIR: crime_prediction_data
-        run: |
-          set -euo pipefail
-
-          mkdir -p "${OUT_DIR}"
-          if [ -f "${OUT_DIR}/${TARGET_FILE}" ]; then
-            echo "ℹ️ ${OUT_DIR}/${TARGET_FILE} zaten var, indirme atlandı."
-            exit 0
-          fi
-
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y unzip >/dev/null
-
-          if ! command -v gh >/dev/null; then
-            type -p curl >/dev/null && sudo curl -sSL https://raw.githubusercontent.com/cli/cli/trunk/script/install.sh | sh
-          fi
-          gh --version || true
-          gh auth status || true
-
-          mkdir -p _prev
-          FOUND=""
-          for RID in $(gh run list -R "${GITHUB_REPOSITORY}" \
-                        --workflow "${WORKFLOW_NAME}" --status success \
-                        -L 10 --json databaseId -q '.[].databaseId'); do
-            echo "🔎 Run #$RID içinde ${TARGET_FILE} aranıyor…"
-            rm -rf "_prev/$RID" && mkdir -p "_prev/$RID"
-            if gh run download -R "${GITHUB_REPOSITORY}" "$RID" \
-                 -n "${ARTIFACT_NAME}" -D "_prev/$RID" >/dev/null 2>&1; then
-              F=$(find "_prev/$RID" -type f -iname "${TARGET_FILE}" | head -n1 || true)
-              if [ -n "${F:-}" ]; then
-                cp -f "$F" "${OUT_DIR}/${TARGET_FILE}"
-                echo "✅ Bulundu ve kopyalandı: $F → ${OUT_DIR}/${TARGET_FILE}"
-                FOUND="yes"
-                break
-              fi
-            else
-              echo "  ↪️ Artifact indirilemedi veya yok (#$RID)."
-            fi
-          done
-
-          if [ -z "${FOUND}" ]; then
-            echo "ℹ️ ${TARGET_FILE} önceki artifact’larda bulunamadı; update_311.py kendi akışıyla devam edecek."
-          fi
-
-      # 311: aynı şekilde bulk çekim
-      - name: 03) 311 → sf_crime_02.csv (bulk 50k)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        env:
-          SF_SODA_FETCH_STRATEGY: ${{ env.SF_SODA_FETCH_STRATEGY }}
-          SF_SODA_PAGE_LIMIT:    ${{ env.SF_SODA_PAGE_LIMIT }}
-          SF_SODA_MAX_PAGES:     ${{ env.SF_SODA_MAX_PAGES }}
-          SOCS_APP_TOKEN:        ${{ env.SOCS_APP_TOKEN }}
-          BACKFILL_DAYS:         ${{ env.BACKFILL_DAYS }}
-        run: |
-          set -e
-          if [ -f update_311.py ]; then
-            python -u update_311.py
-          else
-            python -u scripts/update_311.py
-          fi
-
-      - name: Upload 311 CSVs
+      # 02.1) 911 dosyalarını aynı artefact'a ekle
+      - name: Upload 911 CSVs
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: sf-crime-pipeline-output
+          if-no-files-found: warn
+          path: |
+            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_911_last_5_year_y.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_911_recent.csv
+            ${{ env.CRIME_DATA_DIR }}/sf_crime_01.csv
+      
+      # 03) 311 çıktıları üret
+      - name: 03) 311 → sf_crime_02.csv
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -e
+          python -u scripts/update_311.py
+      
+      # 03.1) 311 dosyalarını AYNI artefact'a ekle
+      - name: Upload 311 CSVs
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sf-crime-pipeline-output   # ← aynı isim → aynı artifact'a ekler
           if-no-files-found: warn
           path: |
             ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
@@ -433,82 +272,6 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_year.csv
             ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_year_y.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_02.csv
-
-      - name: Ensure population CSV (local file)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          mkdir -p "${CRIME_DATA_DIR}"
-          DEST="${CRIME_DATA_DIR}/sf_population.csv"
-          CANDIDATES=(
-            "${CRIME_DATA_DIR}/sf_population.csv"
-            "sf_population.csv"
-            "data/sf_population.csv"
-            "inputs/sf_population.csv"
-          )
-          FOUND=""
-          for p in "${CANDIDATES[@]}"; do
-            if [ -f "$p" ]; then
-              if [ -e "$DEST" ] && [ "$p" -ef "$DEST" ]; then
-                echo "ℹ️ Zaten hedefte: $DEST"
-              else
-                cp -f "$p" "$DEST"
-                echo "✅ Copied: $p → $DEST"
-              fi
-              FOUND="yes"
-              break
-            fi
-          done
-          if [ -z "$FOUND" ]; then
-            echo "❌ sf_population.csv bulunamadı. Lütfen repo’ya ekleyin veya ${CRIME_DATA_DIR} altına yerleştirin."
-            exit 2
-          fi
-          echo "---- sf_population.csv (head) ----"
-          head -n 5 "$DEST" || true
-
-      - name: 03.1) Verify sf_crime_01/02 presence & heads
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          D="${CRIME_DATA_DIR}"
-          F1="${D}/sf_crime_01.csv"
-          F2="${D}/sf_crime_02.csv"
-
-          echo "→ Beklenen dosyalar:"
-          echo "  - $F1"
-          echo "  - $F2"
-
-          [ -f "$F1" ] || { echo "❌ sf_crime_01.csv yok! update_911.py çıktısını kontrol et."; exit 2; }
-          [ -f "$F2" ] || { echo "❌ sf_crime_02.csv yok! update_311.py DAILY_IN/DAILY_OUT ve loglarını kontrol et."; exit 3; }
-
-          echo "---- sf_crime_01.csv (head) ----"
-          head -n 5 "$F1" || true
-          echo "---- sf_crime_02.csv (head) ----"
-          head -n 5 "$F2" || true
-
-      - name: (Opsiyonel) sf_population.csv başlık normalize
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          python - <<'PY'
-          import os, pandas as pd
-          p = os.path.join(os.environ["CRIME_DATA_DIR"], "sf_population.csv")
-          df = pd.read_csv(p)
-          low = {c.lower(): c for c in df.columns}
-
-          # GEOID standardizasyonu
-          if 'geoid' not in low and 'geography_id' in low:
-              df.rename(columns={low['geography_id']: 'GEOID'}, inplace=True)
-
-          # Nüfus sütununu 'population' yap
-          for cand in ['population','total_population','b01003_001e','estimate','total','value']:
-              if cand in low:
-                  if 'population' not in df.columns:
-                      df.rename(columns={low[cand]: 'population'}, inplace=True)
-                  break
-
-          df.to_csv(p, index=False)
-          print("Normalized headers:", df.columns.tolist())
-          PY
 
       - name: 04) Nüfus → sf_crime_03.csv (demografi + nüfus)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
