@@ -971,7 +971,7 @@ jobs:
           echo "---- yarin.csv (head) ----"; head -n 5 "${CRIME_DATA_DIR}/yarin.csv" || true
           echo "---- week.csv (head) ----";  head -n 5 "${CRIME_DATA_DIR}/week.csv" || true
 
-      - name: 15) Run post_patrol.py (uses risk_hourly + yarin/week)
+      - name: 15) Run post_patrol.py (uses risk_hourly_grid_full_labeled + yarin/week)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -979,7 +979,7 @@ jobs:
           PATROL_HORIZON_DAYS: ${{ env.PATROL_HORIZON_DAYS }}
         run: |
           set -e
-          test -f "${CRIME_DATA_DIR}/risk_hourly.csv" || { echo "❌ risk_hourly.csv bulunamadı (stacking çıktılarını kontrol et)"; exit 2; }
+          test -f "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" || { echo "❌ risk_hourly_grid_full_labeled.csv bulunamadı (stacking çıktılarını kontrol et)"; exit 2; }
           python -u scripts/post_patrol.py
           echo "---- patrol_recs_multi.csv (head) ----"
           head -n 20 "${CRIME_DATA_DIR}/patrol_recs_multi.csv" || true
@@ -987,8 +987,8 @@ jobs:
       - name: 14) Quick preview (stacking outputs)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
-          echo "risk_hourly* (ilk 5)"
-          head -n 5 ${CRIME_DATA_DIR}/risk_hourly*.csv 2>/dev/null || true
+          echo "risk_hourly_grid_full_labeled* (ilk 5)"
+          head -n 5 ${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv.csv 2>/dev/null || true
           echo "patrol_recs* (ilk 5)"
           head -n 5 ${CRIME_DATA_DIR}/patrol_recs*.csv 2>/dev/null || true
           echo "metrics_* (ilk 5)"
@@ -1033,8 +1033,8 @@ jobs:
             ("sf_311_last_5_years.csv",         ["requested_datetime","opened_date","date"]),
             ("sf_weather_5years.csv",           ["date"]),
             ("sf_crime_grid_full_labeled.csv",  ["date"]),
-            ("risk_hourly.csv",                 ["date"]),
-            ("risk_daily.csv",                 ["date"]),
+            ("risk_hourly_grid_full_labeled.csv",                 ["date"]),
+            ("risk_daily_grid_full_labeled.csv",                 ["date"]),
             ("risk_types_top3.csv",            ["date"]),
           ]
 
@@ -1091,7 +1091,7 @@ jobs:
           ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
           ${{ env.CRIME_DATA_DIR }}/sf_weather_5years.csv
           ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
-          ${{ env.CRIME_DATA_DIR }}/risk_daily.csv
+          ${{ env.CRIME_DATA_DIR }}/risk_daily_grid_full_labeled.csv
           ${{ env.CRIME_DATA_DIR }}/risk_types_top3.csv
           ${{ env.CRIME_DATA_DIR }}/risk_hourly.csv
           ${{ env.CRIME_DATA_DIR }}/risk_hourly_grid_full_labeled.csv
@@ -1129,7 +1129,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "== risk outputs existence =="
-          for f in "risk_hourly.csv" "risk_daily.csv" "risk_types_top3.csv"; do
+          for f in "risk_hourly_grid_full_labeled.csv" "risk_daily_grid_full_labeled.csv.csv" "risk_types_top3.csv"; do
             p="${CRIME_DATA_DIR}/$f"
             if [ -f "$p" ]; then
               echo "✅ $f found: $p"; head -n 3 "$p" || true
@@ -1238,11 +1238,11 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_weather_5years.csv
             ${{ env.CRIME_DATA_DIR }}/sf_weather_5years_y.csv
             ${{ env.CRIME_DATA_DIR }}/*.geojson
-            ${{ env.CRIME_DATA_DIR }}/risk_hourly.csv
+            ${{ env.CRIME_DATA_DIR }}/risk_hourly_grid_full_labeled.csv
             ${{ env.CRIME_DATA_DIR }}/risk_daily.csv
             ${{ env.CRIME_DATA_DIR }}/risk_types_top3.csv
             ${{ env.CRIME_DATA_DIR }}/risk_hourly*.parquet
-            ${{ env.CRIME_DATA_DIR }}/risk_daily*.parquet
+            ${{ env.CRIME_DATA_DIR }}/risk_daily_grid_full_labeled.csv*.parquet
             ${{ env.CRIME_DATA_DIR }}/patrol_recs*.csv
             ${{ env.CRIME_DATA_DIR }}/models/**
             ${{ env.CRIME_DATA_DIR }}/metrics_*.csv
