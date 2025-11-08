@@ -869,112 +869,101 @@ jobs:
                 f"CAT(enc)={len(cat_cols_encoded)}  → {OUT/'feature_type_decision.csv'}")
           PY
 
-      - name: Prepare SHAP CSV for quartiles (discover & normalize)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          BASE="${CRIME_DATA_DIR}"
-          OA="${BASE}/outputs_feature_analysis"
-          mkdir -p "${BASE}"
-      
-          # 1) Kanonik dosya varsa doğrudan kopyala
-          if [ -f "${OA}/shap_feature_importance.csv" ]; then
-            cp -f "${OA}/shap_feature_importance.csv" "${BASE}/shap_feature_importance.csv"
-            echo "✅ Found canonical SHAP at ${OA}/shap_feature_importance.csv"
-            exit 0
-          fi
-      
-          # 2) Eski header'sız SHAP serisi (feature_importance_shap.csv) → dönüştür
-          if [ -f "${OA}/feature_importance_shap.csv" ]; then
-            echo "ℹ️ Converting feature_importance_shap.csv → shap_feature_importance.csv"
-            python - <<'PY'
-            import os, pandas as pd
-            base=os.environ['CRIME_DATA_DIR']; oa=os.path.join(base,'outputs_feature_analysis')
-            src=os.path.join(oa,'feature_importance_shap.csv')
-            try:
-                df=pd.read_csv(src, header=None)
-                # header yoksa 2 kolon bekleyip isim ver
-                if df.shape[1]==2:
-                    df.columns=['feature','mean_abs_shap']
-                else:
-                    # header'lı dene
-                    df=pd.read_csv(src)
-                    if 'feature' not in df.columns:
-                        df=df.rename(columns={df.columns[0]:'feature'})
-                    if 'mean_abs_shap' not in df.columns:
-                        # ikinci kolonu önem varsay
-                        if df.shape[1]>=2:
-                            df=df.rename(columns={df.columns[1]:'mean_abs_shap'})
-                        else:
-                            raise SystemExit('Cannot parse SHAP CSV')
-            except Exception:
-                # baştan header'lı dene
-                df=pd.read_csv(src)
-                if 'feature' not in df.columns:
-                    df=df.rename(columns={df.columns[0]:'feature'})
-                if 'mean_abs_shap' not in df.columns:
-                    if df.shape[1]>=2:
-                        df=df.rename(columns={df.columns[1]:'mean_abs_shap'})
-                    else:
-                        raise
-            # normalize & positive
-            df['mean_abs_shap']=pd.to_numeric(df['mean_abs_shap'], errors='coerce').clip(lower=0)
-            df=df[df['mean_abs_shap']>0]
-            s=df['mean_abs_shap'].sum()
-            if s>0:
-                df['mean_abs_shap']=df['mean_abs_shap']/s
-            out=os.path.join(base,'shap_feature_importance.csv')
-            df[['feature','mean_abs_shap']].to_csv(out, index=False)
-            print("✅ wrote", out)
-            PY
-                  exit 0
-                fi
-      
-          # 3) SHAP yoksa, ensemble_base'den vekil üret (quartile için yeterli)
-          if [ -f "${OA}/feature_importance_ensemble_base.csv" ]; then
-            echo "ℹ️ Using feature_importance_ensemble_base.csv as SHAP proxy"
-            python - <<'PY'
-            import os, pandas as pd
-            base=os.environ['CRIME_DATA_DIR']; oa=os.path.join(base,'outputs_feature_analysis')
-            src=os.path.join(oa,'feature_importance_ensemble_base.csv')
-            df=pd.read_csv(src)
-            # Çeşitli şema olasılıklarını karşıla
-            if 'feature' not in df.columns:
-                # ilk kolon feature gibi ise
-                if df.shape[1]==2:
-                    df.columns=['feature', 'ensemble']
-                else:
-                    # unnamed index + value
-                    if df.columns[0].lower().startswith('unnamed'):
-                        df=df.rename(columns={df.columns[1]:'ensemble'})
-                        df['feature']=df.iloc[:,0]
-                    else:
-                        # 'ensemble' kolonu varsa feature olan tek kolonun adını bul
-                        if 'ensemble' in df.columns:
-                            others=[c for c in df.columns if c!='ensemble']
-                            if len(others)==1:
-                                df=df.rename(columns={others[0]:'feature'})
-                        else:
-                            # son çare: ilk iki kolonu al
-                            df=df.rename(columns={df.columns[0]:'feature', df.columns[1]:'ensemble'})
-            # ensemble'ı SHAP benzeri ölçeğe çevir
-            val_col='ensemble' if 'ensemble' in df.columns else 'value'
-            df[val_col]=pd.to_numeric(df[val_col], errors='coerce').clip(lower=0)
-            df=df[df[val_col]>0]
-            s=df[val_col].sum()
-            if s>0:
-                df['mean_abs_shap']=df[val_col]/s
-            else:
-                df['mean_abs_shap']=0.0
-            out=os.path.join(base,'shap_feature_importance.csv')
-            df[['feature','mean_abs_shap']].to_csv(out, index=False)
-            print("✅ wrote", out)
-            PY
-                  exit 0
-                fi
-            
-                echo "❌ No SHAP/ensemble outputs found under ${OA}"
-                exit 1
+          - name: Prepare SHAP CSV for quartiles (discover & normalize)
+            if: ${{ steps.gate.outputs.proceed == 'true' }}
+            run: |
+              set -euo pipefail
+              BASE="${CRIME_DATA_DIR}"
+              OA="${BASE}/outputs_feature_analysis"
+              mkdir -p "${BASE}"
+          
+              # 0) Zaten BASE’de varsa hiç uğraşmadan çık
+              if [ -f "${BASE}/shap_feature_importance.csv" ]; then
+                echo "✅ SHAP already present at ${BASE}/shap_feature_importance.csv"
+                exit 0
+              fi
+          
+              # 1) Kanonik OA → BASE
+              if [ -f "${OA}/shap_feature_importance.csv" ]; then
+                cp -f "${OA}/shap_feature_importance.csv" "${BASE}/shap_feature_importance.csv"
+                echo "✅ Found canonical SHAP at ${OA}/shap_feature_importance.csv"
+                exit 0
+              fi
+          
+              # 2) OA/feature_importance_shap.csv → kanonik formata çevir
+              if [ -f "${OA}/feature_importance_shap.csv" ]; then
+                echo "ℹ️ Converting OA/feature_importance_shap.csv → shap_feature_importance.csv"
+                python - <<'PY'
+          import os, pandas as pd
+          base=os.environ['CRIME_DATA_DIR']; oa=os.path.join(base,'outputs_feature_analysis')
+          src=os.path.join(oa,'feature_importance_shap.csv')
+          df=pd.read_csv(src)
+          if 'feature' not in df.columns:
+              df=df.rename(columns={df.columns[0]:'feature'})
+          val = 'mean_abs_shap' if 'mean_abs_shap' in df.columns else (df.columns[1] if df.shape[1]>=2 else None)
+          if not val: raise SystemExit('Cannot parse SHAP CSV')
+          df['mean_abs_shap']=pd.to_numeric(df[val], errors='coerce').clip(lower=0)
+          df=df[df['mean_abs_shap']>0]
+          s=df['mean_abs_shap'].sum()
+          if s>0: df['mean_abs_shap']=df['mean_abs_shap']/s
+          out=os.path.join(base,'shap_feature_importance.csv')
+          df[['feature','mean_abs_shap']].to_csv(out, index=False)
+          print("✅ wrote", out)
+          PY
+                exit 0
+              fi
+          
+              # 3) OA/feature_importance_ensemble_base.csv → SHAP vekili
+              if [ -f "${OA}/feature_importance_ensemble_base.csv" ]; then
+                echo "ℹ️ Using OA/feature_importance_ensemble_base.csv as SHAP proxy"
+                python - <<'PY'
+          import os, pandas as pd
+          base=os.environ['CRIME_DATA_DIR']; oa=os.path.join(base,'outputs_feature_analysis')
+          src=os.path.join(oa,'feature_importance_ensemble_base.csv')
+          df=pd.read_csv(src)
+          if 'feature' not in df.columns:
+              if 'ensemble' in df.columns:
+                  others=[c for c in df.columns if c!='ensemble']
+                  if len(others)==1: df=df.rename(columns={others[0]:'feature'})
+              if 'feature' not in df.columns:
+                  df=df.rename(columns={df.columns[0]:'feature', df.columns[1]:'ensemble'})
+          val='ensemble' if 'ensemble' in df.columns else df.columns[1]
+          df[val]=pd.to_numeric(df[val], errors='coerce').clip(lower=0)
+          df=df[df[val]>0]
+          s=df[val].sum()
+          df['mean_abs_shap']=df[val]/s if s>0 else 0.0
+          out=os.path.join(base,'shap_feature_importance.csv')
+          df[['feature','mean_abs_shap']].to_csv(out, index=False)
+          print("✅ wrote", out)
+          PY
+                exit 0
+              fi
+          
+              # 4) BASE/feature_importance_xgb.csv → SHAP vekili (10.8 çıktısı)
+              if [ -f "${BASE}/feature_importance_xgb.csv" ]; then
+                echo "ℹ️ Using BASE/feature_importance_xgb.csv as SHAP proxy"
+                python - <<'PY'
+          import os, pandas as pd
+          base=os.environ['CRIME_DATA_DIR']
+          src=os.path.join(base,'feature_importance_xgb.csv')
+          df=pd.read_csv(src)
+          if 'feature' not in df.columns:
+              df=df.rename(columns={df.columns[0]:'feature'})
+          val='importance' if 'importance' in df.columns else (df.columns[1] if df.shape[1]>=2 else None)
+          if not val: raise SystemExit('Cannot parse XGB importance CSV')
+          df[val]=pd.to_numeric(df[val], errors='coerce').clip(lower=0)
+          df=df[df[val]>0]
+          s=df[val].sum()
+          df['mean_abs_shap']=df[val]/s if s>0 else 0.0
+          out=os.path.join(base,'shap_feature_importance.csv')
+          df[['feature','mean_abs_shap']].to_csv(out, index=False)
+          print("✅ wrote", out)
+          PY
+                exit 0
+              fi
+          
+              echo "❌ No SHAP/ensemble/xgb importance found under ${OA} or ${BASE}"
+              exit 1
 
       - name: 10.9) Build stacking inputs by SHAP mass quartiles (Q1..Q4)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
