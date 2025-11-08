@@ -544,6 +544,48 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
             with open(outdir / "shap_error.txt", "w", encoding="utf-8") as f:
                 f.write(str(e))
 
+    importances_shap = None
+    if HAS_SHAP and model_name in ("xgb", "lgbm"):
+        try:
+            Xt = pre_fit.transform(X_train)
+            Xs = Xt.toarray() if hasattr(Xt, "toarray") else Xt
+            try:
+                booster_for_shap = booster.get_booster()
+            except Exception:
+                booster_for_shap = getattr(booster, "booster_", booster)
+            explainer = shap.TreeExplainer(booster_for_shap)
+            shap_values = explainer.shap_values(Xs)
+            if isinstance(shap_values, list):
+                sv = np.mean(np.abs(shap_values[0]), axis=0)
+            else:
+                sv = np.mean(np.abs(shap_values), axis=0)
+            importances_shap = pd.Series(sv, index=feature_names_transformed)
+            plt.figure()
+            shap.summary_plot(shap_values, Xs, feature_names=feature_names_transformed, show=False, max_display=30)
+            plt.tight_layout()
+            plt.savefig(outdir / "shap_summary.png", dpi=200, bbox_inches="tight")
+            plt.close()
+        except Exception as e:
+            with open(outdir / "shap_error.txt", "w", encoding="utf-8") as f:
+                f.write(str(e))
+
+    # --- SHAP için kanonik çıktı: shap_feature_importance.csv (feature, mean_abs_shap) ---
+    if importances_shap is not None and importances_shap.sum() > 0:
+        df_shap = (importances_shap / importances_shap.sum()).rename("mean_abs_shap").reset_index()
+        df_shap.rename(columns={"index": "feature"}, inplace=True)
+        # Çıktı klasörüne yaz
+        (outdir / "shap_feature_importance.csv").write_text(df_shap.to_csv(index=False), encoding="utf-8")
+        # İsteğe bağlı: CRIME_DATA_DIR köküne de kopyala ki quartile adımı path vermeden bulsun
+        try:
+            root = Path(os.getenv("CRIME_DATA_DIR", "")).expanduser().resolve()
+            if str(root):
+                (root / "shap_feature_importance.csv").write_text(df_shap.to_csv(index=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    sources = []
+    for name, ser in [("model", importances_model), ("perm", importances_perm), ("shap", importances_shap)]:
+                                     
     sources = []
     for name, ser in [("model", importances_model), ("perm", importances_perm), ("shap", importances_shap)]:
         if ser is None:
