@@ -707,103 +707,168 @@ jobs:
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           # Tercih edeceğin veri seti:
-          # sf_crime_08.csv (komşuluk + zenginleşmiş) ya da grid:
           FEATURE_DATASET: ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
           # FEATURE_DATASET: ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
+          # --- Opsiyonel eşikler (değiştirebilirsin) ---
+          NUMERIC_ACCEPT: "0.99"   # STRICT eşik
+          NUMERIC_SOFT:   "0.85"   # SOFT eşik
+          MAX_CATS:       "50"     # CAT freq-encode için en çok sınıf
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os, sys, pandas as pd
+          import os, re, ast
           from pathlib import Path
           import numpy as np
+          import pandas as pd
 
           INP = os.environ.get("FEATURE_DATASET")
           OUT = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
           OUT.mkdir(parents=True, exist_ok=True)
 
-          # 1) Veri oku
+          TH_STRICT = float(os.environ.get("NUMERIC_ACCEPT", "0.99"))
+          TH_SOFT   = float(os.environ.get("NUMERIC_SOFT",   "0.85"))
+          MAX_CATS  = int(os.environ.get("MAX_CATS", "50"))
+
           df = pd.read_csv(INP, low_memory=False)
-          # Hedef adı standartla
           ycol = "Y_label" if "Y_label" in df.columns else ("Y" if "Y" in df.columns else None)
           if ycol is None:
               raise SystemExit("Y_label kolonu yok — feature analysis atlandı.")
 
-          # 2) Temel sayısal temizlik (güçlü)
-          y = df[ycol].astype(int)
-          X = df.drop(columns=[ycol]).copy()
-          
-          def to_float_series(s):
-              # string ise köşeli parantez, boşluk vb. temizle, sonra sayıya çevir
+          y = pd.to_numeric(df[ycol], errors="coerce").fillna(0).astype(int).clip(0,1)
+          X0 = df.drop(columns=[ycol]).copy()
+
+          num_like_pat = re.compile(r"""^\s*
+                                        \[?\s*
+                                        [+-]?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?
+                                        \s*\]?
+                                        \s*$
+                                     """, re.X)
+
+          def to_numeric_loose(s: pd.Series) -> pd.Series:
               if s.dtype == object or str(s.dtype).startswith("string"):
-                  s = s.astype(str).str.replace(r"[\[\]\s]", "", regex=True)
-                  s = pd.to_numeric(s, errors="coerce")
+                  ss = s.astype(str).str.strip()
+                  ss = ss.str.replace("â€“", "-", regex=False)  # bozuk en-dash düzelt
+                  ss = ss.str.replace(r'^\[\s*', '', regex=True).str.replace(r'\s*\]$', '', regex=True)
+                  sn = pd.to_numeric(ss, errors="coerce")
+                  return sn
               else:
-                  s = pd.to_numeric(s, errors="coerce")
-              return s
-          
-          for c in X.columns:
-              s = X[c]
-              # Önce sayıya çevirmeyi dene
-              sn = to_float_series(s)
-          
-              # Eğer tamamen NaN olmadıysa (yani sayısal anlamlıysa) onu kullan
-              if sn.notna().any():
-                  X[c] = sn
-                  continue
-          
-              # Buraya gelmişse sütun gerçek kategorik: freq-encode
-              vc = s.astype(str).value_counts()
-              X[c] = s.astype(str).map(vc).astype(float)
-          
-          # Son rötuş
-          X = X.fillna(0.0).astype(float)
+                  return pd.to_numeric(s, errors="coerce")
 
-          # 3) Basit model → feature importance (Tree-based)
-          imp_rows = []
-          try:
-              from xgboost import XGBClassifier
-              mdl = XGBClassifier(
-                  n_estimators=300, max_depth=6, learning_rate=0.06,
-                  subsample=0.8, colsample_bytree=0.8, eval_metric="logloss",
-                  tree_method="hist", n_jobs=-1, random_state=42
-              )
-              mdl.fit(X, y)
-              imp = getattr(mdl, "feature_importances_", None)
-              if imp is not None:
-                  imp_rows = sorted(zip(X.columns.tolist(), imp.tolist()), key=lambda t: t[1], reverse=True)
-          except Exception:
-              pass
+          def is_multivalue_series(s: pd.Series) -> bool:
+              if s.dtype != object and not str(s.dtype).startswith("string"):
+                  return False
+              ss = s.astype(str)
+              return bool(ss.str.contains(r",").any())  # '[a,b]' gibi çoklu değer izi
 
-          # 4) SHAP (mümkünse hızlı approx)
+          def is_mostly_integer(sn: pd.Series, tol=1e-9, min_ratio=0.98) -> bool:
+              sn = sn.dropna()
+              if sn.empty: return False
+              frac = (np.abs(sn - np.round(sn)) <= tol).mean()
+              return frac >= min_ratio
+
+          strict_numeric_cols = {}
+          soft_numeric_cols   = {}
+          cat_cols_encoded    = {}
+          decisions = []
+
+          for c in X0.columns:
+              s = X0[c]
+              sn = to_numeric_loose(s)
+              numeric_ratio = sn.notna().mean()
+              multivalue = is_multivalue_series(s)
+
+              decision = "CAT"
+              note = ""
+
+              if numeric_ratio >= TH_STRICT and not multivalue:
+                  decision = "STRICT_NUM"
+                  v = sn.fillna(0.0)
+                  if is_mostly_integer(v):
+                      v = np.rint(v).astype(float)  # int-benzeri → yuvarla
+                      note = "strict_numeric_intlike"
+                  strict_numeric_cols[c] = v
+              elif numeric_ratio >= TH_SOFT:
+                  decision = "SOFT_NUM"
+                  v = sn
+                  med = float(np.nanmedian(v)) if np.isfinite(np.nanmedian(v)) else 0.0
+                  v = v.fillna(med)
+                  if is_mostly_integer(v):
+                      v = np.rint(v).astype(float)
+                      note = "soft_numeric_intlike"
+                  soft_numeric_cols[c] = v
+              else:
+                  decision = "CAT"
+                  ss = s.astype(str)
+                  vc = ss.value_counts(dropna=False)
+                  if len(vc) > MAX_CATS:
+                      keep = set(vc.head(MAX_CATS).index.tolist())
+                      ss = ss.where(ss.isin(keep), other="__OTHERS__")
+                      note = f"freq_enc_top{MAX_CATS}"
+                  freq = ss.value_counts(dropna=False)
+                  enc = ss.map(freq).astype(float)
+                  cat_cols_encoded[c] = enc
+
+              decisions.append({
+                  "column": c,
+                  "numeric_ratio": float(numeric_ratio),
+                  "multivalue": bool(multivalue),
+                  "decision": decision,
+                  "note": note
+              })
+
+          dec_df = pd.DataFrame(decisions).sort_values(
+              ["decision","numeric_ratio","column"], ascending=[True,False,True]
+          )
+          dec_df.to_csv(OUT/"feature_type_decision.csv", index=False)
+
+          dropped = [d["column"] for d in decisions if d["decision"] == "CAT" and d["note"] == ""]
+          pd.DataFrame({"dropped_column": dropped}).to_csv(OUT/"feature_dropped_for_strict_numeric.csv", index=False)
+
+          parts = []
+          if strict_numeric_cols:
+              parts.append(pd.DataFrame(strict_numeric_cols))
+          if soft_numeric_cols:
+              parts.append(pd.DataFrame(soft_numeric_cols))
+          if cat_cols_encoded:
+              parts.append(pd.DataFrame(cat_cols_encoded))
+          if not parts:
+              raise SystemExit("Hiçbir kolon kullanılamadı; veri tiplerini kontrol edin.")
+          X = pd.concat(parts, axis=1)
+
+          # --- MODEL & SHAP ---
+          from xgboost import XGBClassifier
+          mdl = XGBClassifier(
+              n_estimators=300, max_depth=6, learning_rate=0.06,
+              subsample=0.8, colsample_bytree=0.8, eval_metric="logloss",
+              tree_method="hist", n_jobs=-1, random_state=42
+          )
+          mdl.fit(X, y)
+
+          imp = getattr(mdl, "feature_importances_", None)
+          if imp is not None:
+              imp_rows = sorted(zip(X.columns.tolist(), np.asarray(imp, dtype=float).tolist()),
+                                key=lambda t: t[1], reverse=True)
+              pd.DataFrame(imp_rows, columns=["feature","importance"]).to_csv(OUT/"feature_importance_xgb.csv", index=False)
+              pd.DataFrame(imp_rows[:20], columns=["feature","importance"]).to_csv(OUT/"feature_top20_xgb.csv", index=False)
+
           shap_rows = []
           try:
               import shap
-              # TreeExplainer tercih; olmazsa KernelExplainer pahalı olabilir
-              explainer = shap.TreeExplainer(mdl, feature_perturbation="interventional")
-              # örneklemeyi kısıtla
+              explainer = shap.TreeExplainer(mdl)
               ns = min(len(X), 2000)
-              S = shap.sample(X, ns, random_state=42)
-              sv = explainer.shap_values(S)
+              S = X.sample(n=ns, random_state=42) if len(X) > ns else X
+              sv = explainer.shap_values(S.values)
               vals = np.abs(sv).mean(axis=0).ravel().tolist()
               shap_rows = sorted(zip(X.columns.tolist(), vals), key=lambda t: t[1], reverse=True)
+              pd.DataFrame(shap_rows, columns=["feature","mean_abs_shap"]).to_csv(OUT/"shap_feature_importance.csv", index=False)
+              pd.DataFrame(shap_rows[:20], columns=["feature","mean_abs_shap"]).to_csv(OUT/"shap_top20.csv", index=False)
           except Exception as e:
               print(f"[WARN] SHAP atlandı: {e}")
 
-          # 5) Kaydet
-          if imp_rows:
-              pd.DataFrame(imp_rows, columns=["feature","importance"]).to_csv(OUT/"feature_importance_xgb.csv", index=False)
-          if shap_rows:
-              pd.DataFrame(shap_rows, columns=["feature","mean_abs_shap"]).to_csv(OUT/"shap_feature_importance.csv", index=False)
-
-          # Kısa özet
-          head_imp = imp_rows[:20] if imp_rows else []
-          head_shap = shap_rows[:20] if shap_rows else []
-          pd.DataFrame(head_imp, columns=["feature","importance"]).to_csv(OUT/"feature_top20_xgb.csv", index=False)
-          pd.DataFrame(head_shap, columns=["feature","mean_abs_shap"]).to_csv(OUT/"shap_top20.csv", index=False)
-
-          print("✅ Feature analysis tamamlandı.")
+          print(f"✅ Feature analysis tamamlandı. STRICT={len(strict_numeric_cols)} SOFT={len(soft_numeric_cols)} "
+                f"CAT(enc)={len(cat_cols_encoded)}  → {OUT/'feature_type_decision.csv'}")
           PY
-
+          
       - name: 11) Install ML deps for stacking
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
