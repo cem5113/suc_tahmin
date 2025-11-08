@@ -712,7 +712,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os, re, ast
+          import os, re
           from pathlib import Path
           import numpy as np
           import pandas as pd
@@ -733,20 +733,31 @@ jobs:
           y = pd.to_numeric(df[ycol], errors="coerce").fillna(0).astype(int).clip(0,1)
           X0 = df.drop(columns=[ycol]).copy()
       
+          _NUM_RE = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
+      
+          def _first_float(text: str):
+              if text is None:
+                  return np.nan
+              m = _NUM_RE.search(str(text))
+              return float(m.group()) if m else np.nan
+      
           def to_numeric_loose(s: pd.Series) -> pd.Series:
+              # Metin kolonları: liste/array görünümlerini ve unicode tireleri temizle
               if s.dtype == object or str(s.dtype).startswith("string"):
                   ss = s.astype(str).str.strip()
-                  ss = ss.str.replace("â€“", "-", regex=False)
-                  ss = ss.str.replace(r'^\[\s*', '', regex=True).str.replace(r'\s*\]$', '', regex=True)
-                  sn = pd.to_numeric(ss, errors="coerce")
-                  return sn
+                  ss = ss.str.replace("â€“", "-", regex=False).str.replace("–", "-", regex=False)
+                  # Dış köşeli parantezleri soy
+                  ss = ss.str.replace(r'^\s*\[\s*', '', regex=True).str.replace(r'\s*\]\s*$', '', regex=True)
+                  # Birden çok sayı içeriyorsa ilkini al
+                  return ss.map(_first_float)
+              # Sayısal görünümlerde klasik dönüşüm
               return pd.to_numeric(s, errors="coerce")
       
           def is_multivalue_series(s: pd.Series) -> bool:
               if s.dtype != object and not str(s.dtype).startswith("string"):
                   return False
               ss = s.astype(str)
-              return bool(ss.str.contains(r",").any())
+              return bool(ss.str.contains(r",").any() or ss.str.contains(r"\s+", regex=True).any())
       
           def is_mostly_integer(sn: pd.Series, tol=1e-9, min_ratio=0.98) -> bool:
               sn = sn.dropna()
@@ -836,10 +847,17 @@ jobs:
       
           try:
               import shap
-              explainer = shap.TreeExplainer(mdl)
-              ns = min(len(X), 2000)
-              S = X.sample(n=ns, random_state=42) if len(X) > ns else X
-              sv = explainer.shap_values(S.values)
+              # Yeni/Eski SHAP sürümleriyle uyumlu çağrı
+              try:
+                  explainer = shap.TreeExplainer(mdl)
+                  ns = min(len(X), 2000)
+                  S = X.sample(n=ns, random_state=42) if len(X) > ns else X
+                  sv = explainer.shap_values(S.values)
+              except Exception:
+                  explainer = shap.Explainer(mdl)
+                  ns = min(len(X), 2000)
+                  S = X.sample(n=ns, random_state=42) if len(X) > ns else X
+                  sv = explainer(S).values
               vals = np.abs(sv).mean(axis=0).ravel().tolist()
               shap_rows = sorted(zip(X.columns.tolist(), vals), key=lambda t: t[1], reverse=True)
               pd.DataFrame(shap_rows, columns=["feature","mean_abs_shap"]).to_csv(OUT/"shap_feature_importance.csv", index=False)
@@ -849,103 +867,103 @@ jobs:
       
           print(f"✅ Feature analysis tamamlandı. STRICT={len(strict_numeric_cols)} SOFT={len(soft_numeric_cols)} CAT(enc)={len(cat_cols_encoded)}  → {OUT/'feature_type_decision.csv'}")
           PY
-
-          - name: Prepare SHAP CSV for quartiles (discover & normalize)
-            if: ${{ steps.gate.outputs.proceed == 'true' }}
-            run: |
-              set -euo pipefail
-              BASE="${CRIME_DATA_DIR}"
-              OA="${BASE}/outputs_feature_analysis"
-              mkdir -p "${BASE}"
-          
-              # 0) Zaten BASE’de varsa hiç uğraşmadan çık
-              if [ -f "${BASE}/shap_feature_importance.csv" ]; then
-                echo "✅ SHAP already present at ${BASE}/shap_feature_importance.csv"
-                exit 0
-              fi
-          
-              # 1) Kanonik OA → BASE
-              if [ -f "${OA}/shap_feature_importance.csv" ]; then
-                cp -f "${OA}/shap_feature_importance.csv" "${BASE}/shap_feature_importance.csv"
-                echo "✅ Found canonical SHAP at ${OA}/shap_feature_importance.csv"
-                exit 0
-              fi
-          
-              # 2) OA/feature_importance_shap.csv → kanonik formata çevir
-              if [ -f "${OA}/feature_importance_shap.csv" ]; then
-                echo "ℹ️ Converting OA/feature_importance_shap.csv → shap_feature_importance.csv"
-                python - <<'PY'
-          import os, pandas as pd
-          base=os.environ['CRIME_DATA_DIR']; oa=os.path.join(base,'outputs_feature_analysis')
-          src=os.path.join(oa,'feature_importance_shap.csv')
-          df=pd.read_csv(src)
-          if 'feature' not in df.columns:
-              df=df.rename(columns={df.columns[0]:'feature'})
-          val = 'mean_abs_shap' if 'mean_abs_shap' in df.columns else (df.columns[1] if df.shape[1]>=2 else None)
-          if not val: raise SystemExit('Cannot parse SHAP CSV')
-          df['mean_abs_shap']=pd.to_numeric(df[val], errors='coerce').clip(lower=0)
-          df=df[df['mean_abs_shap']>0]
-          s=df['mean_abs_shap'].sum()
-          if s>0: df['mean_abs_shap']=df['mean_abs_shap']/s
-          out=os.path.join(base,'shap_feature_importance.csv')
-          df[['feature','mean_abs_shap']].to_csv(out, index=False)
-          print("✅ wrote", out)
-          PY
-                exit 0
-              fi
-          
-              # 3) OA/feature_importance_ensemble_base.csv → SHAP vekili
-              if [ -f "${OA}/feature_importance_ensemble_base.csv" ]; then
-                echo "ℹ️ Using OA/feature_importance_ensemble_base.csv as SHAP proxy"
-                python - <<'PY'
-          import os, pandas as pd
-          base=os.environ['CRIME_DATA_DIR']; oa=os.path.join(base,'outputs_feature_analysis')
-          src=os.path.join(oa,'feature_importance_ensemble_base.csv')
-          df=pd.read_csv(src)
-          if 'feature' not in df.columns:
-              if 'ensemble' in df.columns:
-                  others=[c for c in df.columns if c!='ensemble']
-                  if len(others)==1: df=df.rename(columns={others[0]:'feature'})
-              if 'feature' not in df.columns:
-                  df=df.rename(columns={df.columns[0]:'feature', df.columns[1]:'ensemble'})
-          val='ensemble' if 'ensemble' in df.columns else df.columns[1]
-          df[val]=pd.to_numeric(df[val], errors='coerce').clip(lower=0)
-          df=df[df[val]>0]
-          s=df[val].sum()
-          df['mean_abs_shap']=df[val]/s if s>0 else 0.0
-          out=os.path.join(base,'shap_feature_importance.csv')
-          df[['feature','mean_abs_shap']].to_csv(out, index=False)
-          print("✅ wrote", out)
-          PY
-                exit 0
-              fi
-          
-              # 4) BASE/feature_importance_xgb.csv → SHAP vekili (10.8 çıktısı)
-              if [ -f "${BASE}/feature_importance_xgb.csv" ]; then
-                echo "ℹ️ Using BASE/feature_importance_xgb.csv as SHAP proxy"
-                python - <<'PY'
-          import os, pandas as pd
-          base=os.environ['CRIME_DATA_DIR']
-          src=os.path.join(base,'feature_importance_xgb.csv')
-          df=pd.read_csv(src)
-          if 'feature' not in df.columns:
-              df=df.rename(columns={df.columns[0]:'feature'})
-          val='importance' if 'importance' in df.columns else (df.columns[1] if df.shape[1]>=2 else None)
-          if not val: raise SystemExit('Cannot parse XGB importance CSV')
-          df[val]=pd.to_numeric(df[val], errors='coerce').clip(lower=0)
-          df=df[df[val]>0]
-          s=df[val].sum()
-          df['mean_abs_shap']=df[val]/s if s>0 else 0.0
-          out=os.path.join(base,'shap_feature_importance.csv')
-          df[['feature','mean_abs_shap']].to_csv(out, index=False)
-          print("✅ wrote", out)
-          PY
-                exit 0
-              fi
-          
-              echo "❌ No SHAP/ensemble/xgb importance found under ${OA} or ${BASE}"
-              exit 1
-
+      
+      - name: Prepare SHAP CSV for quartiles (discover & normalize)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          BASE="${CRIME_DATA_DIR}"
+          OA="${BASE}/outputs_feature_analysis"
+          mkdir -p "${BASE}"
+      
+          # 0) Zaten BASE’de varsa hiç uğraşmadan çık
+          if [ -f "${BASE}/shap_feature_importance.csv" ]; then
+            echo "✅ SHAP already present at ${BASE}/shap_feature_importance.csv"
+            exit 0
+          fi
+      
+          # 1) Kanonik OA → BASE
+          if [ -f "${OA}/shap_feature_importance.csv" ]; then
+            cp -f "${OA}/shap_feature_importance.csv" "${BASE}/shap_feature_importance.csv"
+            echo "✅ Found canonical SHAP at ${OA}/shap_feature_importance.csv"
+            exit 0
+          fi
+      
+          # 2) OA/feature_importance_shap.csv → kanonik formata çevir
+          if [ -f "${OA}/feature_importance_shap.csv" ]; then
+            echo "ℹ️ Converting OA/feature_importance_shap.csv → shap_feature_importance.csv"
+            python - <<'PY'
+            import os, pandas as pd
+            base=os.environ['CRIME_DATA_DIR']; oa=os.path.join(base,'outputs_feature_analysis')
+            src=os.path.join(oa,'feature_importance_shap.csv')
+            df=pd.read_csv(src)
+            if 'feature' not in df.columns:
+                df=df.rename(columns={df.columns[0]:'feature'})
+            val = 'mean_abs_shap' if 'mean_abs_shap' in df.columns else (df.columns[1] if df.shape[1]>=2 else None)
+            if not val: raise SystemExit('Cannot parse SHAP CSV')
+            df['mean_abs_shap']=pd.to_numeric(df[val], errors='coerce').clip(lower=0)
+            df=df[df['mean_abs_shap']>0]
+            s=df['mean_abs_shap'].sum()
+            if s>0: df['mean_abs_shap']=df['mean_abs_shap']/s
+            out=os.path.join(base,'shap_feature_importance.csv')
+            df[['feature','mean_abs_shap']].to_csv(out, index=False)
+            print("✅ wrote", out)
+            PY
+            exit 0
+          fi
+      
+          # 3) OA/feature_importance_ensemble_base.csv → SHAP vekili
+          if [ -f "${OA}/feature_importance_ensemble_base.csv" ]; then
+            echo "ℹ️ Using OA/feature_importance_ensemble_base.csv as SHAP proxy"
+            python - <<'PY'
+            import os, pandas as pd
+            base=os.environ['CRIME_DATA_DIR']; oa=os.path.join(base,'outputs_feature_analysis')
+            src=os.path.join(oa,'feature_importance_ensemble_base.csv')
+            df=pd.read_csv(src)
+            if 'feature' not in df.columns:
+                if 'ensemble' in df.columns:
+                    others=[c for c in df.columns if c!='ensemble']
+                    if len(others)==1: df=df.rename(columns={others[0]:'feature'})
+                if 'feature' not in df.columns:
+                    df=df.rename(columns={df.columns[0]:'feature', df.columns[1]:'ensemble'})
+            val='ensemble' if 'ensemble' in df.columns else df.columns[1]
+            df[val]=pd.to_numeric(df[val], errors='coerce').clip(lower=0)
+            df=df[df[val]>0]
+            s=df[val].sum()
+            df['mean_abs_shap']=df[val]/s if s>0 else 0.0
+            out=os.path.join(base,'shap_feature_importance.csv')
+            df[['feature','mean_abs_shap']].to_csv(out, index=False)
+            print("✅ wrote", out)
+            PY
+            exit 0
+          fi
+      
+          # 4) BASE/feature_importance_xgb.csv → SHAP vekili (10.8 çıktısı)
+          if [ -f "${BASE}/feature_importance_xgb.csv" ]; then
+            echo "ℹ️ Using BASE/feature_importance_xgb.csv as SHAP proxy"
+            python - <<'PY'
+            import os, pandas as pd
+            base=os.environ['CRIME_DATA_DIR']
+            src=os.path.join(base,'feature_importance_xgb.csv')
+            df=pd.read_csv(src)
+            if 'feature' not in df.columns:
+                df=df.rename(columns={df.columns[0]:'feature'})
+            val='importance' if 'importance' in df.columns else (df.columns[1] if df.shape[1]>=2 else None)
+            if not val: raise SystemExit('Cannot parse XGB importance CSV')
+            df[val]=pd.to_numeric(df[val], errors='coerce').clip(lower=0)
+            df=df[df[val]>0]
+            s=df[val].sum()
+            df['mean_abs_shap']=df[val]/s if s>0 else 0.0
+            out=os.path.join(base,'shap_feature_importance.csv')
+            df[['feature','mean_abs_shap']].to_csv(out, index=False)
+            print("✅ wrote", out)
+            PY
+            exit 0
+          fi
+      
+          echo "❌ No SHAP/ensemble/xgb importance found under ${OA} or ${BASE}"
+          exit 1
+      
       - name: 10.9) Build stacking inputs by SHAP mass quartiles (Q1..Q4)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
@@ -960,85 +978,73 @@ jobs:
           from pathlib import Path
           import pandas as pd
           import numpy as np
-
+      
           OUTDIR = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
           GRID = Path(os.environ.get("GRID_DATASET", OUTDIR/"sf_crime_grid_full_labeled.csv"))
           SHAP_CSV = Path(os.environ.get("SHAP_CSV", OUTDIR/"shap_feature_importance.csv"))
           TOP_N = int(os.environ.get("TOP_N","20"))
-
+      
           if not SHAP_CSV.exists():
               raise SystemExit(f"SHAP file yok: {SHAP_CSV}")
           if not GRID.exists():
               raise SystemExit(f"GRID file yok: {GRID}")
-
-          # 1) SHAP önemlerini oku (kolon adları: ['feature','mean_abs_shap'] varsayımı)
+      
+          # 1) SHAP önemlerini oku
           shap_df = pd.read_csv(SHAP_CSV)
-          # Esnek isim toleransı
           val_col = 'mean_abs_shap' if 'mean_abs_shap' in shap_df.columns else (
                     'importance' if 'importance' in shap_df.columns else None)
           if val_col is None or 'feature' not in shap_df.columns:
               raise SystemExit("SHAP/importance dosyasında 'feature' ve değer kolonu bulunamadı.")
           df = shap_df[['feature', val_col]].rename(columns={val_col: 'imp_raw'})
-
-          # 0 olmayan ve pozitif önemleri tut
+      
           df = df[df['imp_raw'] > 0].copy()
           if df.empty:
               raise SystemExit("Pozitif önemli özellik yok (imp_raw>0).")
-
-          # (Opsiyonel) TOP_N
+      
           df = df.sort_values('imp_raw', ascending=False)
           if TOP_N > 0:
               df = df.head(TOP_N).copy()
-
-          # Normalize + kümülatif kütle (mass)
+      
           total = df['imp_raw'].sum()
           df['mass'] = df['imp_raw'] / total
           df['cum_mass'] = df['mass'].cumsum()
-
-          # Q ataması (importance mass distribution)
+      
           def assign_q(cum):
               if cum <= 0.25: return 'Q1'
               if cum <= 0.50: return 'Q2'
               if cum <= 0.75: return 'Q3'
               return 'Q4'
           df['quartile'] = df['cum_mass'].map(assign_q)
-
-          # Raporu yaz
+      
           qrep = df[['feature','imp_raw','mass','cum_mass','quartile']]
           qrep.to_csv(OUTDIR/"shap_quartiles.csv", index=False)
-
-          # 2) GRID’i oku (gerekli kimlik ve hedef kolonları belirle)
+      
+          # 2) GRID
           gid = pd.read_csv(GRID, low_memory=False)
           target_col = 'Y_label' if 'Y_label' in gid.columns else ('Y' if 'Y' in gid.columns else None)
           if target_col is None:
               raise SystemExit("GRID içinde Y_label bulunamadı.")
-
-          # Yaygın kimlik kolonları (bulunanları ekle)
+      
           id_candidates = [
               'GEOID','geo_id','tract','blockgroup',
               'date','datetime','ds','incident_date',
               'hr_key','event_hour','hour','day_of_week','season'
           ]
           id_cols = [c for c in id_candidates if c in gid.columns]
-
-          # SHAP seçili feature'ların grid'de mevcut olanlarını al
+      
           shap_feats = qrep['feature'].tolist()
           present_feats = [f for f in shap_feats if f in gid.columns]
           missing = [f for f in shap_feats if f not in gid.columns]
           if missing:
-              # Uyarı yaz, ama devam et
               warn = OUTDIR/"shap_missing_in_grid.txt"
               warn.write_text("\n".join(missing), encoding="utf-8")
-
-          # Quartile grupları
+      
           Q = {q: qrep.loc[qrep['quartile']==q, 'feature'].tolist() for q in ['Q1','Q2','Q3','Q4']}
-          # Sadece grid'de mevcut olanlar
           for k in Q:
               Q[k] = [f for f in Q[k] if f in present_feats]
-
+      
           def save_subset(name, feat_list):
               cols = id_cols + feat_list + [target_col]
-              # kolonları uniq yap (id içinde tekrar olmasın)
               uniq = []
               for c in cols:
                   if c not in uniq and c in gid.columns:
@@ -1046,20 +1052,15 @@ jobs:
               sub = gid[uniq].copy()
               sub.to_csv(OUTDIR/f"sf_crime_{name}.csv", index=False)
               return sub.shape
-
-          # 3) Dosyaları yaz: Q1, Q1+Q2, Q1+Q2+Q3, Q1+Q2+Q3+Q4
-          Q1 = Q['Q1']
-          Q2 = Q['Q2']
-          Q3 = Q['Q3']
-          Q4 = Q['Q4']
-
+      
+          Q1 = Q['Q1']; Q2 = Q['Q2']; Q3 = Q['Q3']; Q4 = Q['Q4']
+      
           shapes = {}
           shapes['Q1']       = save_subset("Q1", Q1)
           shapes['Q1Q2']     = save_subset("Q1Q2", Q1 + Q2)
           shapes['Q1Q2Q3']   = save_subset("Q1Q2Q3", Q1 + Q2 + Q3)
           shapes['Q1Q2Q3Q4'] = save_subset("Q1Q2Q3Q4", Q1 + Q2 + Q3 + Q4)
-
-          # Küçük bir özet bırak
+      
           summary = [
               f"TOP_N={TOP_N}",
               f"Q1: {len(Q1)} feat, shape={shapes['Q1']}",
