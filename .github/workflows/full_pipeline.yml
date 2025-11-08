@@ -1203,6 +1203,15 @@ jobs:
           name: sf-crime-parquet
           path: parquet_out/
           if-no-files-found: warn
+
+      # CSV'leri ayrı artifact olarak yükle
+      - name: Upload CSV artifact (opsiyonel)
+        if: ${{ steps.gate.outputs.proceed == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.persist == 'artifact')) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sf-crime-csv
+          path: csv_out/
+          if-no-files-found: warn
           
       # ---- ÇIKTILAR ----
       - name: Upload artifact (varsayılan)
