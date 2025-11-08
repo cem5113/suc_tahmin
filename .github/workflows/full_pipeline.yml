@@ -905,17 +905,64 @@ jobs:
             exit 2
           fi
           python -u stacking_risk_pipeline.py
+
+      - name: 12.fix) Normalize risk output filenames (create canonical aliases)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          D="${CRIME_DATA_DIR}"
+
+          # Saatlik
+          if [ -f "${D}/risk_hourly_grid_full_labeled.csv" ]; then
+            cp -f "${D}/risk_hourly_grid_full_labeled.csv" "${D}/risk_hourly.csv"
+            echo "↪️  canonical alias: risk_hourly_grid_full_labeled.csv → risk_hourly.csv"
+          fi
+
+          # Günlük
+          if [ -f "${D}/risk_daily_grid_full_labeled.csv" ]; then
+            cp -f "${D}/risk_daily_grid_full_labeled.csv" "${D}/risk_daily.csv"
+            echo "↪️  canonical alias: risk_daily_grid_full_labeled.csv → risk_daily.csv"
+          fi
+
+          # Güvenlik: en az birinin varlığını doğrula
+          test -f "${D}/risk_hourly.csv" || { echo "❌ risk_hourly.csv hâlâ yok"; exit 2; }
       
+      - name: 12.fix) Normalize risk output filenames (create canonical aliases)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          D="${CRIME_DATA_DIR}"
+
+          # Saatlik
+          if [ -f "${D}/risk_hourly_grid_full_labeled.csv" ]; then
+            cp -f "${D}/risk_hourly_grid_full_labeled.csv" "${D}/risk_hourly.csv"
+            echo "↪️  canonical alias: risk_hourly_grid_full_labeled.csv → risk_hourly.csv"
+          fi
+
+          # Günlük
+          if [ -f "${D}/risk_daily_grid_full_labeled.csv" ]; then
+            cp -f "${D}/risk_daily_grid_full_labeled.csv" "${D}/risk_daily.csv"
+            echo "↪️  canonical alias: risk_daily_grid_full_labeled.csv → risk_daily.csv"
+          fi
+
+          # Güvenlik: en az birinin varlığını doğrula
+          test -f "${D}/risk_hourly.csv" || { echo "❌ risk_hourly.csv hâlâ yok"; exit 2; }
+
       - name: 12.1) Inspect risk_hourly dates
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
-          echo "---- risk_hourly.csv (dates) ----"
-          if [ -f "${CRIME_DATA_DIR}/risk_hourly.csv" ]; then
-            cut -d, -f1 "${CRIME_DATA_DIR}/risk_hourly.csv" | head -n 30
+          set -euo pipefail
+          D="${CRIME_DATA_DIR}"
+          RH="${D}/risk_hourly.csv"
+          [ -f "$RH" ] || RH="${D}/risk_hourly_grid_full_labeled.csv"
+          if [ -f "$RH" ]; then
+            echo "---- $(basename "$RH") (dates) ----"
+            cut -d, -f1 "$RH" | head -n 30
             echo "---- unique dates (summary) ----"
-            cut -d, -f1 "${CRIME_DATA_DIR}/risk_hourly.csv" | tail -n +2 | sort | uniq -c
+            cut -d, -f1 "$RH" | tail -n +2 | sort | uniq -c | head
           else
-            echo "risk_hourly.csv bulunamadı"
+            echo "❌ risk_hourly yok"
+            exit 2
           fi
 
       - name: 13) Produce yarin.csv & week.csv (Visual Crossing)
@@ -1106,6 +1153,9 @@ jobs:
           ${{ env.CRIME_DATA_DIR }}/risk_daily.csv
           ${{ env.CRIME_DATA_DIR }}/risk_types_top3.csv
           ${{ env.CRIME_DATA_DIR }}/risk_hourly.csv
+          ${{ env.CRIME_DATA_DIR }}/risk_hourly_grid_full_labeled.csv
+          ${{ env.CRIME_DATA_DIR }}/risk_daily.csv
+          ${{ env.CRIME_DATA_DIR }}/risk_daily_grid_full_labeled.csv
           EOF
 
           echo "== quick heads =="
