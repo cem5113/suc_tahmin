@@ -1014,68 +1014,103 @@ jobs:
             --stats
 
       # ======================= NEW: FRESHNESS GUARDS & METADATA =======================
-      - name: Emit single-row “latest date” CSVs (with header)
+      - name: Emit single-row “latest date” CSVs (robust, full-scan + 365d window)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os, pandas as pd
+          import os, pandas as pd, numpy as np
           from pathlib import Path
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
 
           base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
+          SF   = ZoneInfo("America/Los_Angeles")
+          today_sf = datetime.now(SF).date()
 
-          # Hedef dosyalar + olası tarih kolonları
           targets = [
-            ("sf_crime.csv",                    ["incident_datetime","datetime","date"]),
-            ("sf_911_last_5_year.csv",          ["call_datetime","incident_datetime","date"]),
-            ("sf_311_last_5_years.csv",         ["requested_datetime","opened_date","date"]),
-            ("sf_weather_5years.csv",           ["date"]),
-            ("sf_crime_grid_full_labeled.csv",  ["date"]),
-            ("risk_hourly_grid_full_labeled.csv",                 ["date"]),
-            ("risk_daily_grid_full_labeled.csv",                 ["date"]),
+            ("sf_crime.csv",                   ["incident_datetime","datetime","date"]),
+            ("sf_911_last_5_year.csv",         ["call_datetime","incident_datetime","date"]),
+            ("sf_311_last_5_years.csv",        ["requested_datetime","opened_date","date","datetime"]),
+            ("sf_weather_5years.csv",          ["date","datetime"]),
+            ("sf_crime_grid_full_labeled.csv", ["date"]),
+            ("risk_hourly_grid_full_labeled.csv", ["date"]),
+            ("risk_daily_grid_full_labeled.csv",  ["date"]),
             ("risk_types_top3.csv",            ["date"]),
           ]
+
+          def coerce_dates(series):
+            """DMY/MDY/YMD farklarını tolere ederek tarihe çevir."""
+            # İlk deneme: dayfirst=True
+            d = pd.to_datetime(series, errors="coerce", dayfirst=True, utc=False, infer_datetime_format=True)
+            if d.notna().any():
+              return d
+            # İkinci deneme: dayfirst=False
+            d = pd.to_datetime(series, errors="coerce", dayfirst=False, utc=False, infer_datetime_format=True)
+            if d.notna().any():
+              return d
+            # Son çare: pandas’ın genel parser’ı (yavaş olabilir)
+            return pd.to_datetime(series.astype(str), errors="coerce", utc=False)
 
           overview = []
           for fname, candidates in targets:
             fpath = base / fname
             if not fpath.exists():
               continue
-            try:
-              df_head = pd.read_csv(fpath, nrows=5000, low_memory=False)
-              rowcount = sum(1 for _ in open(fpath, 'r', encoding='utf-8', errors='ignore')) - 1
-            except Exception:
+
+            maxd = None
+            # Tüm dosyayı chunk chunk tara (yalnızca aday kolonları çek)
+            for col in candidates:
+              try:
+                for chunk in pd.read_csv(
+                    fpath, usecols=lambda c: c==col, chunksize=200_000,
+                    dtype=str, low_memory=False, encoding_errors="ignore"
+                ):
+                  ds = coerce_dates(chunk[col])
+                  if ds.notna().any():
+                    m = ds.dt.date.max()
+                    if m is not None and (maxd is None or m > maxd):
+                      maxd = m
+                if maxd is not None:
+                  break  # uygun kolonu bulduk
+              except Exception:
+                continue
+
+            if maxd is None:
+              # hiçbir kolon parse edilemediyse geç
               continue
 
-            col = next((c for c in candidates if c in df_head.columns), None)
-            if col is None:
-              continue
+            # Geleceğe taşan tarihleri bugüne kırp (güvenlik)
+            if maxd > today_sf:
+              maxd = today_sf
 
-            mx = pd.to_datetime(df_head[col], errors="coerce").dt.date.max()
-            if pd.isna(mx):
-              continue
+            # Tek satırlık *_latest.csv
+            latest_path = fpath.with_name(f"{fpath.stem}_latest.csv")
+            pd.DataFrame([{"date": maxd.isoformat()}]).to_csv(latest_path, index=False)
 
-            latest_path = fpath.with_name(fpath.stem + "_latest.csv")
-            pd.DataFrame([{col: mx.isoformat()}]).to_csv(latest_path, index=False)
+            # 365 günlük pencere: [end-364, end]
+            start_365 = (maxd - timedelta(days=364))
+            latest365 = fpath.with_name(f"{fpath.stem}_latest_365.csv")
+            pd.DataFrame([{"start_date": start_365.isoformat(), "end_date": maxd.isoformat()}]).to_csv(latest365, index=False)
 
+            # özet tablosu için kayıt
             overview.append({
-              "file": fname,
-              "date_column": col,
-              "max_date": mx.isoformat(),
-              "rows_total_approx": rowcount if rowcount >= 0 else ""
+              "file": fname, "date_column": ",".join(candidates),
+              "max_date": maxd.isoformat()
             })
 
           if overview:
-            pd.DataFrame(overview, columns=["file","date_column","max_date","rows_total_approx"]).to_csv(base / "latest_overview.csv", index=False)
+            pd.DataFrame(overview, columns=["file","date_column","max_date"]).to_csv(base/"latest_overview.csv", index=False)
+
+          print("✅ latest_* dosyaları üretildi.")
           PY
 
+          echo "— produced *_latest*.csv —"
+          ls -1 "${CRIME_DATA_DIR}"/*_latest*.csv 2>/dev/null || true
           echo "— latest_overview.csv (head) —"
-          head -n 10 "${CRIME_DATA_DIR}/latest_overview.csv" || true
-
-          echo "— produced *_latest.csv —"
-          ls -1 "${CRIME_DATA_DIR}"/*_latest.csv 2>/dev/null || true
+          head -n 10 "${CRIME_DATA_DIR}/latest_overview.csv" 2>/dev/null || true
 
       - name: Sanity packlist (mtime + head)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
