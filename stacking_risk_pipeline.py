@@ -689,10 +689,10 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
                 rec_path = os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.csv")
                 recs.to_csv(rec_path, index=False)
                 print(f"Patrol recs → {rec_path}")
-                        try:
-                            recs.to_parquet(os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.parquet"), index=False)
-                        except Exception as e:
-                            print(f"[WARN] patrol_recs parquet yazılamadı: {e}")
+                try:
+                    recs.to_parquet(os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.parquet"), index=False)
+                except Exception as e:
+                    print(f"[WARN] patrol_recs parquet yazılamadı: {e}")
         else:
             print("ℹ️ Tek-gün patrol özeti atlandı (tarih yok).")
 
