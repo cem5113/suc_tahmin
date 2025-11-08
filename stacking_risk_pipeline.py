@@ -657,10 +657,10 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     risk_hourly_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
     risk_multi.to_csv(risk_hourly_path, index=False)
   
-      try:
-          risk_multi.to_parquet(os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.parquet"), index=False)
-      except Exception as e:
-          print(f"[WARN] risk_hourly parquet yazılamadı: {e}")
+    try:
+        risk_multi.to_parquet(os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.parquet"), index=False)
+    except Exception as e:
+        print(f"[WARN] risk_hourly parquet yazılamadı: {e}")
 
     # Seviyeleri hızlı etiketlemek istiyorsanız (opsiyonel):
     # q80 = risk_multi["risk_score"].quantile(0.8)
