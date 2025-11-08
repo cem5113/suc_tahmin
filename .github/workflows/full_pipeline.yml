@@ -230,6 +230,7 @@ jobs:
           python -u update_crime.py
 
       - name: 02) 911 → sf_crime_01.csv
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
           if [ -f update_911.py ]; then
@@ -285,6 +286,7 @@ jobs:
           head -n 3 "${CRIME_DATA_DIR}/sf_911_last_5_year_y.csv" || true
 
       - name: 03) 311 → sf_crime_02.csv
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
         run: |
           set -e
           if [ -f update_311.py ]; then
