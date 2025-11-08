@@ -728,17 +728,35 @@ jobs:
           if ycol is None:
               raise SystemExit("Y_label kolonu yok — feature analysis atlandı.")
 
-          # 2) Temel sayısal temizlik
+          # 2) Temel sayısal temizlik (güçlü)
           y = df[ycol].astype(int)
           X = df.drop(columns=[ycol]).copy()
+          
+          def to_float_series(s):
+              # string ise köşeli parantez, boşluk vb. temizle, sonra sayıya çevir
+              if s.dtype == object or str(s.dtype).startswith("string"):
+                  s = s.astype(str).str.replace(r"[\[\]\s]", "", regex=True)
+                  s = pd.to_numeric(s, errors="coerce")
+              else:
+                  s = pd.to_numeric(s, errors="coerce")
+              return s
+          
           for c in X.columns:
-            if X[c].dtype == object:
-              # çok yüksek kardinaliteyi sayısala dönüştürme (freq-encode)
-              vc = X[c].astype(str).value_counts()
-              X[c] = X[c].astype(str).map(vc).astype(float)
-            else:
-              X[c] = pd.to_numeric(X[c], errors="coerce")
-          X = X.fillna(0.0)
+              s = X[c]
+              # Önce sayıya çevirmeyi dene
+              sn = to_float_series(s)
+          
+              # Eğer tamamen NaN olmadıysa (yani sayısal anlamlıysa) onu kullan
+              if sn.notna().any():
+                  X[c] = sn
+                  continue
+          
+              # Buraya gelmişse sütun gerçek kategorik: freq-encode
+              vc = s.astype(str).value_counts()
+              X[c] = s.astype(str).map(vc).astype(float)
+          
+          # Son rötuş
+          X = X.fillna(0.0).astype(float)
 
           # 3) Basit model → feature importance (Tree-based)
           imp_rows = []
