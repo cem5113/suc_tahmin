@@ -53,6 +53,18 @@ TRAIN_PHASE = os.getenv("TRAIN_PHASE", "select").strip().lower()  # select | fin
 CV_JOBS     = int(os.getenv("CV_JOBS", "4"))
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+def _suffix_from_dataset(path: str) -> str:
+    """'.../sf_crime_Q1.csv' → '_Q1' ; '.../sf_crime_08.csv' → '_08' ; fallback ''"""
+    try:
+        name = Path(path).stem  # örn: sf_crime_Q1
+    except Exception:
+        return ""
+    for tag in ["Q1Q2Q3Q4", "Q1Q2Q3", "Q1Q2", "Q1", "08", "09", "grid_full_labeled"]:
+        if tag.lower() in name.lower():
+            return f"_{tag}"
+    parts = name.split("_")
+    return f"_{parts[-1]}" if len(parts) >= 2 else ""
+
 # --- Spatial-TE kontrolü ---
 NEIGHBOR_FILE     = os.getenv("NEIGHBOR_FILE", "").strip()        # 'GEOID,neighbor' iki sütunlu csv (opsiyonel)
 TE_ALPHA          = float(os.getenv("TE_ALPHA", "50"))            # Laplace smoothing gücü (m)
@@ -708,6 +720,7 @@ if __name__ == "__main__":
         data_path = ensure_sf_crime_09()
 
     print(f"📄 Using dataset: {data_path} | TRAIN_PHASE={TRAIN_PHASE} | CV_JOBS={CV_JOBS}")
+    out_suffix = _suffix_from_dataset(data_path)
     df = pd.read_csv(data_path, low_memory=False, dtype={"GEOID": str})
     if "Y_label" not in df.columns:
         raise ValueError("Y_label kolonu bulunamadı.")
@@ -807,14 +820,13 @@ if __name__ == "__main__":
     print("\n🔎 Evaluating base + OOF (with progress)…")
     base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(base_pipes, X, y, cv, cv_jobs=CV_JOBS)
     Path(CRIME_DIR).mkdir(parents=True, exist_ok=True)
-    base_metrics.to_csv(os.path.join(CRIME_DIR, "metrics_base.csv"), index=False)
-    np.savez_compressed(os.path.join(CRIME_DIR, "oof_base_probs.npz"), **oof_map)
-    print(base_metrics)
-
-    # Meta + % ilerleme
-    print("\n🤝 Evaluating stacking meta on OOF…")
+    base_metrics.to_csv(os.path.join(CRIME_DIR, f"metrics_base{out_suffix}.csv"), index=False)
+    out_suffix = _suffix_from_dataset(data_path)
+    np.savez_compressed(os.path.join(CRIME_DIR, f"oof_base_probs{out_suffix}.npz"), **oof_map)
     meta_metrics = evaluate_meta_on_oof(Z, y)
-    meta_metrics.to_csv(os.path.join(CRIME_DIR, "metrics_stacking.csv"), index=False)
+    meta_metrics.to_csv(os.path.join(CRIME_DIR, f"metrics_stacking{out_suffix}.csv"), index=False)
+    print(base_metrics)
+    print("\n🤝 Evaluating stacking meta on OOF…")
     print(meta_metrics)
 
     # --- Spatial-TE Ablation (isteğe bağlı) ---
@@ -871,7 +883,8 @@ if __name__ == "__main__":
     print(f"Saved models. Threshold ({meta_name}) = {thr:.4f}")
 
     # Risk & patrol (güvenli)
-    risk_path, rec_path = export_risk_tables(df, y, p_stack, thr)
+    out_suffix = _suffix_from_dataset(data_path)
+    risk_path, rec_path = export_risk_tables(df, y, p_stack, thr, out_prefix=out_suffix)
     print(f"Risk table → {risk_path}")
     if rec_path:
         print(f"Patrol recs → {rec_path}")
@@ -884,7 +897,7 @@ if __name__ == "__main__":
     try:
         base_metrics["group"] = "base"; meta_metrics["group"] = "stacking"
         allm = pd.concat([base_metrics, meta_metrics], ignore_index=True)
-        allm.to_csv(os.path.join(CRIME_DIR, "metrics_all.csv"), index=False)
+        allm.to_csv(os.path.join(CRIME_DIR, f"metrics_all{out_suffix}.csv"), index=False)
         print("All metrics → metrics_all.csv")
     except Exception as e:
         print(f"[WARN] metrics merge failed: {e}")
