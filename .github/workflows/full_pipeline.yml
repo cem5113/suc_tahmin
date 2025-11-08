@@ -1235,6 +1235,7 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_09.csv
             ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
+            ${{ env.CRIME_DATA_DIR }}/neighbors.csv
             ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years.csv
             ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years_y.csv
             ${{ env.CRIME_DATA_DIR }}/sf_311_last_5_years*.csv
@@ -1248,13 +1249,12 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_weather_5years_y.csv
             ${{ env.CRIME_DATA_DIR }}/*.geojson
             ${{ env.CRIME_DATA_DIR }}/risk_hourly_grid_full_labeled.csv
-            ${{ env.CRIME_DATA_DIR }}/risk_daily.csv
+            ${{ env.CRIME_DATA_DIR }}/risk_daily_grid_full_labeled.csv   # ← BU KALSIN
             ${{ env.CRIME_DATA_DIR }}/risk_types_top3.csv
-            ${{ env.CRIME_DATA_DIR }}/risk_hourly*.parquet
-            ${{ env.CRIME_DATA_DIR }}/risk_daily_grid_full_labeled.csv*.parquet
             ${{ env.CRIME_DATA_DIR }}/patrol_recs*.csv
             ${{ env.CRIME_DATA_DIR }}/models/**
             ${{ env.CRIME_DATA_DIR }}/metrics_*.csv
+            ${{ env.CRIME_DATA_DIR }}/metrics_all.csv                   # ← (opsiyonel) açıkça ekle
             ${{ env.CRIME_DATA_DIR }}/oof_base_probs*.npz
             ${{ env.CRIME_DATA_DIR }}/ablation_spatial_te.csv
             ${{ env.CRIME_DATA_DIR }}/feature_importance_xgb.csv
@@ -1271,3 +1271,7 @@ jobs:
             ${{ env.CRIME_DATA_DIR }}/sf_crime_Q1Q2Q3Q4.csv
             ${{ env.CRIME_DATA_DIR }}/yarin.csv
             ${{ env.CRIME_DATA_DIR }}/week.csv
+            ${{ env.CRIME_DATA_DIR }}/*_latest.csv
+            ${{ env.CRIME_DATA_DIR }}/latest_overview.csv
+            ${{ env.CRIME_DATA_DIR }}/_build_info.txt
+      
