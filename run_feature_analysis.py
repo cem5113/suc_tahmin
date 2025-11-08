@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-crime_feature_analysis.py — Gün-bazlı (GEOID × date) veriler için denetimli özellik analizi & seçim.
+crime_feature_analysis.py — GEOID×zaman verisi için denetimli özellik analizi & seçim.
 
-Bu sürüm, aşağıdaki örnek şemayı doğrudan destekler:
+Girdi şeması, aşağıdakilerin benzerlerini destekler (özet):
 GEOID, season, day_of_week, event_hour, latitude, longitude, is_holiday, crime_count, crime_mix, Y_label,
 hr_key, hour_range, sf_wet_season, sf_dry_season, sf_fog_season,
 crime_last_3d, crime_last_7d, neigh_crime_last_3d, neigh_crime_last_7d,
@@ -20,19 +20,14 @@ distance_to_government_building, distance_to_government_building_range,
 is_near_police, is_near_government, neighbor_crime_total, ...
 
 Öz:
-- Zaman-farkındalıklı split: öncelik date/datetime; yoksa hr_key içinden tarih çıkarma; o da yoksa stratified random.
-- (İsteğe bağlı) GEOID gruplu split ipuçları
-- Model/Permutation/(varsa) SHAP importance → ensemble
-- OHE alt kolonu bazında base mapping ve ileri seçim (F1)
-- Operasyonel metrik: Precision@k
-
-Kullanım:
-  python crime_feature_analysis.py --csv sf_crime_08.csv --outdir outputs_feature_analysis --group_by_geoid
-  # veya
-  export CRIME_CSV=sf_crime_08.csv && python crime_feature_analysis.py
+- Güvenli başlık adları (parantez/tire/boşluk temizliği + bilinçli yeniden adlandırma).
+- Değer temizliği (bozuk unicode “â€“” → “-”, tek-elemanlı liste string → sayısal).
+- Zaman-farkındalıklı split (date/datetime; yoksa hr_key).
+- Model/Permutation/(varsa) SHAP önemleri → ensemble.
+- Base-feature (OHE öncesi) seviyesinde ileri seçim ve seçilmiş CSV çıktısı.
 """
 
-import argparse, json, re, warnings
+import argparse, json, re, warnings, ast, os
 warnings.filterwarnings("ignore")
 from pathlib import Path
 from typing import List, Tuple, Dict, Sequence, Optional
@@ -53,7 +48,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.inspection import permutation_importance
 from sklearn.base import clone
 
-# opsiyonel modeller
+# İsteğe bağlı modeller
 try:
     from xgboost import XGBClassifier
     HAS_XGB = True
@@ -66,7 +61,7 @@ try:
 except Exception:
     HAS_LGBM = False
 
-# SHAP opsiyonel
+# SHAP isteğe bağlı
 try:
     import shap
     HAS_SHAP = True
@@ -74,8 +69,17 @@ except Exception:
     HAS_SHAP = False
 
 
-# ------------------------- yardımcılar -------------------------
+# ------------------------- Yardımcılar -------------------------
+SAFE_RENAME_MAP = {
+    # Bilinen problemli başlıklar → güvenli isim
+    "911_request_count_daily(before_24_hours)": "911_request_count_daily_before_24_hours",
+    # Gerekirse buraya benzer eşleştirmeler ekleyin
+}
+
 def sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # Önce bilinçli rename
+    df = df.rename(columns=SAFE_RENAME_MAP)
+    # Ardından genel temizlik: harf/rakam/altçizgi dışındakileri '_' yap
     new_cols, seen = [], {}
     for c in df.columns:
         nc = re.sub(r"[^\w]+", "_", str(c), flags=re.UNICODE)  # parantez vb. → _
@@ -89,11 +93,18 @@ def sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = new_cols
     return df
 
+def fix_common_value_encoding(df: pd.DataFrame) -> pd.DataFrame:
+    # Bozuk en-dash “â€“” → "-"
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = df[c].astype(str).str.replace("â€“", "-", regex=False)
+    return df
 
 def extract_quantile_label(val):
     if pd.isna(val):
         return np.nan
-    m = re.match(r"Q(\d+)", str(val).strip(), flags=re.I)
+    # "Q5 (1758.3-3766.1)" → 5
+    m = re.match(r"Q\s*(\d+)", str(val).strip(), flags=re.I)
     if m:
         try:
             return int(m.group(1))
@@ -101,21 +112,72 @@ def extract_quantile_label(val):
             return np.nan
     return np.nan
 
+def coerce_listy_numeric_series(s: pd.Series) -> pd.Series:
+    """Tek elemanlı liste/array stringlerini sayıya çevirir: "[5.306548E-1]" → 0.5306548"""
+    s = s.astype(str).str.strip()
+    # Köşeli parantezleri sil (tek değer ise)
+    s1 = s.str.replace(r'^\[\s*', '', regex=True).str.replace(r'\s*\]$', '', regex=True)
+    # Tek eleman kontrolü: virgül yoksa tek değer varsay
+    is_single = ~s1.str.contains(r',')
+    out = pd.to_numeric(s1.where(is_single), errors='coerce')
+
+    # Hâlâ NaN olanlar için literal_eval ile ilk sayıyı çek
+    def parse_first_num(x):
+        try:
+            v = ast.literal_eval(x)
+            if isinstance(v, (list, tuple)) and len(v):
+                v = v[0]
+            return float(v)
+        except Exception:
+            return np.nan
+    m = out.isna() & s.notna()
+    if m.any():
+        out.loc[m] = s.loc[m].map(parse_first_num)
+    return out
+
+def coerce_binary(df_: pd.DataFrame) -> pd.DataFrame:
+    for col in df_.columns:
+        if col.startswith("is_") or col in ["is_weekend","is_night","is_school_hour",
+                                            "is_business_hour","is_near_police","is_near_government"]:
+            if df_[col].dtype == object:
+                m = df_[col].str.lower().map({"true":1,"yes":1,"y":1,"false":0,"no":0,"n":0})
+                if m.notna().any():
+                    df_[col] = m.fillna(df_[col])
+            df_[col] = pd.to_numeric(df_[col], errors="coerce")
+    return df_
 
 def coerce_numeric(df: pd.DataFrame, exclude_cols: Sequence[str]) -> Tuple[pd.DataFrame, List[str], List[str]]:
+    """Sayısal/kategorik ayrımı. Quantile etiketleri (Q1..Qn) kategorik tutulur; diğer object kolonlar numeric'e zorlanır."""
     numeric_cols, categorical_cols = [], []
     excl = set(exclude_cols)
     for c in df.columns:
         if c in excl:
             categorical_cols.append(c)
             continue
+
+        # 1) Quantile label? (Q1..Qn) → kategorik index (1..n) olarak sayısala çevirebiliriz,
+        # ancak anlamı kategoriktir; o yüzden kategorik tutuyoruz.
         if df[c].dtype == object:
             qvals = df[c].map(extract_quantile_label)
             if qvals.notna().mean() > 0.6:
-                df[c] = qvals
+                # Quantile değerini doğrudan kategori gibi bırakmak için stringe döndür
+                df[c] = "Q" + qvals.fillna(-1).astype(int).astype(str)
+                categorical_cols.append(c)
+                continue
+
+        # 2) Tek-elemanlı liste/array string → sayısal
+        if df[c].dtype == object:
+            s_conv = coerce_listy_numeric_series(df[c])
+            # Eğer yeterli oranla sayıya çevrildiyse sayısal kabul
+            if s_conv.notna().mean() >= 0.8:
+                df[c] = s_conv
+                numeric_cols.append(c)
+                continue
+
+        # 3) Direkt numeriğe zorla
         if df[c].dtype == object:
             conv = pd.to_numeric(df[c], errors="coerce")
-            if conv.notna().mean() > 0.8:
+            if conv.notna().mean() >= 0.8:
                 df[c] = conv
                 numeric_cols.append(c)
             else:
@@ -123,7 +185,6 @@ def coerce_numeric(df: pd.DataFrame, exclude_cols: Sequence[str]) -> Tuple[pd.Da
         else:
             numeric_cols.append(c)
     return df, numeric_cols, categorical_cols
-
 
 def pick_model():
     if HAS_XGB:
@@ -143,12 +204,10 @@ def pick_model():
         class_weight="balanced_subsample", random_state=42
     )
 
-
 def compute_class_weight(y: pd.Series) -> float:
     y = pd.to_numeric(y, errors="coerce").fillna(0).astype(int).clip(0, 1)
     pos = int((y == 1).sum()); neg = int((y == 0).sum())
     return float(neg) / float(pos) if pos > 0 else 1.0
-
 
 def plot_and_save_importance(importances: pd.Series, out_png: Path, top_n: int = 30, title: str = "Feature Importance"):
     top = importances.sort_values(ascending=False).head(top_n)
@@ -159,13 +218,11 @@ def plot_and_save_importance(importances: pd.Series, out_png: Path, top_n: int =
     plt.savefig(out_png, dpi=200)
     plt.close()
 
-
 def make_ohe_compat(**kwargs):
     try:
         return OneHotEncoder(**kwargs, handle_unknown="ignore", sparse_output=True)
     except TypeError:
         return OneHotEncoder(**kwargs, handle_unknown="ignore", sparse=True)
-
 
 def get_transformed_feature_names(pre: ColumnTransformer,
                                   numeric_cols_in_use: Sequence[str],
@@ -197,7 +254,6 @@ def get_transformed_feature_names(pre: ColumnTransformer,
         names.extend([f"ohe_f{i}" for i in range(rest)])
     return names
 
-
 def build_base_mapping(feature_names: Sequence[str],
                        numeric_cols_in_use: Sequence[str],
                        categorical_cols_in_use: Sequence[str]) -> Dict[str, List[int]]:
@@ -213,7 +269,6 @@ def build_base_mapping(feature_names: Sequence[str],
             mapping.setdefault(nm, []).append(i)
     return mapping
 
-
 def select_columns_from_transformed(pre: ColumnTransformer, Xdf: pd.DataFrame,
                                    chosen_bases: Sequence[str],
                                    feature_to_columns: Dict[str, List[int]]):
@@ -224,7 +279,6 @@ def select_columns_from_transformed(pre: ColumnTransformer, Xdf: pd.DataFrame,
     if not keep_idx:
         return Xt
     return Xt[:, keep_idx]
-
 
 def forward_select_by_rank(pre: ColumnTransformer, base_model,
                            X: pd.DataFrame, y: pd.Series,
@@ -271,7 +325,6 @@ def forward_select_by_rank(pre: ColumnTransformer, base_model,
     info = {"forward_curve": curve, "best_k": len(best_set), "metric": metric, "best_score": float(best_score)}
     return best_set, info
 
-
 def precision_at_k(y_true, scores, k=50) -> Optional[float]:
     try:
         idx = np.argsort(-np.asarray(scores))[:k]
@@ -279,20 +332,15 @@ def precision_at_k(y_true, scores, k=50) -> Optional[float]:
     except Exception:
         return None
 
-
 def try_parse_datetime_from_hrkey(s: pd.Series) -> Optional[pd.Series]:
-    """hr_key ör. '2024-08-12 14', '2024-08-12', '20240812-14', '2024-08-12T14' vb."""
+    """hr_key örn. '2024-08-12 14', '2024-08-12', '20240812-14', '2024-08-12T14' vb."""
     if s is None:
         return None
     s = s.astype(str)
-    # Çok yaygın desenleri normalize etmeye çalış
-    # Önce 'YYYY-MM-DD HH' / 'YYYY-MM-DD' doğrudan dene
     dt = pd.to_datetime(s, errors="coerce", utc=False, infer_datetime_format=True)
     if dt.notna().mean() > 0.5:
         return dt
-    # 'YYYYMMDD-HH' veya 'YYYYMMDDHH' gibi
     s2 = s.str.replace(r"[^0-9]", "", regex=True)
-    # uzunluk 8 → YYYYMMDD; 10→ YYYYMMDDHH
     def parse_compact(z):
         if len(z) >= 8:
             y, m, d = z[:4], z[4:6], z[6:8]
@@ -308,7 +356,7 @@ def try_parse_datetime_from_hrkey(s: pd.Series) -> Optional[pd.Series]:
     return None
 
 
-# ------------------------- çekirdek -------------------------
+# ------------------------- Çekirdek -------------------------
 def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path,
                                  group_by_geoid: bool, csv_path: str,
                                  desired_output_csv: Path, random_state: int = 42,
@@ -316,47 +364,40 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
                                  top_k: int = 50) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # GEOID (her türlü büyük/küçük) yakala
-    geo_candidates_raw = [c for c in df_raw.columns if str(c).lower() in {"geoid","geo_id","tract","tract_geoid","geoid10","blockgroup"}]
-    original_geoid = df_raw[geo_candidates_raw[0]].astype(str) if geo_candidates_raw else None
-
-    # tarih/datetime kolonları
+    # Zaman sütunu (sanitize öncesi: hr_key okunabilsin)
     time_cols_raw = [c for c in df_raw.columns if str(c).lower() in {"date","incident_date","day","ds","datetime"}]
     time_col_raw = time_cols_raw[0] if time_cols_raw else None
     date_ser_raw = pd.to_datetime(df_raw[time_col_raw], errors="coerce") if time_col_raw else None
-
-    # hr_key'den tarih çıkar (fallback)
     if date_ser_raw is None and "hr_key" in df_raw.columns:
         date_from_hr = try_parse_datetime_from_hrkey(df_raw["hr_key"])
         if date_from_hr is not None:
             date_ser_raw = date_from_hr
 
-    # sanitize
+    # Başlıkları ve değerleri temizle
+    df_raw = fix_common_value_encoding(df_raw.copy())
     df = sanitize_columns(df_raw.copy())
+
     if target not in df.columns:
         raise ValueError(f"Hedef sütun '{target}' bulunamadı.")
     if df[target].dropna().nunique() < 2:
         raise ValueError("Hedef (Y_label) en az 2 sınıf içermiyor.")
 
-    # sanitize sonrası tarih adını tekrar bul/ekle
+    # sanitize sonrası tarih adını bul/ekle
     time_cols = [c for c in df.columns if c.lower() in {"date","incident_date","day","ds","datetime"}]
     time_col = time_cols[0] if time_cols else None
     if (time_col is None) and (date_ser_raw is not None):
         df.insert(0, "date_sanitized", pd.to_datetime(date_ser_raw, errors="coerce"))
         time_col = "date_sanitized"
 
-    # split için tarih serisi
-    date_ser = None
-    if time_col is not None:
-        df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
-        date_ser = df[time_col].copy()
-
-    # Hedef ve X_all (tarih şimdilik dursun)
+    # Hedef ve X_all
     y = pd.to_numeric(df[target], errors="coerce").fillna(0).astype(int).clip(0, 1)
     X_all = df.drop(columns=[target]).copy()
 
     # Tarih türevleri
-    if date_ser is not None:
+    date_ser = None
+    if time_col is not None:
+        df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+        date_ser = df[time_col].copy()
         if "day_of_week" not in X_all.columns:
             X_all["dow"] = date_ser.dt.dayofweek
         if "month" not in X_all.columns:
@@ -364,10 +405,9 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
         if "is_weekend" not in X_all.columns:
             X_all["is_weekend"] = date_ser.dt.dayofweek.isin([5,6]).astype(int)
 
-    # ---- Modelden düşülecek alanlar (ID/leakage) ----
-    # hr_key (ID/tarih taşıyabilir), GEOID anahtarları, koordinatlar, target-türevleri
+    # Modelden düşülecek alanlar (ID/leakage/koordinat)
     drop_exact = []
-    geo_keys = [c for c in df.columns if c.lower() in {"geoid","geo_id","tract","tract_geoid","geoid10","blockgroup","block","census_block","block_group"}]
+    geo_keys = [c for c in df.columns if re.fullmatch(r"(geoid|geo_id|tract|tract_geoid|geoid10|blockgroup|block|census_block|block_group)", c, flags=re.I)]
     drop_exact += geo_keys
     id_like = [c for c in df.columns if re.fullmatch(r"(id|incident_id|case_id|row_id|index|hr_key)", c, flags=re.I)]
     drop_exact += id_like
@@ -376,7 +416,7 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
     leakage_cols = [c for c in df.columns if c.startswith(target) and c != target]
     drop_exact += leakage_cols
 
-    # ---- ZAMAN-TABANLI SPLIT ----
+    # Zaman tabanlı split
     if date_ser is not None:
         cutoff = pd.to_datetime(split_date) if split_date else date_ser.quantile(0.80)
         tr_mask = date_ser <= cutoff
@@ -384,19 +424,18 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
         X_train_full, X_test_full = X_all.loc[tr_mask], X_all.loc[te_mask]
         y_train, y_test = y.loc[tr_mask], y.loc[te_mask]
     else:
-        # tarih çıkarılamadı → stratified random
         X_train_full, X_test_full, y_train, y_test = train_test_split(
             X_all, y, test_size=0.2, random_state=random_state, stratify=y
         )
         cutoff = None
 
-    # tarih ve diğer drop'ları modelden at
+    # Dropları uygula (tarih dahil)
     drop_for_model = list(set(drop_exact + ([time_col] if time_col is not None else [])))
     X_train = X_train_full.drop(columns=[c for c in drop_for_model if c in X_train_full.columns], errors="ignore")
     X_test  = X_test_full.drop(columns=[c for c in drop_for_model if c in X_test_full.columns],  errors="ignore")
 
-    # ---- Tip zorlamaları ----
-    # Kategorik olarak zorlanacaklar: açık listeler + tüm *_range + bilinen enum alanları
+    # Tip zorlamaları
+    # Kategorik tutulacaklar: açık listeler + tüm *_range + enum benzeri
     range_like = [c for c in X_train.columns if c.endswith("_range")]
     force_categorical = [c for c in [
         "category", "subcategory", "season", "season_x", "season_y",
@@ -406,25 +445,15 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
         "poi_dominant_type"
     ] if c in X_train.columns] + range_like
 
-    # is_* alanlarını binary numeric'e çevir
-    def coerce_binary(df_):
-        for col in df_.columns:
-            if col.startswith("is_") or col in ["is_weekend","is_night","is_school_hour","is_business_hour","is_near_police","is_near_government"]:
-                if df_[col].dtype == object:
-                    # "true/false/yes/no/0/1"
-                    m = df_[col].str.lower().map({"true":1,"yes":1,"y":1,"false":0,"no":0,"n":0})
-                    if m.notna().any():
-                        df_[col] = m.fillna(df_[col])
-                df_[col] = pd.to_numeric(df_[col], errors="coerce")
-        return df_
+    # Binary alanları düzelt
     X_train = coerce_binary(X_train.copy())
     X_test  = coerce_binary(X_test.copy())
 
-    # numeric/cat ayrımı ve dönüştürmeler
+    # Numerik/kategorik ayrımı + dönüştürme
     X_train, numeric_cols, categorical_cols = coerce_numeric(X_train.copy(), exclude_cols=force_categorical)
     X_test,  _,             _              = coerce_numeric(X_test.copy(),  exclude_cols=force_categorical)
 
-    # pipeline
+    # Pipeline
     numeric_cols_in_use = [c for c in numeric_cols if c in X_train.columns]
     categorical_cols_in_use = [c for c in categorical_cols if c in X_train.columns]
     num_pipe = Pipeline([("imputer", SimpleImputer(strategy="median")),
@@ -437,7 +466,7 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
         remainder="drop"
     )
 
-    # model
+    # Model
     model_name, base_model = pick_model()
     spw = compute_class_weight(y_train)
     if model_name == "xgb":
@@ -445,7 +474,7 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
     clf = Pipeline([("pre", pre), ("model", base_model)])
     clf.fit(X_train, y_train)
 
-    # metrikler
+    # Metrikler
     if hasattr(base_model, "predict_proba"):
         y_proba = clf.predict_proba(X_test)[:, 1]
         y_pred = (y_proba >= 0.5).astype(int)
@@ -464,7 +493,7 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
     p_def, r_def = float(p_def), float(r_def)
     p_at_k = precision_at_k(y_test.values, y_proba, k=top_k) if hasattr(base_model, "predict_proba") else None
 
-    # önemler
+    # Önemler
     pre_fit = clf.named_steps["pre"]
     feature_names_transformed = get_transformed_feature_names(pre_fit, numeric_cols_in_use, categorical_cols_in_use)
 
@@ -535,7 +564,7 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
     df_imp["ensemble"] = df_imp.mean(axis=1)
     df_imp.sort_values("ensemble", ascending=False).to_csv(outdir / "feature_importance_ensemble_transformed.csv")
 
-    # base mapping ve ileri seçim
+    # Base mapping ve ileri seçim
     base_map = build_base_mapping(df_imp.index.tolist(), numeric_cols_in_use, categorical_cols_in_use)
 
     base_scores: Dict[str, float] = {}
@@ -545,7 +574,7 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
     base_rank = pd.Series(base_scores).sort_values(ascending=False)
     base_rank.to_csv(outdir / "feature_importance_ensemble_base.csv")
 
-    # İleri seçim, bütün veride hızlı iç doğrulama ile
+    # İleri seçim (F1 odaklı)
     all_X = pd.concat([X_train, X_test], axis=0)
     all_y = pd.concat([y_train, y_test], axis=0)
     template_model_name, template_model = pick_model()
@@ -554,10 +583,12 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
     )
     (outdir / "forward_selection.json").write_text(json.dumps(forward_info, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # Seçilmiş kolonlarla yeni CSV (evet, bazı sütunlar elenir)
     selected_cols = [c for c in best_bases if c in all_X.columns]
     selected_df = pd.concat([all_X[selected_cols], all_y.rename(target)], axis=1)
     selected_df.to_csv(desired_output_csv, index=False)
 
+    # Metrikler
     metrics = {
         "model": model_name,
         "roc_auc": roc_auc,
@@ -573,6 +604,7 @@ def supervised_feature_selection(df_raw: pd.DataFrame, target: str, outdir: Path
     }
     (outdir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # Pipeline artefaktı
     import joblib
     joblib.dump(clf, outdir / "model_pipeline.joblib")
     print("✅ Özellik seçimi tamamlandı.")
@@ -623,7 +655,5 @@ def main():
         split_date=(args.split_date or None), top_k=int(args.top_k)
     )
 
-
 if __name__ == "__main__":
-    import os
     main()
