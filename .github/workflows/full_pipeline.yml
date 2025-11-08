@@ -1129,7 +1129,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "== risk outputs existence =="
-          for f in "risk_hourly_grid_full_labeled.csv" "risk_daily_grid_full_labeled.csv.csv" "risk_types_top3.csv"; do
+          for f in "risk_hourly_grid_full_labeled.csv" "risk_daily_grid_full_labeled.csv" "risk_types_top3.csv"; do
             p="${CRIME_DATA_DIR}/$f"
             if [ -f "$p" ]; then
               echo "✅ $f found: $p"; head -n 3 "$p" || true
