@@ -703,6 +703,12 @@ jobs:
           pip install xgboost lightgbm || true
 
       - name: 10.8) Feature analysis (XGB + SHAP)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          FEATURE_DATASET: ${{ env.CRIME_DATA_DIR }}/sf_crime_08.csv
+          NUMERIC_ACCEPT: "0.99"
+          NUMERIC_SOFT: "0.85"
+          MAX_CATS: "50"
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -710,23 +716,23 @@ jobs:
           from pathlib import Path
           import numpy as np
           import pandas as pd
-          
+      
           INP = os.environ.get("FEATURE_DATASET")
           OUT = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
           OUT.mkdir(parents=True, exist_ok=True)
-          
+      
           TH_STRICT = float(os.environ.get("NUMERIC_ACCEPT", "0.99"))
           TH_SOFT   = float(os.environ.get("NUMERIC_SOFT",   "0.85"))
           MAX_CATS  = int(os.environ.get("MAX_CATS", "50"))
-          
+      
           df = pd.read_csv(INP, low_memory=False)
           ycol = "Y_label" if "Y_label" in df.columns else ("Y" if "Y" in df.columns else None)
           if ycol is None:
               raise SystemExit("Y_label kolonu yok — feature analysis atlandı.")
-          
+      
           y = pd.to_numeric(df[ycol], errors="coerce").fillna(0).astype(int).clip(0,1)
           X0 = df.drop(columns=[ycol]).copy()
-          
+      
           def to_numeric_loose(s: pd.Series) -> pd.Series:
               if s.dtype == object or str(s.dtype).startswith("string"):
                   ss = s.astype(str).str.strip()
@@ -735,28 +741,28 @@ jobs:
                   sn = pd.to_numeric(ss, errors="coerce")
                   return sn
               return pd.to_numeric(s, errors="coerce")
-          
+      
           def is_multivalue_series(s: pd.Series) -> bool:
               if s.dtype != object and not str(s.dtype).startswith("string"):
                   return False
               ss = s.astype(str)
               return bool(ss.str.contains(r",").any())
-          
+      
           def is_mostly_integer(sn: pd.Series, tol=1e-9, min_ratio=0.98) -> bool:
               sn = sn.dropna()
               if sn.empty: return False
               frac = (np.abs(sn - np.round(sn)) <= tol).mean()
               return frac >= min_ratio
-          
+      
           strict_numeric_cols, soft_numeric_cols, cat_cols_encoded = {}, {}, {}
           decisions = []
-          
+      
           for c in X0.columns:
               s = X0[c]
               sn = to_numeric_loose(s)
               numeric_ratio = sn.notna().mean()
               multivalue = is_multivalue_series(s)
-          
+      
               decision, note = "CAT", ""
               if numeric_ratio >= TH_STRICT and not multivalue:
                   decision = "STRICT_NUM"
@@ -785,7 +791,7 @@ jobs:
                   freq = ss.value_counts(dropna=False)
                   enc = ss.map(freq).astype(float)
                   cat_cols_encoded[c] = enc
-          
+      
               decisions.append({
                   "column": c,
                   "numeric_ratio": float(numeric_ratio),
@@ -793,7 +799,7 @@ jobs:
                   "decision": decision,
                   "note": note
               })
-          
+      
           dec_df = pd.DataFrame(decisions).sort_values(
               ["decision","numeric_ratio","column"], ascending=[True,False,True]
           )
@@ -801,7 +807,7 @@ jobs:
           pd.DataFrame({"dropped_column": [
               d["column"] for d in decisions if d["decision"] == "CAT" and d["note"] == ""
           ]}).to_csv(OUT/"feature_dropped_for_strict_numeric.csv", index=False)
-          
+      
           parts = []
           if strict_numeric_cols: parts.append(pd.DataFrame(strict_numeric_cols))
           if soft_numeric_cols:   parts.append(pd.DataFrame(soft_numeric_cols))
@@ -809,10 +815,10 @@ jobs:
           if not parts:
               raise SystemExit("Hiçbir kolon kullanılamadı; veri tiplerini kontrol edin.")
           X = pd.concat(parts, axis=1)
-          
+      
           # 🔧 ZORLA SAYISAL → SHAP/XGB hatasını engeller
           X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float)
-          
+      
           from xgboost import XGBClassifier
           mdl = XGBClassifier(
               n_estimators=300, max_depth=6, learning_rate=0.06,
@@ -820,14 +826,14 @@ jobs:
               tree_method="hist", n_jobs=-1, random_state=42
           )
           mdl.fit(X, y)
-          
+      
           imp = getattr(mdl, "feature_importances_", None)
           if imp is not None:
               imp_rows = sorted(zip(X.columns.tolist(), np.asarray(imp, dtype=float).tolist()),
                                 key=lambda t: t[1], reverse=True)
               pd.DataFrame(imp_rows, columns=["feature","importance"]).to_csv(OUT/"feature_importance_xgb.csv", index=False)
               pd.DataFrame(imp_rows[:20], columns=["feature","importance"]).to_csv(OUT/"feature_top20_xgb.csv", index=False)
-          
+      
           try:
               import shap
               explainer = shap.TreeExplainer(mdl)
@@ -840,7 +846,7 @@ jobs:
               pd.DataFrame(shap_rows[:20], columns=["feature","mean_abs_shap"]).to_csv(OUT/"shap_top20.csv", index=False)
           except Exception as e:
               print(f"[WARN] SHAP atlandı: {e}")
-          
+      
           print(f"✅ Feature analysis tamamlandı. STRICT={len(strict_numeric_cols)} SOFT={len(soft_numeric_cols)} CAT(enc)={len(cat_cols_encoded)}  → {OUT/'feature_type_decision.csv'}")
           PY
 
