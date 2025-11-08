@@ -593,7 +593,7 @@ def fit_full_models_and_export(
     (out_models / f"threshold_{meta_name}.json").write_text(json.dumps({"threshold": float(thr)}), encoding="utf-8")
     return meta_name, proba_cols, p_stack, thr
 
-# -------------------- Exports -------------------- 
+# -------------------- Exports --------------------
 def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     df = ensure_date_hour_on_df(df)
 
@@ -601,13 +601,11 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     risk = df[cols].copy()
     risk["risk_score"] = proba
 
-    # tarih boşsa bugünü bas (SF)
     if "date" not in risk.columns or pd.to_datetime(risk["date"], errors="coerce").isna().all():
         risk["date"] = datetime.now(SF_TZ).date().isoformat()
 
-    # hour_range'i normalize et ve hour üret
+    # normalize hours
     if "hour_range" in risk.columns:
-        # "00-03" formatını garanti et
         hr = risk["hour_range"].astype(str).str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
         ok = hr.notna().all(axis=1)
         risk.loc[ok, "hour_range"] = (
@@ -616,89 +614,64 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
         )
         risk["hour"] = risk["hour_range"].apply(_hour_from_range)
     else:
-        # hour_range yoksa 'hour' varsa onu kullan, yoksa 0
         if "hour" not in risk.columns:
             risk["hour"] = 0
         risk["hour"] = pd.to_numeric(risk["hour"], errors="coerce").fillna(0).astype(int)
 
-    # GEOID normalize (varsa)
     if "GEOID" in risk.columns:
         risk.rename(columns={"GEOID": "geoid"}, inplace=True)
     risk["geoid"] = risk["geoid"].astype(str)
 
-    # -------------------------------
-    # (A) ŞABLON: eldeki EN SON günün (geoid,hour) riskleri
-    # -------------------------------
+    # latest template (baseline)
     dmax = pd.to_datetime(risk["date"], errors="coerce").max()
     tmpl = risk[pd.to_datetime(risk["date"], errors="coerce") == dmax][["geoid","hour","risk_score"]].copy()
     tmpl = tmpl.drop_duplicates(["geoid","hour"], keep="last")
 
-    # -------------------------------
-    # (B) UFUK GRID: yarından başlayarak HORIZON_DAYS gün × 24 saat
-    # -------------------------------
-    today_sf = datetime.now(SF_TZ).date()
+    today_sf  = datetime.now(SF_TZ).date()
     start_day = today_sf + timedelta(days=1)
-    days = [(start_day + timedelta(days=i)).isoformat() for i in range(max(1, HORIZON_DAYS))]
-    hours = list(range(24))
 
-    # Tüm geoid'ler
+    # 7 günlük hourly
+    days_h = [(start_day + timedelta(days=i)).isoformat() for i in range(7)]
+    hours  = list(range(24))
+
+    # 365 günlük daily
+    days_d = [(start_day + timedelta(days=i)).isoformat() for i in range(365)]
+
+    # all GEOIDs
     geoids = sorted(tmpl["geoid"].unique().tolist())
 
-    # Çok-günlük grid: (date, hour, geoid)
-    grid = pd.MultiIndex.from_product([days, hours, geoids], names=["date","hour","geoid"]).to_frame(index=False)
-
-    # Şablondan saatlik skorları yeni günlere yansıt
-    risk_multi = grid.merge(tmpl, on=["geoid","hour"], how="left")
-
-    # Emniyet: risk_score NaN kalan (ör: bazı hour'lar yoksa) → 0
+    # hourly grid
+    grid_h = pd.MultiIndex.from_product([days_h, hours, geoids], names=["date","hour","geoid"]).to_frame(index=False)
+    risk_multi = grid_h.merge(tmpl, on=["geoid","hour"], how="left")
     risk_multi["risk_score"] = pd.to_numeric(risk_multi["risk_score"], errors="coerce").fillna(0.0)
 
-    # Yaz: risk_hourly.csv (post_patrol.py bunu bekliyor)
-    risk_hourly_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
-    risk_multi.to_csv(risk_hourly_path, index=False)
-  
-    try:
-        risk_multi.to_parquet(os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.parquet"), index=False)
-    except Exception as e:
-        print(f"[WARN] risk_hourly parquet yazılamadı: {e}")
+    # save hourly
+    hourly_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
+    risk_multi.to_csv(hourly_path, index=False)
+    try: risk_multi.to_parquet(hourly_path.replace(".csv",".parquet"), index=False)
+    except: pass
 
-    # Seviyeleri hızlı etiketlemek istiyorsanız (opsiyonel):
-    # q80 = risk_multi["risk_score"].quantile(0.8)
-    # q90 = risk_multi["risk_score"].quantile(0.9)
-    # ... (gerekirse)
+    # DAILY — baseline by geoid max from tmpl
+    tmpl_daily = tmpl.groupby("geoid", as_index=False)["risk_score"].max()
+    grid_d = pd.MultiIndex.from_product([days_d, geoids], names=["date","geoid"]).to_frame(index=False)
+    risk_daily = grid_d.merge(tmpl_daily, on="geoid", how="left")
+    risk_daily["risk_score"] = risk_daily["risk_score"].fillna(0.0)
 
-    # ——— Eski tek-gün devriye özeti (rec_path) ———
-    rec_path = None
-    if "hour_range" in df.columns:  # önceki davranışı koruyalım
-        latest_date = dmax.date() if pd.notna(dmax) else None
-        if latest_date is not None:
-            day = risk[pd.to_datetime(risk["date"], errors="coerce").dt.date == latest_date].copy()
-            rec_rows = []
-            TOP_K = int(os.getenv("PATROL_TOP_K", "50"))
-            for hr in sorted(day["hour_range"].dropna().unique()):
-                slot = day[day["hour_range"] == hr].sort_values("risk_score", ascending=False)
-                for _, r in slot.head(TOP_K).iterrows():
-                    rec_rows.append({
-                        "date": latest_date,
-                        "hour_range": hr,
-                        "geoid": r.get("geoid", ""),
-                        "risk_score": float(r["risk_score"]),
-                    })
-            if rec_rows:
-                recs = pd.DataFrame(rec_rows)
-                rec_path = os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.csv")
-                recs.to_csv(rec_path, index=False)
-                print(f"Patrol recs → {rec_path}")
-                try:
-                    recs.to_parquet(os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.parquet"), index=False)
-                except Exception as e:
-                    print(f"[WARN] patrol_recs parquet yazılamadı: {e}")
-        else:
-            print("ℹ️ Tek-gün patrol özeti atlandı (tarih yok).")
+    # save daily
+    daily_path = os.path.join(CRIME_DIR, f"risk_daily{out_prefix}.csv")
+    risk_daily.to_csv(daily_path, index=False)
+    try: risk_daily.to_parquet(daily_path.replace(".csv",".parquet"), index=False)
+    except: pass
 
-    # Raporla
-    print(f"✅ risk_hourly yazıldı → {risk_hourly_path}  (days={len(days)}, hours=24, geoids={len(geoids)})")
-    return risk_hourly_path, rec_path
+    print("\n--- risk_hourly.head() ---")
+    print(risk_multi.head(5))
+    print("\n--- risk_daily.head() ---")
+    print(risk_daily.head(5))
+
+    print(f"✅ risk_hourly yazıldı → {hourly_path}")
+    print(f"✅ risk_daily  yazıldı → {daily_path}")
+
+    return hourly_path, None
   
 def optional_top_crime_types():
     raw_path = os.path.join(CRIME_DIR, "sf_crime.csv")
