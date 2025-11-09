@@ -1,5 +1,5 @@
 # risk_exports.py
-# Saatlik + günlük risk exportları (Top-3 kategori olasılık ve beklenen sayı ile)
+# Saatlik + günlük risk exportları + opsiyonel Top-3 suç türü tablosu
 import os, math, argparse
 from pathlib import Path
 from datetime import datetime
@@ -49,6 +49,7 @@ def _load_recent_crime(window_days=30):
     raw_path = os.path.join(CRIME_DIR, "sf_crime.csv")
     if not os.path.exists(raw_path): return None
     dfc = pd.read_csv(raw_path, low_memory=False, dtype={"GEOID": str})
+    # tarih sütunu
     if "date" in dfc.columns:
         dfc["date"] = pd.to_datetime(dfc["date"], errors="coerce")
     elif "datetime" in dfc.columns:
@@ -60,6 +61,7 @@ def _load_recent_crime(window_days=30):
     if pd.isna(latest): return None
     start = latest.normalize() - pd.Timedelta(days=window_days-1)
     dfc = dfc[(dfc["date"] >= start) & (dfc["date"] <= latest)].copy()
+    # hour_range
     if "hour_range" not in dfc.columns:
         if "event_hour" in dfc.columns:
             h = pd.to_numeric(dfc["event_hour"], errors="coerce").fillna(0).astype(int)
@@ -69,6 +71,7 @@ def _load_recent_crime(window_days=30):
         dfc["hour_range"] = a.map("{:02d}".format) + "-" + pd.Series(b).map("{:02d}".format)
     else:
         dfc["hour_range"] = dfc["hour_range"].apply(_normalize_hour_range)
+    # kategori yoksa "all"
     if "category" not in dfc.columns:
         dfc["category"] = "all"
     return dfc
@@ -139,7 +142,7 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
         if x >= 0.5*threshold: return "medium"
         return "low"
     risk["risk_level"]  = risk["risk_score"].apply(_level)
-    # Saatlik decile (aynı değerler varsa güvenli)
+
     _r = pd.to_numeric(risk["risk_score"], errors="coerce").fillna(0.0)
     _ranks = _r.rank(method="first", pct=True)
     if _ranks.nunique() < 2:
@@ -187,7 +190,7 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     hourly_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
     risk.to_csv(hourly_path, index=False)
 
-    # Günlük birleşik olasılık için NaN-güvenli hazırlık
+    # Günlük birleşik olasılık
     p = pd.to_numeric(risk["risk_score"], errors="coerce").clip(0, 1).fillna(0.0)
     risk["_one_minus_p"] = 1.0 - p
     
@@ -208,7 +211,6 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
         return "low"
     daily["risk_level_day"]  = daily["risk_score_day"].apply(_level_d)
     
-    # Günlük decile (aynı değerler/az çeşitlilik varsa güvenli)
     _vals  = pd.to_numeric(daily["risk_score_day"], errors="coerce").fillna(0.0)
     _ranks = _vals.rank(method="first", pct=True)
     if _ranks.nunique() < 2:
@@ -216,7 +218,6 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     else:
         daily["risk_decile_day"] = pd.qcut(_ranks, q=10, labels=False, duplicates="drop") + 1
     daily["risk_decile_day"] = pd.to_numeric(daily["risk_decile_day"], errors="coerce").fillna(1).astype(int)
-
 
     # Günlük top-3 (λ toplamına göre)
     def _sum_cat_lambda(grp):
@@ -245,7 +246,6 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     daily.to_csv(daily_path, index=False)
 
     # Aynı güne Top-K devriye
-    rec_path = None
     latest_date = pd.to_datetime(risk["date"], errors="coerce").max()
     if pd.notna(latest_date):
         latest_date = latest_date.date()
@@ -271,6 +271,64 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     print(f"Daily  risk  → {daily_path}")
     return hourly_path, os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.csv")
 
+# ------------ Opsiyonel Top-3 suç türü ------------
+def optional_top_crime_types(window_days: int = 365, out_name: str = "risk_types_top3.csv"):
+    """
+    sf_crime.csv mevcutsa, son `window_days` penceresinde:
+      - GENEL (overall) Top-3 suç türü
+      - 3-saatlik dilimler (hour_range) için Top-3 suç türü
+    tablolarını üretir ve CRIME_DIR/out_name olarak kaydeder.
+    Yoksa None döner.
+    """
+    try:
+        df = _load_recent_crime(window_days=window_days)
+        if df is None or len(df) == 0 or "category" not in df.columns:
+            return None
+
+        # overall
+        over = (df.groupby("category").size()
+                  .rename("count").reset_index()
+                  .sort_values("count", ascending=False)
+                  .head(3))
+        over["rank"] = np.arange(1, len(over)+1)
+        over["scope"] = "overall"
+        over["hour_range"] = ""
+
+        # hour_range bazında
+        df["hour_range"] = df["hour_range"].apply(_normalize_hour_range)
+        by_hr = (df.groupby(["hour_range","category"]).size()
+                   .rename("count").reset_index())
+        # her hour_range için top3
+        rows = []
+        for hr, grp in by_hr.groupby("hour_range"):
+            g = grp.sort_values("count", ascending=False).head(3).copy()
+            g["rank"] = np.arange(1, len(g)+1)
+            g["scope"] = "by_hour_range"
+            g["hour_range"] = hr
+            rows.append(g)
+        hr_top = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["hour_range","category","count","rank","scope"])
+
+        out = pd.concat([over, hr_top], ignore_index=True)
+        # oran bilgisi
+        total_over = float(df.shape[0]) if df.shape[0] > 0 else 1.0
+        out["share_overall"] = out["count"] / total_over
+
+        # meta bilgiler
+        start = df["date"].min().date() if hasattr(df["date"].min(), "date") else pd.to_datetime(df["date"].min(), errors="coerce").date()
+        end   = df["date"].max().date() if hasattr(df["date"].max(), "date") else pd.to_datetime(df["date"].max(), errors="coerce").date()
+        out["period_start"] = str(start)
+        out["period_end"]   = str(end)
+        out["ndays"]        = max(1, (pd.to_datetime(str(end)) - pd.to_datetime(str(start))).days + 1)
+
+        out_path = os.path.join(CRIME_DIR, out_name)
+        out[["scope","hour_range","rank","category","count","share_overall","period_start","period_end","ndays"]].to_csv(out_path, index=False)
+        print(f"Top crime types → {out_path}")
+        return out_path
+    except Exception as e:
+        # Sessiz başarısızlık: pipeline bu fonksiyonu opsiyonel çağırıyor
+        print(f"[WARN] optional_top_crime_types failed: {e}")
+        return None
+
 # ------------ CLI (opsiyonel) ------------
 def _read_proba(proba_path):
     ext = str(proba_path).lower()
@@ -279,7 +337,6 @@ def _read_proba(proba_path):
     dfp = pd.read_csv(proba_path)
     for c in ["proba","prob","p","y_pred_proba"]:
         if c in dfp.columns: return dfp[c].values
-    # tek kolon ise:
     if dfp.shape[1]==1: return dfp.iloc[:,0].values
     raise ValueError("Proba dosyasında uygun kolon bulunamadı.")
 
@@ -289,11 +346,15 @@ def main():
     p.add_argument("--proba", required=True, help="Tahmin olasılıkları (CSV tek kolon veya .npy)")
     p.add_argument("--threshold", type=float, default=0.5)
     p.add_argument("--out-prefix", default="")
+    p.add_argument("--top3-window-days", type=int, default=30, help="Top crime types penceresi (gün)")
     args = p.parse_args()
 
     df = pd.read_csv(args.df, low_memory=False, dtype={"GEOID": str})
     proba = _read_proba(args.proba)
     export_risk_tables(df, y=None, proba=proba, threshold=args.threshold, out_prefix=args.out_prefix)
+
+    # CLI'dan çağrılırsa top-3 hesaplamasını da deneyebilir
+    optional_top_crime_types(window_days=args.top3_window_days, out_name="risk_types_top3.csv")
 
 if __name__ == "__main__":
     main()
