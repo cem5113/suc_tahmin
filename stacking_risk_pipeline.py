@@ -109,6 +109,7 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
         out["date"] = pd.to_datetime(out["datetime"], errors="coerce")
     elif "hr_key" in out.columns:
         s = out["hr_key"].astype(str)
+        dt = pd.to_datetime(s, errors="coerce")
         # En yaygın kalıplar: 'YYYY-MM-DD HH', 'YYYY-MM-DD', 'YYYYMMDDHH', 'YYYYMMDD'
         # Önce doğrudan parse etmeyi dene:
         if dt.notna().mean() <= 0.5:
