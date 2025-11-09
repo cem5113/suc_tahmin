@@ -218,62 +218,47 @@ jobs:
           python -u scripts/prepare_shap_csv.py
 
 
-      - name: FR 11) Risk exports (hourly/daily/patrol + top-3)
+      - name: FR 11) Risk exports (single CSV with top1..top3 columns)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "🔎 Proba/DF adaylarını arıyorum…"
-          # DF adayları (öncelik fr_crime_09)
+          echo "🔎 DF/PROBA kaynaklarını arıyorum…"
           DF_CANDS=(
             "${CRIME_DATA_DIR}/fr_crime_09.csv"
             "${CRIME_DATA_DIR}/fr_crime_08.csv"
             "${CRIME_DATA_DIR}/fr_crime.csv"
           )
-          # Proba adayları (CSV tek kolon ya da .npy)
-          PROBA_CANDS=(
-            "${CRIME_DATA_DIR}/y_pred_proba.csv"
-            "${CRIME_DATA_DIR}/proba.csv"
-            "${CRIME_DATA_DIR}/y_pred_proba.npy"
-            "${CRIME_DATA_DIR}/proba.npy"
+          RISK_CANDS=(
+            "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv"
+            "${ARTIFACT_DIR}/risk_hourly_grid_full_labeled.csv"
+            "${ARTIFACT_DIR}/crime_prediction_data/risk_hourly_grid_full_labeled.csv"
           )
-
-          pick_first() {
-            for p in "$@"; do
-              if [ -f "$p" ]; then echo "$p"; return 0; fi
-            done
-            return 1
-          }
-
+          pick_first() { for p in "$@"; do [ -f "$p" ] && { echo "$p"; return 0; }; done; return 1; }
           DF_PATH="$(pick_first "${DF_CANDS[@]}" || true)"
-          PROBA_PATH="$(pick_first "${PROBA_CANDS[@]}" || true)"
+          RISK_PATH="$(pick_first "${RISK_CANDS[@]}" || true)"
 
-          if [ -z "${DF_PATH:-}" ] || [ -z "${PROBA_PATH:-}" ]; then
-            echo "⚠️ DF veya proba bulunamadı. Risk export adımı atlanıyor."
-            echo "    DF: ${DF_PATH:-yok}, PROBA: ${PROBA_PATH:-yok}"
-            exit 0
+          if [ -z "${DF_PATH:-}" ]; then
+            echo "❌ DF bulunamadı (fr_crime_09.csv bekleniyor)."; exit 1
           fi
 
-          echo "✅ DF: ${DF_PATH}"
-          echo "✅ PROBA: ${PROBA_PATH}"
-
-          # Script konumu (repo kökü veya scripts/)
-          if [ -f risk_exports_fr.py ]; then
-            PY=risk_exports_fr.py
-          elif [ -f scripts/risk_exports_fr.py ]; then
-            PY=scripts/risk_exports_fr.py
-          else
-            echo "❌ risk_exports_fr.py bulunamadı."
-            exit 1
+          # risk_source'ı CRIME_DATA_DIR altına sabitle (join için)
+          if [ -n "${RISK_PATH:-}" ] && [ ! -f "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" ]; then
+            cp -f "${RISK_PATH}" "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" || true
           fi
 
-          python -u "$PY" --df "${DF_PATH}" --proba "${PROBA_PATH}" --threshold 0.5 --out-prefix ""
-          # Güvenlik: Top-3 tabloyu 365 gün penceresiyle de üretmeyi dene
-          python -u "$PY" --df "${DF_PATH}" --proba "${PROBA_PATH}" --threshold 0.5 --out-prefix "" --top3-window-days 365 || true
+          # script yolu
+          if [ -f risk_exports_fr.py ]; then PY=risk_exports_fr.py;
+          elif [ -f scripts/risk_exports_fr.py ]; then PY=scripts/risk_exports_fr.py;
+          else echo "❌ risk_exports_fr.py yok"; exit 1; fi
 
-          ls -l "${CRIME_DATA_DIR}" | sed -n '1,200p'
+          python -u "$PY" --df "${DF_PATH}" --proba-from-risk "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" --threshold 0.5 --out-prefix ""
+
+          echo "---- head(risk_hourly_grid_full_labeled.csv) ----"
+          head -n 3 "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" || true
 
       - name: 11) Install ML deps for stacking
         if: ${{ steps.gate.outputs.proceed == 'true' }}
@@ -304,7 +289,7 @@ jobs:
           python -u stacking_risk_pipeline_fr.py
 
 
-      - name: FR 12) Build 2 ZIPs with EXACT files (no fr_crime_10)
+      - name: FR 12) Build 2 ZIPs with EXACT files (incl. feature-analysis; no fr_crime_10)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
@@ -318,10 +303,9 @@ jobs:
 
           base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data")).resolve()
           extra = Path(os.environ.get("ARTIFACT_DIR","artifact")).resolve()
-          base.mkdir(parents=True, exist_ok=True)
-          extra.mkdir(parents=True, exist_ok=True)
+          base.mkdir(parents=True, exist_ok=True); extra.mkdir(parents=True, exist_ok=True)
 
-          # Paketlere girecek kesin dosyalar
+          # CSV paketine girecekler
           WANT_CSV = [
             "fr_crime_09.csv",
             "risk_hourly.csv",
@@ -329,7 +313,16 @@ jobs:
             "patrol_recs.csv",
             "risk_types_top3.csv",
             "metrics_stacking_ohe.csv",
+            # feature-analysis çıktıları
+            "feature_type_decision.csv",
+            "feature_dropped_for_strict_numeric.csv",
+            "feature_importance_xgb.csv",
+            "feature_top20_xgb.csv",
+            "shap_feature_importance.csv",
+            "shap_top20.csv",
+            "shap_feature_importance_ranked.csv",
           ]
+          # Parquet paketine girecekler
           WANT_PQ  = [
             "fr_crime_09.parquet",
             "risk_hourly.parquet",
@@ -342,11 +335,11 @@ jobs:
             cands = list(base.rglob(name)) + list(extra.rglob(name))
             return cands[0] if cands else None
 
+          # Eğer fr_crime_09 sadece CSV ise parquet üret; tersi de
           def ensure_parquet(csv_path: Path) -> Path|None:
             try:
               df = pd.read_csv(csv_path, low_memory=False)
-              pq = csv_path.with_suffix(".parquet")
-              df.to_parquet(pq, index=False)
+              pq = csv_path.with_suffix(".parquet"); df.to_parquet(pq, index=False)
               print(f"[MAKE] {pq.name} from {csv_path.name}")
               return pq
             except Exception as e:
@@ -356,24 +349,20 @@ jobs:
           def ensure_csv(pq_path: Path) -> Path|None:
             try:
               df = pd.read_parquet(pq_path)
-              csv = pq_path.with_suffix(".csv")
-              df.to_csv(csv, index=False)
+              csv = pq_path.with_suffix(".csv"); df.to_csv(csv, index=False)
               print(f"[MAKE] {csv.name} from {pq_path.name}")
               return csv
             except Exception as e:
               print(f"[WARN] {pq_path.name} → csv üretilemedi: {e}", file=sys.stderr)
               return None
 
-          # fr_crime_09 en az bir formatta zorunlu
           csv_09 = find_one("fr_crime_09.csv")
           pq_09  = find_one("fr_crime_09.parquet")
           if csv_09 is None and pq_09 is None:
             print("❌ fr_crime_09.(csv|parquet) yok; önceki adımları kontrol edin.", file=sys.stderr)
             sys.exit(1)
-          if pq_09 is None and csv_09 is not None:
-            pq_09 = ensure_parquet(csv_09)
-          if csv_09 is None and pq_09 is not None:
-            csv_09 = ensure_csv(pq_09)
+          if pq_09 is None and csv_09 is not None: pq_09 = ensure_parquet(csv_09)
+          if csv_09 is None and pq_09 is not None: csv_09 = ensure_csv(pq_09)
 
           sel_csv, sel_pq = [], []
 
@@ -385,27 +374,11 @@ jobs:
           for n in WANT_CSV: add_if_exists(sel_csv, n)
           for n in WANT_PQ:  add_if_exists(sel_pq,  n)
 
-          # Minimum güvence: fr_crime_09 her iki pakette de bulunsun
+          # Minimum güvence
           if not any(p.name == "fr_crime_09.csv" for p in sel_csv) and csv_09 is not None:
             sel_csv.append(csv_09)
           if not any(p.name == "fr_crime_09.parquet" for p in sel_pq) and pq_09 is not None:
             sel_pq.append(pq_09)
-
-          # Çift yönlü eksikleri tamamla (risk/patrol/metrics)
-          def ensure_pair(csv_name, pq_name):
-            csv_p = find_one(csv_name)
-            pq_p  = find_one(pq_name)
-            if csv_p is not None and pq_p is None:
-              made = ensure_parquet(csv_p)
-              if made is not None: sel_pq.append(made)
-            if pq_p is not None and csv_p is None:
-              made = ensure_csv(pq_p)
-              if made is not None: sel_csv.append(made)
-
-          ensure_pair("risk_hourly.csv",   "risk_hourly.parquet")
-          ensure_pair("risk_daily.csv",    "risk_daily.parquet")
-          ensure_pair("patrol_recs.csv",   "patrol_recs.parquet")
-          ensure_pair("metrics_stacking_ohe.csv", "metrics_stacking_ohe.parquet")
 
           out_csv_zip = base / "fr_csv_outputs.zip"
           out_pq_zip  = base / "fr_parquet_outputs.zip"
@@ -422,15 +395,11 @@ jobs:
             return Path(p.name)
 
           with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            for p in sel_csv:
-              z.write(p, arcname=str(arcname_for(p)))
-              print(f"+ CSV: {p.name}")
+            for p in sel_csv: z.write(p, arcname=str(arcname_for(p))); print(f"+ CSV: {p.name}")
           print(f"✅ CSV ZIP hazır: {out_csv_zip}")
 
           with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            for p in sel_pq:
-              z.write(p, arcname=str(arcname_for(p)))
-              print(f"+ PQ: {p.name}")
+            for p in sel_pq: z.write(p, arcname=str(arcname_for(p))); print(f"+ PQ: {p.name}")
           print(f"✅ Parquet ZIP hazır: {out_pq_zip}")
           PY
 
