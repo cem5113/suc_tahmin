@@ -17,7 +17,7 @@ Aşama 2 (TRAIN_PHASE=final):
 import os, re, json, warnings
 import numpy as np
 import pandas as pd
-from risk_exports import export_risk_tables
+from risk_exports import export_risk_tables, optional_top_crime_types
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from datetime import datetime, timedelta 
@@ -710,6 +710,13 @@ if __name__ == "__main__":
         )
 
         try:
+            types_path = optional_top_crime_types()
+            if types_path:
+                print(f"Top crime types → {types_path}")
+        except Exception as e:
+            print(f"[WARN] optional_top_crime_types failed: {e}")
+
+        try:
             base_metrics["group"] = "base"
             meta_metrics["group"] = "stacking"
             m_all = pd.concat([base_metrics, meta_metrics], ignore_index=True)
@@ -738,5 +745,6 @@ if __name__ == "__main__":
     if all_metrics_concat:
         big = pd.concat(all_metrics_concat, ignore_index=True)
         big.to_csv(os.path.join(CRIME_DIR, "metrics_all_multi.csv"), index=False)
-        print("🧾 metrics_all_multi.csv yazıldı")
-
+        # Eski tek-dosya adıyla da bir kopya üret (uyumluluk için)
+        big.to_csv(os.path.join(CRIME_DIR, "metrics_all.csv"), index=False)
+        print("🧾 metrics_all_multi.csv ve metrics_all.csv yazıldı")
