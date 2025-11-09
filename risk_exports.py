@@ -160,7 +160,8 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     tops = {f"top{i}_{k}": [] for i in [1,2,3] for k in ["category","prob","expected"]}
 
     for _, row in risk.iterrows():
-        g = row.get("GEOID",""); hr = row.get("hour_range","00-03"); p_pred = float(row["risk_score"])
+        g = row.get("GEOID",""); hr = row.get("hour_range","00-03")
+        p_pred = float(np.clip(row["risk_score"], 0.001, 0.999))
         lam_base = lam_map.get((g,hr), lam_city.get(hr, 0.0))
         p_base   = p_map.get((g,hr), p_city.get(hr, 0.0))
         shares   = shares_map.get((g,hr), shares_city.get(hr, {}))
@@ -168,7 +169,7 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
             lam_base = lam_city.get(hr, 0.0); p_base = p_city.get(hr, 0.0)
 
         adj  = (p_pred / max(p_base, EPS)) if p_base > 0 else (p_pred / max(p_city.get(hr, EPS), EPS))
-        adj  = _clip(adj, 0.2, 5.0)
+        adj  = _clip(adj, 0.2, 3.0)   
         lamh = max(0.0, lam_base * adj)
         exp_vals.append(lamh)
 
@@ -186,7 +187,8 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
 
     risk["expected_count"] = exp_vals
     for k, v in tops.items(): risk[k] = v
-
+    
+    risk["date"] = pd.to_datetime(risk.get("date"), errors="coerce").dt.date.astype("string")
     hourly_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
     risk.to_csv(hourly_path, index=False)
 
@@ -371,6 +373,15 @@ def main():
     df = pd.read_csv(args.df, low_memory=False, dtype={"GEOID": str})
     proba = _read_proba(args.proba)
     export_risk_tables(df, y=None, proba=proba, threshold=args.threshold, out_prefix=args.out_prefix)
+
+    risk = df[cols].copy()
+    risk["risk_score"] = np.asarray(proba).astype(float)
+    risk["hour_range"] = risk["hour_range"].apply(_normalize_hour_range)
+    risk["risk_score"] = np.clip(risk["risk_score"], 0.001, 0.999)
+
+    risk["date"] = pd.to_datetime(risk.get("date"), errors="coerce").dt.date
+    risk = risk[~pd.isna(risk["date"])].copy()      # NaT olan satırları at
+    risk["date"] = risk["date"].astype("string")
 
     # CLI'dan çağrılırsa top-3 hesaplamasını da deneyebilir
     optional_top_crime_types(window_days=args.top3_window_days, out_name="risk_types_top3.csv")
