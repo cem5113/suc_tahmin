@@ -139,7 +139,14 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
         if x >= 0.5*threshold: return "medium"
         return "low"
     risk["risk_level"]  = risk["risk_score"].apply(_level)
-    risk["risk_decile"] = pd.qcut(risk["risk_score"].rank(method="first"), 10, labels=False) + 1
+    # Saatlik decile (aynı değerler varsa güvenli)
+    _r = pd.to_numeric(risk["risk_score"], errors="coerce").fillna(0.0)
+    _ranks = _r.rank(method="first", pct=True)
+    if _ranks.nunique() < 2:
+        risk["risk_decile"] = 1
+    else:
+        risk["risk_decile"] = pd.qcut(_ranks, q=10, labels=False, duplicates="drop") + 1
+    risk["risk_decile"] = pd.to_numeric(risk["risk_decile"], errors="coerce").fillna(1).astype(int)
 
     WINDOW_DAYS = int(os.getenv("TOP3_WINDOW_DAYS", "30"))
     lam_map, p_map, shares_map, city_fb, _ = _compute_baselines(window_days=WINDOW_DAYS)
@@ -180,18 +187,36 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     hourly_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
     risk.to_csv(hourly_path, index=False)
 
-    risk["_one_minus_p"] = 1.0 - risk["risk_score"].astype(float)
-    daily = (risk.groupby(["GEOID","date"], as_index=False)
-                 .agg(risk_score_day=(" _one_minus_p".strip(), lambda s: 1.0 - float(np.prod(s.values))),
-                      expected_count_day=("expected_count","sum")))
-    q80d = daily["risk_score_day"].quantile(0.8); q90d = daily["risk_score_day"].quantile(0.9)
+    # Günlük birleşik olasılık için NaN-güvenli hazırlık
+    p = pd.to_numeric(risk["risk_score"], errors="coerce").clip(0, 1).fillna(0.0)
+    risk["_one_minus_p"] = 1.0 - p
+    
+    daily = (
+        risk.groupby(["GEOID","date"], as_index=False)
+            .agg(
+                risk_score_day=("_one_minus_p", lambda s: 1.0 - float(np.prod(s.fillna(1.0).values))),
+                expected_count_day=("expected_count","sum")
+            )
+    )
+    
+    q80d = daily["risk_score_day"].quantile(0.8)
+    q90d = daily["risk_score_day"].quantile(0.9)
     def _level_d(x):
         if x >= max(threshold, q90d): return "critical"
         if x >= max(threshold*0.8, q80d): return "high"
         if x >= 0.5*threshold: return "medium"
         return "low"
     daily["risk_level_day"]  = daily["risk_score_day"].apply(_level_d)
-    daily["risk_decile_day"] = pd.qcut(daily["risk_score_day"].rank(method="first"), 10, labels=False) + 1
+    
+    # Günlük decile (aynı değerler/az çeşitlilik varsa güvenli)
+    _vals  = pd.to_numeric(daily["risk_score_day"], errors="coerce").fillna(0.0)
+    _ranks = _vals.rank(method="first", pct=True)
+    if _ranks.nunique() < 2:
+        daily["risk_decile_day"] = 1
+    else:
+        daily["risk_decile_day"] = pd.qcut(_ranks, q=10, labels=False, duplicates="drop") + 1
+    daily["risk_decile_day"] = pd.to_numeric(daily["risk_decile_day"], errors="coerce").fillna(1).astype(int)
+
 
     # Günlük top-3 (λ toplamına göre)
     def _sum_cat_lambda(grp):
