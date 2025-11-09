@@ -111,7 +111,6 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
         s = out["hr_key"].astype(str)
         # En yaygın kalıplar: 'YYYY-MM-DD HH', 'YYYY-MM-DD', 'YYYYMMDDHH', 'YYYYMMDD'
         # Önce doğrudan parse etmeyi dene:
-        dt = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
         if dt.notna().mean() <= 0.5:
             # Temizle → sadece rakamlar
             z = s.str.replace(r"[^0-9]", "", regex=True)
