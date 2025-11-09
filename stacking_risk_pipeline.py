@@ -17,6 +17,7 @@ Aşama 2 (TRAIN_PHASE=final):
 import os, re, json, warnings
 import numpy as np
 import pandas as pd
+from risk_exports import export_risk_tables, optional_top_crime_types
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from datetime import datetime, timedelta 
@@ -604,112 +605,6 @@ def fit_full_models_and_export(
     thr = optimal_threshold(y, p_stack)
     (out_models / f"threshold_{meta_name}.json").write_text(json.dumps({"threshold": float(thr)}), encoding="utf-8")
     return meta_name, proba_cols, p_stack, thr
-
-# -------------------- Exports --------------------
-def export_risk_tables(df, y, proba, threshold, out_prefix=""):
-    df = ensure_date_hour_on_df(df)
-
-    cols = [c for c in ["GEOID", "date", "hour_range"] if c in df.columns]
-    risk = df[cols].copy()
-    risk["risk_score"] = proba
-
-    if "date" not in risk.columns or pd.to_datetime(risk["date"], errors="coerce").isna().all():
-        risk["date"] = datetime.now(SF_TZ).date().isoformat()
-
-    # normalize hours
-    if "hour_range" in risk.columns:
-        hr = risk["hour_range"].astype(str).str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
-        ok = hr.notna().all(axis=1)
-        risk.loc[ok, "hour_range"] = (
-            hr[0].astype(float).astype(int).map("{:02d}".format) + "-" +
-            hr[1].astype(float).astype(int).map("{:02d}".format)
-        )
-        risk["hour"] = risk["hour_range"].apply(_hour_from_range)
-    else:
-        if "hour" not in risk.columns:
-            risk["hour"] = 0
-        risk["hour"] = pd.to_numeric(risk["hour"], errors="coerce").fillna(0).astype(int)
-
-    if "GEOID" in risk.columns:
-        risk.rename(columns={"GEOID": "geoid"}, inplace=True)
-    risk["geoid"] = risk["geoid"].astype(str)
-
-    # latest template (baseline)
-    dmax = pd.to_datetime(risk["date"], errors="coerce").max()
-    tmpl = risk[pd.to_datetime(risk["date"], errors="coerce") == dmax][["geoid","hour","risk_score"]].copy()
-    tmpl = tmpl.drop_duplicates(["geoid","hour"], keep="last")
-
-    today_sf  = datetime.now(SF_TZ).date()
-    start_day = today_sf + timedelta(days=1)
-
-    # 7 günlük hourly
-    days_h = [(start_day + timedelta(days=i)).isoformat() for i in range(7)]
-    hours  = list(range(24))
-
-    # 365 günlük daily
-    days_d = [(start_day + timedelta(days=i)).isoformat() for i in range(365)]
-
-    # all GEOIDs
-    geoids = sorted(tmpl["geoid"].unique().tolist())
-
-    # hourly grid
-    grid_h = pd.MultiIndex.from_product([days_h, hours, geoids], names=["date","hour","geoid"]).to_frame(index=False)
-    risk_multi = grid_h.merge(tmpl, on=["geoid","hour"], how="left")
-    risk_multi["risk_score"] = pd.to_numeric(risk_multi["risk_score"], errors="coerce").fillna(0.0)
-
-    # save hourly
-    hourly_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
-    risk_multi.to_csv(hourly_path, index=False)
-    try: risk_multi.to_parquet(hourly_path.replace(".csv",".parquet"), index=False)
-    except: pass
-
-    # DAILY — baseline by geoid max from tmpl
-    tmpl_daily = tmpl.groupby("geoid", as_index=False)["risk_score"].max()
-    grid_d = pd.MultiIndex.from_product([days_d, geoids], names=["date","geoid"]).to_frame(index=False)
-    risk_daily = grid_d.merge(tmpl_daily, on="geoid", how="left")
-    risk_daily["risk_score"] = risk_daily["risk_score"].fillna(0.0)
-
-    # save daily
-    daily_path = os.path.join(CRIME_DIR, f"risk_daily{out_prefix}.csv")
-    risk_daily.to_csv(daily_path, index=False)
-    try: risk_daily.to_parquet(daily_path.replace(".csv",".parquet"), index=False)
-    except: pass
-
-    print("\n--- risk_hourly.head() ---")
-    print(risk_multi.head(5))
-    print("\n--- risk_daily.head() ---")
-    print(risk_daily.head(5))
-
-    print(f"✅ risk_hourly yazıldı → {hourly_path}")
-    print(f"✅ risk_daily  yazıldı → {daily_path}")
-
-    return hourly_path, None
-  
-def optional_top_crime_types():
-    raw_path = os.path.join(CRIME_DIR, "sf_crime.csv")
-    if not os.path.exists(raw_path): return None
-    dfc = pd.read_csv(raw_path, low_memory=False, dtype={"GEOID": str})
-    if "category" not in dfc.columns: return None
-    if "date" in dfc.columns:
-        dfc["date"] = pd.to_datetime(dfc["date"], errors="coerce")
-    elif "datetime" in dfc.columns:
-        dfc["date"] = pd.to_datetime(dfc["datetime"], errors="coerce")
-    else:
-        return None
-    dfc = dfc.dropna(subset=["date"])
-    latest = dfc["date"].max(); start = latest - pd.Timedelta(days=30)
-    df30 = dfc[(dfc["date"] >= start) & (dfc["date"] <= latest)].copy()
-    if "hour_range" not in df30.columns:
-        if "event_hour" in df30.columns:
-            hr = (pd.to_numeric(df30["event_hour"], errors="coerce").fillna(0).astype(int) // 3) * 3
-            df30["hour_range"] = hr.apply(lambda x: f"{int(x):02d}-{int((x+3)%24):02d}")
-        else:
-            df30["hour_range"] = "00-03"
-    grp = (df30.groupby(["GEOID", "hour_range", "category"]).size()
-                .reset_index(name="n")).sort_values(["GEOID","hour_range","n"], ascending=[True, True, False])
-    top3 = grp.groupby(["GEOID","hour_range"], as_index=False).head(3)
-    out = top3.groupby(["GEOID", "hour_range"])["category"].apply(list).reset_index(name="top3_categories")
-    path = os.path.join(CRIME_DIR, "risk_types_top3.csv"); out.to_csv(path, index=False); return path
 
 # -------------------- Main --------------------
 if __name__ == "__main__":
