@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Stacking-based crime risk pipeline (FR, uses fr_crime_08.csv)
+Stacking-based crime risk pipeline (FR; 1. koddaki mimari ile hizalı)
 
 Aşama 1 (TRAIN_PHASE=select):
-  - Son 12 ay alt-küme (SUBSET_STRATEGY=last12m, SUBSET_MIN_POS güvenliği)
+  - Son 12 ay alt-küme (SUBSET_STRATEGY=last12m, SUBSET_MIN_POS ile güvenlik)
   - TimeSeriesSplit(n_splits=3)
 Aşama 2 (TRAIN_PHASE=final):
   - Tüm veri
   - TimeSeriesSplit(n_splits=5)
 
-Girdi:  crime_prediction_data/fr_crime_08.csv  (ENV: STACKING_DATASET ile override)
-Çıktı:  crime_prediction_data/sf_crime_09.csv yerine fr_crime_09.csv ve tüm metrik/çıktılar
+Girdi:  crime_prediction_data/fr_crime_08.csv  (ENV ile override edilir)
+Çıktı:  fr_crime_09.csv ve suffix’li metrik/çıktılar + manifest
 """
 
 import os, re, json, warnings
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from joblib import dump, Memory
 
 from sklearn.base import clone, BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
@@ -33,7 +34,6 @@ from sklearn.model_selection import StratifiedKFold, TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, HistGradientBoostingClassifier
-from joblib import dump, Memory
 
 # -------------------- ENV / Global --------------------
 
@@ -49,10 +49,25 @@ TRAIN_PHASE = os.getenv("TRAIN_PHASE", "select").strip().lower()  # select | fin
 CV_JOBS     = int(os.getenv("CV_JOBS", "4"))
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+def phase_is_select() -> bool:
+    return TRAIN_PHASE == "select"
+
+def _suffix_from_dataset(path: str) -> str:
+    """'.../fr_crime_Q1.csv' → '_Q1' ; '.../fr_crime_08.csv' → '_08' ; fallback ''"""
+    try:
+        name = Path(path).stem
+    except Exception:
+        return ""
+    for tag in ["Q1Q2Q3Q4", "Q1Q2Q3", "Q1Q2", "Q1", "08", "09", "grid_full_labeled"]:
+        if tag.lower() in name.lower():
+            return f"_{tag}"
+    parts = name.split("_")
+    return f"_{parts[-1]}" if len(parts) >= 2 else ""
+
 # --- Spatial-TE kontrolü ---
-NEIGHBOR_FILE     = os.getenv("NEIGHBOR_FILE", "").strip()        # 'GEOID,neighbor' iki sütunlu csv (opsiyonel)
-TE_ALPHA          = float(os.getenv("TE_ALPHA", "50"))            # Laplace smoothing gücü
-GEO_COL_NAME      = os.getenv("GEO_COL_NAME", "GEOID")            # GEOID kolon adı
+NEIGHBOR_FILE     = os.getenv("NEIGHBOR_FILE", "").strip()        # 'GEOID,neighbor' (opsiyonel)
+TE_ALPHA          = float(os.getenv("TE_ALPHA", "50"))            # Laplace smoothing
+GEO_COL_NAME      = os.getenv("GEO_COL_NAME", "GEOID")
 
 _env_has_te       = os.getenv("ENABLE_SPATIAL_TE")
 ENABLE_SPATIAL_TE = _env_flag("ENABLE_SPATIAL_TE", default=False)
@@ -64,14 +79,11 @@ ABLASYON_BASIS     = os.getenv("ABLASYON_BASIS", "ohe").strip().lower()
 if ABLASYON_BASIS not in {"ohe", "te"}:
     ABLASYON_BASIS = "ohe"
 
-def phase_is_select() -> bool:
-    return TRAIN_PHASE == "select"
-
 # -------------------- Helpers: date/hour --------------------
 def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    # date
+    # date normalize
     if "date" in out.columns:
         out["date"] = pd.to_datetime(out["date"], errors="coerce")
     elif "datetime" in out.columns:
@@ -79,7 +91,7 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["date"] = pd.NaT
 
-    # hour_range
+    # hour_range normalize
     def hr_from_event_hour(s):
         h = pd.to_numeric(s, errors="coerce").fillna(0).astype(int) % 24
         start = (h // 3) * 3
@@ -102,6 +114,97 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
         out["hour_range"] = np.nan
 
     return out
+
+def subset_last12m(df: pd.DataFrame, min_pos: int = 10_000) -> pd.DataFrame:
+    if "date" not in df.columns:
+        return df
+    dmax = pd.to_datetime(df["date"], errors="coerce").max()
+    if pd.isna(dmax):
+        return df
+    sub = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=365))]
+    if sub["Y_label"].sum() < min_pos:
+        for months in (18, 24):
+            sub2 = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=30*months))]
+            if sub2["Y_label"].sum() >= min_pos:
+                sub = sub2; break
+    return sub
+
+# -------------------- File helpers --------------------
+def _normalize_geoid(s: pd.Series, target_len: int) -> pd.Series:
+    s = s.astype(str).str.extract(r"(\d+)")[0]
+    return s.str[-target_len:].str.zfill(target_len)
+
+def _ensure_date_and_hour_legacy(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "GEOID" in out.columns:
+        out["GEOID"] = _normalize_geoid(out["GEOID"], GEOID_LEN)
+    out = ensure_date_hour_on_df(out)
+    # yumuşak impute
+    count_cols = [c for c in out.columns if any(k in c.lower() for k in ["_count", "911_", "311_"])]
+    for c in count_cols:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+    num_cols = [c for c in out.columns if out[c].dtype.kind in "fc" and c not in count_cols and c != "Y_label"]
+    for c in num_cols:
+        med = pd.to_numeric(out[c], errors="coerce").median()
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(med)
+    cat_cols = [c for c in out.columns if out[c].dtype == "object"]
+    for c in cat_cols:
+        mode = out[c].mode(dropna=True)
+        out[c] = out[c].fillna(mode.iloc[0] if not mode.empty else "")
+    return out
+
+def _make_fr_crime_09_inline():
+    src = os.path.join(CRIME_DIR, "fr_crime_08.csv")
+    dst = os.path.join(CRIME_DIR, "fr_crime_09.csv")
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"{src} bulunamadı (fr_crime_08.csv yok).")
+    df = pd.read_csv(src, low_memory=False, dtype={"GEOID": str})
+    df = _ensure_date_and_hour_legacy(df)
+    wanted_last = ["date", "hour_range", "GEOID"]
+    cols = [c for c in df.columns if c not in wanted_last] + [c for c in wanted_last if c in df.columns]
+    df = df[cols]
+    Path(CRIME_DIR).mkdir(parents=True, exist_ok=True)
+    df.to_csv(dst, index=False)
+    print(f"✅ fr_crime_09 hazır → {dst}")
+    return dst
+
+def ensure_fr_crime_09() -> str:
+    p09 = os.path.join(CRIME_DIR, "fr_crime_09.csv")
+    if os.path.exists(p09):
+        return p09
+    return _make_fr_crime_09_inline()
+
+# -------------------- Feature prep --------------------
+def build_feature_lists(df: pd.DataFrame):
+    drop_cols = {"Y_label", "id", "datetime", "time"}
+    count_like = [c for c in df.columns if any(k in c.lower() for k in ["_count", "911_", "311_"])]
+    num_cands  = [c for c in df.columns if df[c].dtype.kind in "fc" and c not in count_like and c not in drop_cols]
+    cat_cands  = [c for c in df.columns if df[c].dtype == "object" and c not in drop_cols]
+    return count_like, num_cands, cat_cands
+
+def find_leaky_numeric_features(df, feature_cols, y, corr_thr=0.995, auc_thr=0.995):
+    X = df[feature_cols].copy()
+    leaky, details = set(), {}
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    if not num_cols:
+        return [], {}
+    cmat = pd.concat([X[num_cols], y.rename("Y")], axis=1).corr(numeric_only=True)["Y"].drop(labels=["Y"], errors="ignore")
+    for c, v in cmat.abs().items():
+        if pd.notna(v) and v >= corr_thr:
+            leaky.add(c); details[c] = {"reason": "leak_corr", "corr": float(v), "auc": None}
+    for c in num_cols:
+        s = pd.to_numeric(X[c], errors="coerce")
+        idx = s.notna()
+        if idx.sum() < 30:
+            continue
+        try:
+            auc = roc_auc_score(y[idx], s[idx])
+            if auc >= auc_thr or auc <= (1 - auc_thr):
+                d = details.get(c, {"reason": "leak_auc", "corr": None, "auc": None})
+                d["reason"] = "leak_auc"; d["auc"] = float(auc); details[c] = d; leaky.add(c)
+        except Exception:
+            pass
+    return sorted(leaky), details
 
 def _load_neighbors(path: str):
     if not path or not os.path.exists(path):
@@ -169,97 +272,6 @@ class SpatialTargetEncoder(BaseEstimator, TransformerMixin):
         s_geo = self._geo_series(X)
         te = s_geo.map(self.mapping_).fillna(self.global_mean_ if self.global_mean_ is not None else 0.5)
         return te.to_numpy().reshape(-1, 1)
-
-def subset_last12m(df: pd.DataFrame, min_pos: int = 10_000) -> pd.DataFrame:
-    if "date" not in df.columns:
-        return df
-    dmax = pd.to_datetime(df["date"], errors="coerce").max()
-    if pd.isna(dmax):
-        return df
-    sub = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=365))]
-    if sub["Y_label"].sum() < min_pos:
-        for months in (18, 24):
-            sub2 = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=30*months))]
-            if sub2["Y_label"].sum() >= min_pos:
-                sub = sub2; break
-    return sub
-
-# -------------------- File helpers --------------------
-def _normalize_geoid(s: pd.Series, target_len: int) -> pd.Series:
-    s = s.astype(str).str.extract(r"(\d+)")[0]
-    return s.str[-target_len:].str.zfill(target_len)
-
-def _ensure_date_and_hour_legacy(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    if "GEOID" in out.columns:
-        out["GEOID"] = _normalize_geoid(out["GEOID"], GEOID_LEN)
-    out = ensure_date_hour_on_df(out)
-    # impute numerics & cats
-    count_cols = [c for c in out.columns if any(k in c.lower() for k in ["_count", "911_", "311_"])]
-    for c in count_cols:
-        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
-    num_cols = [c for c in out.columns if out[c].dtype.kind in "fc" and c not in count_cols and c != "Y_label"]
-    for c in num_cols:
-        med = pd.to_numeric(out[c], errors="coerce").median()
-        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(med)
-    cat_cols = [c for c in out.columns if out[c].dtype == "object"]
-    for c in cat_cols:
-        mode = out[c].mode(dropna=True)
-        out[c] = out[c].fillna(mode.iloc[0] if not mode.empty else "")
-    return out
-
-def _make_fr_crime_09_inline():
-    src = os.path.join(CRIME_DIR, "fr_crime_08.csv")
-    dst = os.path.join(CRIME_DIR, "fr_crime_09.csv")
-    if not os.path.exists(src):
-        raise FileNotFoundError(f"{src} bulunamadı (fr_crime_08.csv yok).")
-    df = pd.read_csv(src, low_memory=False, dtype={"GEOID": str})
-    df = _ensure_date_and_hour_legacy(df)
-    wanted_last = ["date", "hour_range", "GEOID"]
-    cols = [c for c in df.columns if c not in wanted_last] + [c for c in wanted_last if c in df.columns]
-    df = df[cols]
-    Path(CRIME_DIR).mkdir(parents=True, exist_ok=True)
-    df.to_csv(dst, index=False)
-    print(f"✅ fr_crime_09 hazır → {dst}")
-    return dst
-
-def ensure_fr_crime_09() -> str:
-    p09 = os.path.join(CRIME_DIR, "fr_crime_09.csv")
-    if os.path.exists(p09):
-        return p09
-    return _make_fr_crime_09_inline()
-
-# -------------------- Feature prep --------------------
-def build_feature_lists(df: pd.DataFrame):
-    drop_cols = {"Y_label", "id", "datetime", "time"}
-    count_like = [c for c in df.columns if any(k in c.lower() for k in ["_count", "911_", "311_"])]
-    num_cands  = [c for c in df.columns if df[c].dtype.kind in "fc" and c not in count_like and c not in drop_cols]
-    cat_cands  = [c for c in df.columns if df[c].dtype == "object" and c not in drop_cols]
-    return count_like, num_cands, cat_cands
-
-def find_leaky_numeric_features(df, feature_cols, y, corr_thr=0.995, auc_thr=0.995):
-    X = df[feature_cols].copy()
-    leaky, details = set(), {}
-    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-    if not num_cols:
-        return [], {}
-    cmat = pd.concat([X[num_cols], y.rename("Y")], axis=1).corr(numeric_only=True)["Y"].drop(labels=["Y"], errors="ignore")
-    for c, v in cmat.abs().items():
-        if pd.notna(v) and v >= corr_thr:
-            leaky.add(c); details[c] = {"reason": "leak_corr", "corr": float(v), "auc": None}
-    for c in num_cols:
-        s = pd.to_numeric(X[c], errors="coerce")
-        idx = s.notna()
-        if idx.sum() < 30:
-            continue
-        try:
-            auc = roc_auc_score(y[idx], s[idx])
-            if auc >= auc_thr or auc <= (1 - auc_thr):
-                d = details.get(c, {"reason": "leak_auc", "corr": None, "auc": None})
-                d["reason"] = "leak_auc"; d["auc"] = float(auc); details[c] = d; leaky.add(c)
-        except Exception:
-            pass
-    return sorted(leaky), details
 
 def build_preprocessor(count_features, num_features, cat_features) -> ColumnTransformer:
     cat_features = list(cat_features)
@@ -421,7 +433,7 @@ def evaluate_meta_on_oof(Z: np.ndarray, y: pd.Series):
             n_estimators=300 if phase_is_select() else 400, num_leaves=31, learning_rate=0.05,
             subsample=0.9, colsample_bytree=0.9, min_data_in_leaf=50,
             force_col_wise=True, verbosity=-1, random_state=42
-        )))
+        ))))
     except Exception:
         pass
 
@@ -469,7 +481,7 @@ def fit_full_models_and_export(pipes: dict, preprocessor: ColumnTransformer, X: 
 
     meta.fit(Z_full, y)
 
-    out_models = Path(CRIME_DIR) / "models"
+    out_models = Path(CRIME_DIR) / "models_fr"
     out_models.mkdir(parents=True, exist_ok=True)
     dump(preprocessor, out_models / "preprocessor.joblib")
     dump(full_pipes,   out_models / "base_pipes.joblib")
@@ -480,7 +492,7 @@ def fit_full_models_and_export(pipes: dict, preprocessor: ColumnTransformer, X: 
     (out_models / f"threshold_{meta_name}.json").write_text(json.dumps({"threshold": float(thr)}), encoding="utf-8")
     return meta_name, proba_cols, p_stack, thr
 
-# -------------------- Exports --------------------
+# -------------------- Exports (geçici, risk_exports_fr.py’ye taşıyacağız) --------------------
 def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     df = ensure_date_hour_on_df(df)
     cols = [c for c in ["GEOID", "date", "hour_range"] if c in df.columns]
@@ -510,13 +522,14 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
         elif x >= max(threshold * 0.8, q80): return "high"
         elif x >= 0.5 * threshold: return "medium"
         else: return "low"
-    risk["risk_level"] = risk["risk_score"].apply(level)
+    risk["risk_level"]  = risk["risk_score"].apply(level)
     risk["risk_decile"] = pd.qcut(risk["risk_score"].rank(method="first"), 10, labels=False) + 1
 
     risk_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
     risk.to_csv(risk_path, index=False)
-    rec_path = None
 
+    # Günlük öneri (en güncel güne göre TOP_K × saat)
+    rec_path = None
     if "date" in risk.columns and "hour_range" in risk.columns:
         latest_date = pd.to_datetime(risk["date"], errors="coerce").max()
         if pd.notna(latest_date):
@@ -545,8 +558,8 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
 
     return risk_path, rec_path
 
-def optional_top_crime_types():
-    raw_path = os.path.join(CRIME_DIR, "sf_crime.csv")  # varsa aylık top3 için
+def optional_top_crime_types_fr():
+    raw_path = os.path.join(CRIME_DIR, "fr_crime.csv")  # FR ham varsa
     if not os.path.exists(raw_path): return None
     dfc = pd.read_csv(raw_path, low_memory=False, dtype={"GEOID": str})
     if "category" not in dfc.columns: return None
@@ -569,142 +582,149 @@ def optional_top_crime_types():
               .reset_index(name="n")).sort_values(["GEOID","hour_range","n"], ascending=[True, True, False])
     top3 = grp.groupby(["GEOID","hour_range"], as_index=False).head(3)
     out = top3.groupby(["GEOID", "hour_range"])["category"].apply(list).reset_index(name="top3_categories")
-    path = os.path.join(CRIME_DIR, "risk_types_top3.csv"); out.to_csv(path, index=False); return path
+    path = os.path.join(CRIME_DIR, "risk_types_top3_fr.csv"); out.to_csv(path, index=False); return path
 
 # -------------------- Main --------------------
 if __name__ == "__main__":
-    dataset_env = os.getenv("STACKING_DATASET", "")
-    if dataset_env and os.path.exists(dataset_env):
-        data_path = dataset_env
+    # 1) Dataset listesi — 1. koddaki ile aynı mantık
+    ds_env = os.getenv("STACKING_DATASETS", "").strip()
+    if ds_env:
+        cand_paths = [p.strip() for p in ds_env.split(",") if p.strip()]
+        datasets = []
+        for p in cand_paths:
+            p_abs = p if os.path.isabs(p) else os.path.join(CRIME_DIR, p)
+            datasets.append(p_abs if os.path.exists(p_abs) else p)
     else:
-        data_path = ensure_fr_crime_09()
+        dataset_env = os.getenv("STACKING_DATASET", "").strip()
+        if dataset_env:
+            datasets = [dataset_env if os.path.isabs(dataset_env) else os.path.join(CRIME_DIR, dataset_env)]
+        else:
+            datasets = [ensure_fr_crime_09()]
 
-    print(f"📄 Using dataset: {data_path} | TRAIN_PHASE={TRAIN_PHASE} | CV_JOBS={CV_JOBS}")
-    df = pd.read_csv(data_path, low_memory=False, dtype={"GEOID": str})
-    if "Y_label" not in df.columns:
-        raise ValueError("Y_label kolonu bulunamadı.")
+    summary_rows = []
+    all_metrics_concat = []
 
-    df["GEOID"] = _normalize_geoid(df["GEOID"], GEOID_LEN)
-    df = ensure_date_hour_on_df(df)
+    for data_path in datasets:
+        if not os.path.exists(data_path):
+            alt = os.path.join(CRIME_DIR, Path(data_path).name)
+            if os.path.exists(alt):
+                data_path = alt
+            else:
+                print(f"⚠️ dataset bulunamadı: {data_path} (atlandı)")
+                continue
 
-    if phase_is_select():
-        before = df.shape
-        min_pos = int(os.getenv("SUBSET_MIN_POS", "10000"))
-        strategy = os.getenv("SUBSET_STRATEGY", "last12m").lower()
-        if strategy == "last12m":
-            df = subset_last12m(df, min_pos=min_pos)
-        after = df.shape
-        print(f"🔧 Subset ({strategy}): {before} → {after} (pos={int(df['Y_label'].sum())})")
+        print(f"📄 Using dataset (FR): {data_path} | TRAIN_PHASE={TRAIN_PHASE} | CV_JOBS={CV_JOBS}")
+        out_suffix = _suffix_from_dataset(data_path)
 
-    counts, nums, cats = build_feature_lists(df)
-    all_feats = list(dict.fromkeys(counts + nums + cats))
+        # ---- yükle & hazırla
+        df = pd.read_csv(data_path, low_memory=False, dtype={"GEOID": str})
+        if "Y_label" not in df.columns:
+            raise ValueError(f"{data_path} içinde Y_label kolonu yok.")
+        df = ensure_date_hour_on_df(df)
+        if "GEOID" in df.columns:
+            df["GEOID"] = df["GEOID"].astype(str).str.extract(r"(\d+)")[0].str[-GEOID_LEN:].str.zfill(GEOID_LEN)
 
-    sus, info = find_leaky_numeric_features(df, all_feats, df["Y_label"].astype(int))
-    if sus:
-        print("⚠️ Olası sızıntı üreten numeric kolonlar DROP ediliyor:")
-        for c in sus:
-            meta = info.get(c, {})
-            corr = f"(corr≈{meta.get('corr'):.4f})" if meta.get("corr") is not None else ""
-            aucv = f"(auc≈{meta.get('auc'):.4f})" if meta.get("auc")  is not None else ""
-            print(f"  - {c} → reason={meta.get('reason')} {corr} {aucv}")
-        counts = [c for c in counts if c not in sus]
-        nums   = [c for c in nums   if c not in sus]
-        all_feats = list(dict.fromkeys(counts + nums + cats))
+        if phase_is_select():
+            before = df.shape
+            min_pos = int(os.getenv("SUBSET_MIN_POS", "10000"))
+            strategy = os.getenv("SUBSET_STRATEGY", "last12m").lower()
+            if strategy == "last12m":
+                df = subset_last12m(df, min_pos=min_pos)
+            after = df.shape
+            print(f"🔧 Subset ({strategy}): {before} → {after} (pos={int(df['Y_label'].sum())})")
 
-    pre = build_preprocessor(counts, nums, cats)
+        counts, nums, cats = build_feature_lists(df)
 
-    try:
-        pre2 = clone(pre); pre2.fit(df[all_feats], df["Y_label"].astype(int))
+        # bool görünümleri güvenli sayıya döndür (1. koddakiyle hizalı)
+        for col in [c for c in df.columns if c.startswith("is_")] + [
+            "is_weekend","is_night","is_school_hour","is_business_hour",
+            "is_near_police","is_near_government"
+        ]:
+            if col in df.columns:
+                if df[col].dtype == object:
+                    m = df[col].astype(str).str.lower().map({
+                        "true":1,"yes":1,"y":1,"false":0,"no":0,"n":0,"1":1,"0":0
+                    })
+                    df[col] = pd.to_numeric(m.fillna(df[col]), errors="coerce")
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
+        # sızıntı kontrolü
+        sus, info = find_leaky_numeric_features(df, list(dict.fromkeys(counts+nums+cats)), df["Y_label"].astype(int))
+        if sus:
+            counts = [c for c in counts if c not in sus]
+            nums   = [c for c in nums   if c not in sus]
+
+        pre = build_preprocessor(counts, nums, cats)
+        feature_cols = list(dict.fromkeys(counts + nums + cats))
+        X = df[feature_cols].copy()
+        num_like = [c for c in feature_cols if (c in counts) or (c in nums)]
+        if num_like:
+            X[num_like] = X[num_like].apply(pd.to_numeric, errors="coerce").astype(np.float32)
+        y = df["Y_label"].astype(int)
+
+        MEM = Memory(location=os.path.join(CRIME_DIR, ".skcache_fr"), verbose=0)
+        base_list = base_estimators(class_weight_balanced=True)
+        base_pipes = {name: Pipeline([("prep", pre), ("clf", est)], memory=MEM) for name, est in base_list}
+        cv, _ = make_cv(df)
+
+        print("\n🔎 Evaluating base + OOF (with progress)…")
+        base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(base_pipes, X, y, cv, cv_jobs=CV_JOBS)
+        Path(CRIME_DIR).mkdir(parents=True, exist_ok=True)
+        base_metrics.to_csv(os.path.join(CRIME_DIR, f"metrics_base{out_suffix}.csv"), index=False)
+        np.savez_compressed(os.path.join(CRIME_DIR, f"oof_base_probs{out_suffix}.npz"), **oof_map)
+
+        print("\n🤝 Evaluating stacking meta on OOF…")
+        meta_metrics = evaluate_meta_on_oof(Z, y)
+        meta_metrics.to_csv(os.path.join(CRIME_DIR, f"metrics_stacking{out_suffix}.csv"), index=False)
+
+        best_row = meta_metrics.sort_values("pr_auc", ascending=False).iloc[0]
+        chosen_meta = "lgb" if ("LightGBM" in best_row["model"]) else "logreg"
+        meta_name, proba_cols, p_stack, thr = fit_full_models_and_export(base_pipes, pre, X, y, choose_meta=chosen_meta)
+        print(f"Saved FR models for {out_suffix}. Threshold ({meta_name}) = {thr:.4f}")
+
+        # ---- RISK/RECS export (şimdilik inline; az sonra risk_exports_fr.py’ye taşıyacağız)
+        risk_hourly_path, patrol_path = export_risk_tables(
+            df=df, y=y, proba=p_stack, threshold=thr, out_prefix=out_suffix
+        )
+
         try:
-            pre_names = pre2.get_feature_names_out()
-        except Exception:
-            pre_names = np.array([f"f{i}" for i in range(pre2.transform(df[all_feats][:1]).shape[1])])
-        Xt = pre2.transform(df[all_feats])
-        vt = VarianceThreshold(0.0).fit(Xt)
-        kept_after_vt = pre_names[vt.get_support()]
+            types_path = optional_top_crime_types_fr()
+            if types_path:
+                print(f"Top crime types (FR) → {types_path}")
+        except Exception as e:
+            print(f"[WARN] optional_top_crime_types_fr failed: {e}")
+
+        # metrikleri birleştir
         try:
-            l1 = SelectFromModel(LogisticRegression(penalty="l1", solver="saga", C=0.2, max_iter=4000), max_features=300)
-            Xt_vt = vt.transform(Xt); l1.fit(Xt_vt, df["Y_label"].astype(int))
-        except Exception:
-            pass
-    except Exception:
-        pass
+            base_metrics["group"] = "base"
+            meta_metrics["group"] = "stacking"
+            m_all = pd.concat([base_metrics, meta_metrics], ignore_index=True)
+            m_all.to_csv(os.path.join(CRIME_DIR, f"metrics_all{out_suffix}.csv"), index=False)
+            all_metrics_concat.append(m_all.assign(dataset_suffix=out_suffix))
+        except Exception as e:
+            print(f"[WARN] metrics merge failed for {out_suffix}: {e}")
 
-    feature_cols = list(dict.fromkeys(counts + nums + cats))
-    X = df[feature_cols].copy()
-    num_like = [c for c in feature_cols if (c in counts) or (c in nums)]
-    if num_like:
-        X[num_like] = X[num_like].apply(pd.to_numeric, errors="coerce").astype(np.float32)
-    y = df["Y_label"].astype(int)
+        # manifest
+        summary_rows.append({
+            "dataset_path": data_path,
+            "suffix": out_suffix,
+            "risk_hourly_csv": risk_hourly_path,
+            "risk_daily_csv": os.path.join(CRIME_DIR, f"risk_daily{out_suffix}.csv"),  # ileride doldurulacak
+            "patrol_recs_csv": patrol_path,
+            "metrics_base_csv": os.path.join(CRIME_DIR, f"metrics_base{out_suffix}.csv"),
+            "metrics_stacking_csv": os.path.join(CRIME_DIR, f"metrics_stacking{out_suffix}.csv"),
+            "metrics_all_csv": os.path.join(CRIME_DIR, f"metrics_all{out_suffix}.csv")
+        })
 
-    MEM = Memory(location=os.path.join(CRIME_DIR, ".skcache"), verbose=0)
-    base_list = base_estimators(class_weight_balanced=True)
-    base_pipes = {name: Pipeline([("prep", pre), ("clf", est)], memory=MEM) for name, est in base_list}
-    print(f"🧠 Pipeline cache: {MEM.location}")
+    # 2) Global özet/manifest
+    if summary_rows:
+        manifest = pd.DataFrame(summary_rows)
+        manifest.to_csv(os.path.join(CRIME_DIR, "stacking_manifest_fr.csv"), index=False)
+        print("🗂️ stacking_manifest_fr.csv yazıldı")
 
-    cv, _ = make_cv(df)
-
-    print("\n🔎 Evaluating base + OOF (with progress)…")
-    base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(base_pipes, X, y, cv, cv_jobs=CV_JOBS)
-    Path(CRIME_DIR).mkdir(parents=True, exist_ok=True)
-    base_metrics.to_csv(os.path.join(CRIME_DIR, "metrics_base.csv"), index=False)
-    np.savez_compressed(os.path.join(CRIME_DIR, "oof_base_probs.npz"), **oof_map)
-    print(base_metrics)
-
-    print("\n🤝 Evaluating stacking meta on OOF…")
-    meta_metrics = evaluate_meta_on_oof(Z, y)
-    meta_metrics.to_csv(os.path.join(CRIME_DIR, "metrics_stacking.csv"), index=False)
-    print(meta_metrics)
-
-    if ENABLE_TE_ABLATION:
-        basis = ABLASYON_BASIS
-        use_spatial_in_alt = (basis == "te")
-        print(f"\n🧪 Ablation: ikinci varyant = {basis.upper()} (use_spatial_te={use_spatial_in_alt})")
-        pre_alt = build_preprocessor_forced(counts, nums, cats, use_spatial_te=use_spatial_in_alt)
-        base_list_alt = base_estimators(class_weight_balanced=True)
-        base_pipes_alt = {name: Pipeline([("prep", pre_alt), ("clf", est)], memory=MEM) for name, est in base_list_alt}
-        print("\n🔎 [Ablation] Evaluating base + OOF (with progress)…")
-        base_metrics_alt, Z_alt, base_names_alt, oof_map_alt = cv_oof_and_metrics(base_pipes_alt, X, y, cv, cv_jobs=CV_JOBS)
-        suf = f"_{basis}"
-        base_metrics_alt.to_csv(os.path.join(CRIME_DIR, f"metrics_base{suf}.csv"), index=False)
-        np.savez_compressed(os.path.join(CRIME_DIR, f"oof_base_probs{suf}.npz"), **oof_map_alt)
-        print(base_metrics_alt)
-        print("\n🤝 [Ablation] Evaluating stacking meta on OOF…")
-        meta_metrics_alt = evaluate_meta_on_oof(Z_alt, y)
-        meta_metrics_alt.to_csv(os.path.join(CRIME_DIR, f"metrics_stacking{suf}.csv"), index=False)
-        print(meta_metrics_alt)
-        best_main = meta_metrics.sort_values("pr_auc", ascending=False).iloc[0]
-        best_alt  = meta_metrics_alt.sort_values("pr_auc", ascending=False).iloc[0]
-        ablation_df = pd.DataFrame([
-            {"variant": "current(TE_on)" if ENABLE_SPATIAL_TE else "current(OHE)",
-             "best_model": best_main["model"], "pr_auc": best_main["pr_auc"],
-             "roc_auc": best_main["roc_auc"], "brier": best_main["brier"]},
-            {"variant": f"ablation({basis})",
-             "best_model": best_alt["model"], "pr_auc": best_alt["pr_auc"],
-             "roc_auc": best_alt["roc_auc"], "brier": best_alt["brier"]},
-        ])
-        ablation_df.to_csv(os.path.join(CRIME_DIR, "ablation_spatial_te.csv"), index=False)
-        print("🧾 Ablation summary → ablation_spatial_te.csv")
-
-    best_row = meta_metrics.sort_values("pr_auc", ascending=False).iloc[0]
-    chosen_meta = "lgb" if ("LightGBM" in best_row["model"]) else "logreg"
-    print(f"\n✅ Chosen meta: {chosen_meta} (by PR-AUC)")
-
-    meta_name, proba_cols, p_stack, thr = fit_full_models_and_export(base_pipes, pre, X, y, choose_meta=chosen_meta)
-    print(f"Saved models. Threshold ({meta_name}) = {thr:.4f}")
-
-    risk_path, rec_path = export_risk_tables(df, y, p_stack, thr)
-    print(f"Risk table → {risk_path}")
-    if rec_path:
-        print(f"Patrol recs → {rec_path}")
-
-    types_path = optional_top_crime_types()
-    if types_path: print(f"Top crime types → {types_path}")
-
-    try:
-        base_metrics["group"] = "base"; meta_metrics["group"] = "stacking"
-        allm = pd.concat([base_metrics, meta_metrics], ignore_index=True)
-        allm.to_csv(os.path.join(CRIME_DIR, "metrics_all.csv"), index=False)
-        print("All metrics → metrics_all.csv")
-    except Exception as e:
-        print(f"[WARN] metrics merge failed: {e}")
+    if all_metrics_concat:
+        big = pd.concat(all_metrics_concat, ignore_index=True)
+        big.to_csv(os.path.join(CRIME_DIR, "metrics_all_multi_fr.csv"), index=False)
+        # uyumluluk adına tek isimle de dök
+        big.to_csv(os.path.join(CRIME_DIR, "metrics_all_fr.csv"), index=False)
+        print("🧾 metrics_all_multi_fr.csv ve metrics_all_fr.csv yazıldı")
