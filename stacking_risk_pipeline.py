@@ -724,7 +724,9 @@ if __name__ == "__main__":
         summary_rows.append({
             "dataset_path": data_path,
             "suffix": out_suffix,
-            "risk_hourly_csv": risk_path,
+            "risk_hourly_csv": risk_hourly_path,  # <-- düzeltildi
+            "risk_daily_csv": os.path.join(CRIME_DIR, f"risk_daily{out_suffix}.csv"),
+            "patrol_recs_csv": patrol_path,
             "metrics_base_csv": os.path.join(CRIME_DIR, f"metrics_base{out_suffix}.csv"),
             "metrics_stacking_csv": os.path.join(CRIME_DIR, f"metrics_stacking{out_suffix}.csv"),
             "metrics_all_csv": os.path.join(CRIME_DIR, f"metrics_all{out_suffix}.csv")
