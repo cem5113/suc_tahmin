@@ -806,7 +806,13 @@ if __name__ == "__main__":
         meta_name, proba_cols, p_stack, thr = fit_full_models_and_export(base_pipes, pre, X, y, choose_meta=chosen_meta)
         print(f"Saved models for {out_suffix}. Threshold ({meta_name}) = {thr:.4f}")
 
-        risk_path, _ = export_risk_tables(df, y, p_stack, thr, out_prefix=out_suffix)
+        risk_hourly_path, patrol_path = export_risk_tables(
+            df=df,
+            y=y,
+            proba=p_stack,
+            threshold=thr,
+            out_prefix=out_suffix
+        )
         types_path = optional_top_crime_types()
         if types_path:
             print(f"Top crime types → {types_path}")
