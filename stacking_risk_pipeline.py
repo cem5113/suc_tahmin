@@ -17,7 +17,7 @@ Aşama 2 (TRAIN_PHASE=final):
 import os, re, json, warnings
 import numpy as np
 import pandas as pd
-from risk_exports import export_risk_tables, optional_top_crime_types
+from risk_exports import export_risk_tables
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from datetime import datetime, timedelta 
@@ -708,9 +708,6 @@ if __name__ == "__main__":
             threshold=thr,
             out_prefix=out_suffix
         )
-        types_path = optional_top_crime_types()
-        if types_path:
-            print(f"Top crime types → {types_path}")
 
         try:
             base_metrics["group"] = "base"
