@@ -243,8 +243,22 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
             out[f"top{j+1}_expected_day"] = lamj
             out[f"top{j+1}_prob_day"]     = pj
         return pd.Series(out)
+
+    tmp = _sumlam.copy()
+    tmp["rank"] = tmp.groupby(["GEOID","date"])["lam"].rank(method="first", ascending=False)
+    tmp = tmp[tmp["rank"] <= 3].copy()
+    tmp["rank"] = tmp["rank"].astype(int)
+    tmp["prob"] = 1.0 - np.exp(-tmp["lam"])
     
-    daily_extra = _sumlam.groupby(["GEOID","date"]).apply(_expand_top3).reset_index()
+    cat_w  = tmp.pivot_table(index=["GEOID","date"], columns="rank", values="cat",  aggfunc="first")
+    lam_w  = tmp.pivot_table(index=["GEOID","date"], columns="rank", values="lam",  aggfunc="first")
+    prob_w = tmp.pivot_table(index=["GEOID","date"], columns="rank", values="prob", aggfunc="first")
+    
+    cat_w  = cat_w.rename(columns={1:"top1_category_day", 2:"top2_category_day", 3:"top3_category_day"})
+    lam_w  = lam_w.rename(columns={1:"top1_expected_day", 2:"top2_expected_day", 3:"top3_expected_day"})
+    prob_w = prob_w.rename(columns={1:"top1_prob_day",     2:"top2_prob_day",     3:"top3_prob_day"})
+    
+    daily_extra = pd.concat([cat_w, lam_w, prob_w], axis=1).reset_index()
     daily = daily.merge(daily_extra, on=["GEOID","date"], how="left")
 
     daily_path = os.path.join(CRIME_DIR, f"risk_daily{out_prefix}.csv")
