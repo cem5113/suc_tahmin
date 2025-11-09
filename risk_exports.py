@@ -247,12 +247,6 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     daily_extra = _sumlam.groupby(["GEOID","date"]).apply(_expand_top3).reset_index()
     daily = daily.merge(daily_extra, on=["GEOID","date"], how="left")
 
-
-daily_extra = (risk.groupby(["GEOID","date"]).apply(_sum_cat_lambda)).reset_index()
-daily = daily.merge(daily_extra, on=["GEOID","date"], how="left")
-    daily_extra = (risk.groupby(["GEOID","date"]).apply(_sum_cat_lambda)).reset_index()
-    daily = daily.merge(daily_extra, on=["GEOID","date"], how="left")
-
     daily_path = os.path.join(CRIME_DIR, f"risk_daily{out_prefix}.csv")
     daily.to_csv(daily_path, index=False)
 
