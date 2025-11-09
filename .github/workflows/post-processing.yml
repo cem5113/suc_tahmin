@@ -185,6 +185,39 @@ jobs:
           python -u "$PY" || true
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
 
+      - name: 10.8) Feature analysis (XGB + SHAP)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          set -euo pipefail
+          python -u run_feature_analysis_fr.py
+
+      - name: 10.9) Prepare SHAP CSV for quartiles (discover & normalize)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p scripts "${CRIME_DATA_DIR}"
+          # Basit bir örnek script oluştur (yoksa)
+          if [ ! -f scripts/prepare_shap_csv.py ]; then
+            cat > scripts/prepare_shap_csv.py <<'PY'
+            import os, pandas as pd
+            from pathlib import Path
+            BASE = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data")).resolve()
+            p = BASE/"shap_feature_importance.csv"
+            if not p.exists():
+                print("[WARN] shap_feature_importance.csv yok, adım atlandı.")
+                raise SystemExit(0)
+            df = pd.read_csv(p)
+            df = df.rename(columns={"mean_abs_shap":"shap"})
+            df["rank"] = df["shap"].rank(ascending=False, method="dense").astype(int)
+            df.to_csv(BASE/"shap_feature_importance_ranked.csv", index=False)
+            print("✅ shap_feature_importance_ranked.csv hazır.")
+            PY
+          fi
+          python -u scripts/prepare_shap_csv.py
+
+
       - name: FR 11) Risk exports (hourly/daily/patrol + top-3)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -241,6 +274,35 @@ jobs:
           python -u "$PY" --df "${DF_PATH}" --proba "${PROBA_PATH}" --threshold 0.5 --out-prefix "" --top3-window-days 365 || true
 
           ls -l "${CRIME_DATA_DIR}" | sed -n '1,200p'
+
+      - name: 11) Install ML deps for stacking
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        run: |
+          python -m pip install -U pip wheel setuptools
+          pip install pandas numpy scikit-learn joblib
+          pip install xgboost lightgbm || true
+
+      - name: 11.5) Run stacking risk pipeline
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
+          ENABLE_SPATIAL_TE: "1"
+          TE_ALPHA: "50"
+          NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+          ENABLE_TE_ABLATION: "1"
+          ABLASYON_BASIS: "ohe"
+          PATROL_HORIZON_DAYS: ${{ env.PATROL_HORIZON_DAYS }}
+          PATROL_TOP_K: ${{ env.PATROL_TOP_K }}
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -e
+          echo "HORIZON=${PATROL_HORIZON_DAYS}, TOP_K=${PATROL_TOP_K}"
+          if [ ! -f "${STACKING_DATASET}" ]; then
+            echo "❌ STACKING_DATASET bulunamadı: ${STACKING_DATASET}"
+            exit 2
+          fi
+          python -u stacking_risk_pipeline_fr.py
+
 
       - name: FR 12) Build 2 ZIPs with EXACT files (no fr_crime_10)
         env:
