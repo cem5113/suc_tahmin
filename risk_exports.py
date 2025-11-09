@@ -220,25 +220,36 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     daily["risk_decile_day"] = pd.to_numeric(daily["risk_decile_day"], errors="coerce").fillna(1).astype(int)
 
     # Günlük top-3 (λ toplamına göre)
-    def _sum_cat_lambda(grp):
-        tmp = pd.concat([
-            grp[["top1_category","top1_expected"]].rename(columns={"top1_category":"cat","top1_expected":"lam"}),
-            grp[["top2_category","top2_expected"]].rename(columns={"top2_category":"cat","top2_expected":"lam"}),
-            grp[["top3_category","top3_expected"]].rename(columns={"top3_category":"cat","top3_expected":"lam"}),
-        ], ignore_index=True)
-        tmp = tmp[tmp["cat"].astype(str)!=""].groupby("cat")["lam"].sum().reset_index()
-        tmp = tmp.sort_values("lam", ascending=False).head(3)
+    _stack = pd.concat([
+        risk[["GEOID","date","top1_category","top1_expected"]].rename(columns={"top1_category":"cat","top1_expected":"lam"}),
+        risk[["GEOID","date","top2_category","top2_expected"]].rename(columns={"top2_category":"cat","top2_expected":"lam"}),
+        risk[["GEOID","date","top3_category","top3_expected"]].rename(columns={"top3_category":"cat","top3_expected":"lam"}),
+    ], ignore_index=True)
+    
+    _stack = _stack[_stack["cat"].astype(str) != ""]
+    _sumlam = _stack.groupby(["GEOID","date","cat"], as_index=False)["lam"].sum()
+    
+    def _expand_top3(grp):
+        g = grp.sort_values("lam", ascending=False).head(3).reset_index(drop=True)
         out = {}
         for j in range(3):
-            if j < len(tmp):
-                catj = str(tmp.iloc[j]["cat"]); lamj = float(tmp.iloc[j]["lam"]); pj = 1.0 - math.exp(-lamj)
+            if j < len(g):
+                lamj = float(g.loc[j, "lam"])
+                catj = str(g.loc[j, "cat"])
+                pj   = 1.0 - math.exp(-lamj)
             else:
-                catj, lamj, pj = "", 0.0, 0.0
+                lamj, catj, pj = 0.0, "", 0.0
             out[f"top{j+1}_category_day"] = catj
             out[f"top{j+1}_expected_day"] = lamj
             out[f"top{j+1}_prob_day"]     = pj
         return pd.Series(out)
+    
+    daily_extra = _sumlam.groupby(["GEOID","date"]).apply(_expand_top3).reset_index()
+    daily = daily.merge(daily_extra, on=["GEOID","date"], how="left")
 
+
+daily_extra = (risk.groupby(["GEOID","date"]).apply(_sum_cat_lambda)).reset_index()
+daily = daily.merge(daily_extra, on=["GEOID","date"], how="left")
     daily_extra = (risk.groupby(["GEOID","date"]).apply(_sum_cat_lambda)).reset_index()
     daily = daily.merge(daily_extra, on=["GEOID","date"], how="left")
 
