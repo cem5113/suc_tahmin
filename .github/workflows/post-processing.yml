@@ -259,7 +259,7 @@ jobs:
           base.mkdir(parents=True, exist_ok=True)
           extra.mkdir(parents=True, exist_ok=True)
 
-          # Paketlere girmesi istenenler
+          # Paketlere girecek kesin dosyalar
           WANT_CSV = [
             "fr_crime_09.csv",
             "risk_hourly.csv",
@@ -277,11 +277,9 @@ jobs:
           ]
 
           def find_one(name: str):
-            # Önce CRIME_DATA_DIR, sonra artifact dizini
             cands = list(base.rglob(name)) + list(extra.rglob(name))
             return cands[0] if cands else None
 
-          # CSV↔Parquet dönüştürme yardımcıları
           def ensure_parquet(csv_path: Path) -> Path|None:
             try:
               df = pd.read_csv(csv_path, low_memory=False)
@@ -304,7 +302,7 @@ jobs:
               print(f"[WARN] {pq_path.name} → csv üretilemedi: {e}", file=sys.stderr)
               return None
 
-          # fr_crime_09 en az bir formatta garanti olsun
+          # fr_crime_09 en az bir formatta zorunlu
           csv_09 = find_one("fr_crime_09.csv")
           pq_09  = find_one("fr_crime_09.parquet")
           if csv_09 is None and pq_09 is None:
@@ -325,13 +323,13 @@ jobs:
           for n in WANT_CSV: add_if_exists(sel_csv, n)
           for n in WANT_PQ:  add_if_exists(sel_pq,  n)
 
-          # Minimum güvence: fr_crime_09 her iki listede de bulunsun
+          # Minimum güvence: fr_crime_09 her iki pakette de bulunsun
           if not any(p.name == "fr_crime_09.csv" for p in sel_csv) and csv_09 is not None:
             sel_csv.append(csv_09)
           if not any(p.name == "fr_crime_09.parquet" for p in sel_pq) and pq_09 is not None:
             sel_pq.append(pq_09)
 
-          # Eğer risk CSV var ama parquet yoksa dönüştür (ve tersi)
+          # Çift yönlü eksikleri tamamla (risk/patrol/metrics)
           def ensure_pair(csv_name, pq_name):
             csv_p = find_one(csv_name)
             pq_p  = find_one(pq_name)
@@ -361,21 +359,19 @@ jobs:
               pass
             return Path(p.name)
 
-          # CSV ZIP
           with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
             for p in sel_csv:
               z.write(p, arcname=str(arcname_for(p)))
               print(f"+ CSV: {p.name}")
           print(f"✅ CSV ZIP hazır: {out_csv_zip}")
 
-          # PARQUET ZIP
           with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
             for p in sel_pq:
               z.write(p, arcname=str(arcname_for(p)))
               print(f"+ PQ: {p.name}")
           print(f"✅ Parquet ZIP hazır: {out_pq_zip}")
           PY
-          
+
       - name: Upload FR outputs (CSV ZIP)
         uses: actions/upload-artifact@v4
         with:
@@ -383,7 +379,7 @@ jobs:
           path: ${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip
           if-no-files-found: error
           retention-days: 14
-          overwrite: true     # ← EKLENDİ
+          overwrite: true
 
       - name: Upload FR outputs (Parquet ZIP)
         uses: actions/upload-artifact@v4
@@ -392,5 +388,4 @@ jobs:
           path: ${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip
           if-no-files-found: error
           retention-days: 14
-          overwrite: true     # ← EKLENDİ
-
+          overwrite: true
