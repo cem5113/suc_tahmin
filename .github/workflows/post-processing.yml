@@ -110,7 +110,7 @@ jobs:
           if [ -f update_crime_fr.py ]; then PY=update_crime_fr.py; elif [ -f scripts/update_crime_fr.py ]; then PY=scripts/update_crime_fr.py; else echo "⚠️ update_crime_fr.py yok, adım atlanıyor"; exit 0; fi
           python -u "$PY"
           echo "HEAD sf_crime_grid_full_labeled.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/sf_crime_grid_full_labeled.csv" || true
+          head -n 5 "./sf_crime_grid_full_labeled.csv" || true
           echo "HEAD fr_crime.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime.csv" || true
 
