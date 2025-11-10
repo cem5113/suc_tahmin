@@ -19,22 +19,16 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     env:
-      # --- Mutlak veri dizini (CWD'den bağımsız güvenli okuma/yazma) ---
       CRIME_DATA_DIR: ${{ github.workspace }}/crime_prediction_data
       WX_LOCATION: "paris"
       WX_UNIT: "metric"
       GEOID_LEN: "11"
-
-      # --- Upstream artifact indirme & optional zip çıkarma ayarları ---
       ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
       ARTIFACT_DIR: artifact
-
-      # --- FR çıktı dizini (scriptler buraya yazar) ---
       FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
-
-      # --- Ek arama kökleri (fallback); virgülle ayrılmış ---
       FALLBACK_DIRS: ${{ github.workspace }},${{ github.workspace }}/crime_prediction_data
-
+      FR_LABEL_PATH: ${{ github.workspace }}/crime_prediction_data/sf_crime_grid_full_labeled.csv
+  
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -113,11 +107,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -u update_crime_fr.py
+          if [ -f update_crime_fr.py ]; then PY=update_crime_fr.py; elif [ -f scripts/update_crime_fr.py ]; then PY=scripts/update_crime_fr.py; else echo "⚠️ update_crime_fr.py yok, adım atlanıyor"; exit 0; fi
+          python -u "$PY"
           echo "HEAD sf_crime_grid_full_labeled.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/sf_crime_grid_full_labeled.csv" || true
           echo "HEAD fr_crime.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime.csv" || true
+
 
       - name: FR 01) 911
         env:
@@ -129,7 +125,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -u update_911_fr.py || true
+          if [ -f update_911_fr.py ]; then PY=update_911_fr.py; elif [ -f scripts/update_911_fr.py ]; then PY=scripts/update_911_fr.py; else echo "⚠️ update_911_fr.py yok, adım atlanıyor"; exit 0; fi
+          python -u "$PY" || true
           echo "HEAD fr_crime_01.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_01.csv" || true
 
@@ -143,9 +140,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -u update_311_fr.py || true
+          if [ -f update_311_fr.py ]; then PY=update_311_fr.py; elif [ -f scripts/update_311_fr.py ]; then PY=scripts/update_311_fr.py; else echo "⚠️ update_311_fr.py yok, adım atlanıyor"; exit 0; fi
+          python -u "$PY" || true
           echo "HEAD fr_crime_02.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_02.csv" || true
+
 
       - name: FR 03) Population
         env:
@@ -157,7 +156,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -u update_population_fr.py || true
+          if [ -f update_population_fr.py ]; then PY=update_population_fr.py; elif [ -f scripts/update_population_fr.py ]; then PY=scripts/update_population_fr.py; else echo "⚠️ update_population_fr.py yok, adım atlanıyor"; exit 0; fi
+          python -u "$PY" || true
           echo "HEAD fr_crime_03.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_03.csv" || true
 
@@ -171,7 +171,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -u update_bus_fr.py || true
+          if [ -f update_bus_fr.py ]; then PY=update_bus_fr.py; elif [ -f scripts/update_bus_fr.py ]; then PY=scripts/update_bus_fr.py; else echo "⚠️ update_bus_fr.py yok, adım atlanıyor"; exit 0; fi
+          python -u "$PY" || true
           echo "HEAD fr_crime_04.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_04.csv" || true
 
@@ -185,7 +186,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -u update_train_fr.py || true
+          if [ -f update_train_fr.py ]; then PY=update_train_fr.py; elif [ -f scripts/update_train_fr.py ]; then PY=scripts/update_train_fr.py; else echo "⚠️ update_train_fr.py yok, adım atlanıyor"; exit 0; fi
+          python -u "$PY" || true
           echo "HEAD fr_crime_05.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_05.csv" || true
 
@@ -199,7 +201,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -u update_poi_fr.py || true
+          if [ -f update_poi_fr.py ]; then PY=update_poi_fr.py; elif [ -f scripts/update_poi_fr.py ]; then PY=scripts/update_poi_fr.py; else echo "⚠️ update_poi_fr.py yok, adım atlanıyor"; exit 0; fi
+          python -u "$PY" || true
           echo "HEAD fr_crime_06.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_06.csv" || true
 
@@ -213,7 +216,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -u update_police_gov_fr.py || true
+          if [ -f update_police_gov_fr.py ]; then PY=update_police_gov_fr.py; elif [ -f scripts/update_police_gov_fr.py ]; then PY=scripts/update_police_gov_fr.py; else echo "⚠️ update_police_gov_fr.py yok, adım atlanıyor"; exit 0; fi
+          python -u "$PY" || true
           echo "HEAD fr_crime_07.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_07.csv" || true
 
@@ -227,7 +231,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -u update_weather_fr.py || true
+          if [ -f update_weather_fr.py ]; then PY=update_weather_fr.py; elif [ -f scripts/update_weather_fr.py ]; then PY=scripts/update_weather_fr.py; else echo "⚠️ update_weather_fr.py yok, adım atlanıyor"; exit 0; fi
+          python -u "$PY" || true
           echo "HEAD fr_crime_08.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_08.csv" || true
 
@@ -278,14 +283,16 @@ jobs:
           CANDIDATES_CSV = [
             "fr_crime_09.csv",
             "risk_hourly_grid_full_labeled.csv",
-            "risk_hourly.csv",  # eski adlandırma varsa
+            "risk_hourly.csv",
             "metrics_stacking_ohe.csv",
+            "metrics_all.csv",
           ]
           CANDIDATES_PQ  = [
             "fr_crime_09.parquet",
             "risk_hourly_grid_full_labeled.parquet",
-            "risk_hourly.parquet",  # eski adlandırma varsa
+            "risk_hourly.parquet",
             "metrics_stacking_ohe.parquet",
+            "metrics_all.parquet",
           ]
 
           def find_all(name: str):
@@ -342,6 +349,8 @@ jobs:
             rh_csv, rh_pq = ensure_pair("risk_hourly.csv", "risk_hourly.parquet")
 
           mx_csv, mx_pq = ensure_pair("metrics_stacking_ohe.csv", "metrics_stacking_ohe.parquet")
+          if mx_csv is None and mx_pq is None:
+              mx_csv, mx_pq = ensure_pair("metrics_all.csv", "metrics_all.parquet")
 
           # Seçilecek dosyaları topla (fr_crime_10 asla eklenmez)
           sel_csv = [p for p in [fr09_csv, rh_csv, mx_csv] if p is not None]
