@@ -185,111 +185,9 @@ jobs:
           python -u "$PY" || true
           head -n 5 "${CRIME_DATA_DIR}/fr_crime_09.csv" || true
 
-      - name: 10.8) Feature analysis (XGB + SHAP)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          set -euo pipefail
-          python -u run_feature_analysis_fr.py
+      # --- DİKKAT: FR 10 kaldırıldı; fr_crime_10 üretilmez/dahil edilmez ---
 
-      - name: 10.9) Prepare SHAP CSV for quartiles (discover & normalize)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-        run: |
-          set -euo pipefail
-          mkdir -p scripts "${CRIME_DATA_DIR}"
-          # Basit bir örnek script oluştur (yoksa)
-          if [ ! -f scripts/prepare_shap_csv.py ]; then
-            cat > scripts/prepare_shap_csv.py <<'PY'
-            import os, pandas as pd
-            from pathlib import Path
-            BASE = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data")).resolve()
-            p = BASE/"shap_feature_importance.csv"
-            if not p.exists():
-                print("[WARN] shap_feature_importance.csv yok, adım atlandı.")
-                raise SystemExit(0)
-            df = pd.read_csv(p)
-            df = df.rename(columns={"mean_abs_shap":"shap"})
-            df["rank"] = df["shap"].rank(ascending=False, method="dense").astype(int)
-            df.to_csv(BASE/"shap_feature_importance_ranked.csv", index=False)
-            print("✅ shap_feature_importance_ranked.csv hazır.")
-            PY
-          fi
-          python -u scripts/prepare_shap_csv.py
-
-
-      - name: FR 11) Risk exports (single CSV with top1..top3 columns)
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "🔎 DF/PROBA kaynaklarını arıyorum…"
-          DF_CANDS=(
-            "${CRIME_DATA_DIR}/fr_crime_09.csv"
-            "${CRIME_DATA_DIR}/fr_crime_08.csv"
-            "${CRIME_DATA_DIR}/fr_crime.csv"
-          )
-          RISK_CANDS=(
-            "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv"
-            "${ARTIFACT_DIR}/risk_hourly_grid_full_labeled.csv"
-            "${ARTIFACT_DIR}/crime_prediction_data/risk_hourly_grid_full_labeled.csv"
-          )
-          pick_first() { for p in "$@"; do [ -f "$p" ] && { echo "$p"; return 0; }; done; return 1; }
-          DF_PATH="$(pick_first "${DF_CANDS[@]}" || true)"
-          RISK_PATH="$(pick_first "${RISK_CANDS[@]}" || true)"
-
-          if [ -z "${DF_PATH:-}" ]; then
-            echo "❌ DF bulunamadı (fr_crime_09.csv bekleniyor)."; exit 1
-          fi
-
-          # risk_source'ı CRIME_DATA_DIR altına sabitle (join için)
-          if [ -n "${RISK_PATH:-}" ] && [ ! -f "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" ]; then
-            cp -f "${RISK_PATH}" "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" || true
-          fi
-
-          # script yolu
-          if [ -f risk_exports_fr.py ]; then PY=risk_exports_fr.py;
-          elif [ -f scripts/risk_exports_fr.py ]; then PY=scripts/risk_exports_fr.py;
-          else echo "❌ risk_exports_fr.py yok"; exit 1; fi
-
-          python -u "$PY" --df "${DF_PATH}" --proba-from-risk "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" --threshold 0.5
-
-          echo "---- head(risk_hourly_grid_full_labeled.csv) ----"
-          head -n 3 "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" || true
-
-      - name: 11) Install ML deps for stacking
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        run: |
-          python -m pip install -U pip wheel setuptools
-          pip install pandas numpy scikit-learn joblib
-          pip install xgboost lightgbm || true
-
-      - name: 11.5) Run stacking risk pipeline
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        env:
-          STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/sf_crime_grid_full_labeled.csv
-          ENABLE_SPATIAL_TE: "1"
-          TE_ALPHA: "50"
-          NEIGH_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
-          ENABLE_TE_ABLATION: "1"
-          ABLASYON_BASIS: "ohe"
-          PATROL_HORIZON_DAYS: ${{ env.PATROL_HORIZON_DAYS }}
-          PATROL_TOP_K: ${{ env.PATROL_TOP_K }}
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-        run: |
-          set -e
-          echo "HORIZON=${PATROL_HORIZON_DAYS}, TOP_K=${PATROL_TOP_K}"
-          if [ ! -f "${STACKING_DATASET}" ]; then
-            echo "❌ STACKING_DATASET bulunamadı: ${STACKING_DATASET}"
-            exit 2
-          fi
-          python -u stacking_risk_pipeline_fr.py
-
-
-      - name: FR 12) Build 2 ZIPs with EXACT files (incl. feature-analysis; no fr_crime_10)
+      - name: FR 12) Build 2 ZIPs with EXACT files (no fr_crime_10)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
@@ -301,105 +199,94 @@ jobs:
           from pathlib import Path
           import pandas as pd
 
-          base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data")).resolve()
-          extra = Path(os.environ.get("ARTIFACT_DIR","artifact")).resolve()
-          base.mkdir(parents=True, exist_ok=True); extra.mkdir(parents=True, exist_ok=True)
+          base = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data"))
+          extra = Path(os.environ.get("ARTIFACT_DIR","artifact"))
+          base.mkdir(parents=True, exist_ok=True)
+          extra.mkdir(parents=True, exist_ok=True)
 
-          # CSV paketine girecekler
-          WANT_CSV = [
-            "fr_crime_09.csv",
-            "risk_hourly.csv",
-            "risk_daily.csv",
-            "patrol_recs.csv",
-            "risk_types_top3.csv",
-            "metrics_stacking_ohe.csv",
-            # feature-analysis çıktıları
-            "feature_type_decision.csv",
-            "feature_dropped_for_strict_numeric.csv",
-            "feature_importance_xgb.csv",
-            "feature_top20_xgb.csv",
-            "shap_feature_importance.csv",
-            "shap_top20.csv",
-            "shap_feature_importance_ranked.csv",
-          ]
-          # Parquet paketine girecekler
-          WANT_PQ  = [
-            "fr_crime_09.parquet",
-            "risk_hourly.parquet",
-            "risk_daily.parquet",
-            "patrol_recs.parquet",
-            "metrics_stacking_ohe.parquet",
-          ]
+          # Hedef setler
+          WANT_CSV = ["fr_crime_09.csv", "risk_hourly.csv", "metrics_stacking_ohe.csv"]
+          WANT_PQ  = ["fr_crime_09.parquet", "risk_hourly.parquet", "metrics_stacking_ohe.parquet"]
 
           def find_one(name: str):
-            cands = list(base.rglob(name)) + list(extra.rglob(name))
-            return cands[0] if cands else None
+            # Önce base, sonra artifact
+            for root in (base, extra):
+              p = next(root.rglob(name), None)
+              if p: return p
+            return None
 
-          # Eğer fr_crime_09 sadece CSV ise parquet üret; tersi de
-          def ensure_parquet(csv_path: Path) -> Path|None:
-            try:
-              df = pd.read_csv(csv_path, low_memory=False)
-              pq = csv_path.with_suffix(".parquet"); df.to_parquet(pq, index=False)
-              print(f"[MAKE] {pq.name} from {csv_path.name}")
-              return pq
-            except Exception as e:
-              print(f"[WARN] {csv_path.name} → parquet üretilemedi: {e}", file=sys.stderr)
-              return None
-
-          def ensure_csv(pq_path: Path) -> Path|None:
-            try:
-              df = pd.read_parquet(pq_path)
-              csv = pq_path.with_suffix(".csv"); df.to_csv(csv, index=False)
-              print(f"[MAKE] {csv.name} from {pq_path.name}")
-              return csv
-            except Exception as e:
-              print(f"[WARN] {pq_path.name} → csv üretilemedi: {e}", file=sys.stderr)
-              return None
-
+          # --- fr_crime_09 her iki formatta da olsun (gerekirse dönüşüm) ---
           csv_09 = find_one("fr_crime_09.csv")
           pq_09  = find_one("fr_crime_09.parquet")
+
           if csv_09 is None and pq_09 is None:
-            print("❌ fr_crime_09.(csv|parquet) yok; önceki adımları kontrol edin.", file=sys.stderr)
+            print("❌ fr_crime_09.(csv|parquet) bulunamadı, üretim adımlarını kontrol edin.", file=sys.stderr)
             sys.exit(1)
-          if pq_09 is None and csv_09 is not None: pq_09 = ensure_parquet(csv_09)
-          if csv_09 is None and pq_09 is not None: csv_09 = ensure_csv(pq_09)
 
-          sel_csv, sel_pq = [], []
+          # Sadece CSV varsa → Parquet üret
+          if pq_09 is None and csv_09 is not None:
+            try:
+              df = pd.read_csv(csv_09, low_memory=False)
+              pq_09 = csv_09.with_suffix(".parquet")
+              df.to_parquet(pq_09, index=False)
+              print(f"[MAKE] {pq_09.name} from {csv_09.name}")
+            except Exception as e:
+              print(f"[WARN] fr_crime_09.parquet üretilemedi: {e}", file=sys.stderr)
 
-          def add_if_exists(bucket, name):
+          # Sadece Parquet varsa → CSV üret
+          if csv_09 is None and pq_09 is not None:
+            try:
+              df = pd.read_parquet(pq_09)
+              csv_09 = pq_09.with_suffix(".csv")
+              df.to_csv(csv_09, index=False)
+              print(f"[MAKE] {csv_09.name} from {pq_09.name}")
+            except Exception as e:
+              print(f"[WARN] fr_crime_09.csv üretilemedi: {e}", file=sys.stderr)
+
+          # Seçilecek dosyaları topla (fr_crime_10 asla eklenmez)
+          sel_csv = []
+          sel_pq  = []
+
+          def add_if_exists(target_list, name):
             p = find_one(name)
             if p is not None and "fr_crime_10" not in p.name:
-              bucket.append(p)
+              target_list.append(p)
 
           for n in WANT_CSV: add_if_exists(sel_csv, n)
           for n in WANT_PQ:  add_if_exists(sel_pq,  n)
 
-          # Minimum güvence
-          if not any(p.name == "fr_crime_09.csv" for p in sel_csv) and csv_09 is not None:
-            sel_csv.append(csv_09)
-          if not any(p.name == "fr_crime_09.parquet" for p in sel_pq) and pq_09 is not None:
-            sel_pq.append(pq_09)
+          # Minimum: fr_crime_09 her iki listede de olmalı
+          if not any(p.name == "fr_crime_09.csv" for p in sel_csv):
+            if csv_09 is not None: sel_csv.append(csv_09)
+          if not any(p.name == "fr_crime_09.parquet" for p in sel_pq):
+            if pq_09 is not None: sel_pq.append(pq_09)
 
+          # Paketleme
           out_csv_zip = base / "fr_csv_outputs.zip"
           out_pq_zip  = base / "fr_parquet_outputs.zip"
 
-          def arcname_for(p: Path) -> Path:
+          def arcname_for(p: Path):
             try:
-              pr = p.resolve()
-              if str(pr).startswith(str(base.resolve())):
-                return pr.relative_to(base)
-              if str(pr).startswith(str(extra.resolve())):
-                return Path("artifact") / pr.relative_to(extra)
+              if p.resolve().as_posix().startswith(base.resolve().as_posix()):
+                return p.relative_to(base)
+              if p.resolve().as_posix().startswith(extra.resolve().as_posix()):
+                return Path("artifact") / p.relative_to(extra)
             except Exception:
               pass
             return Path(p.name)
 
+          # CSV ZIP
           with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            for p in sel_csv: z.write(p, arcname=str(arcname_for(p))); print(f"+ CSV: {p.name}")
+            for p in sel_csv:
+              z.write(p, arcname=str(arcname_for(p)))
+              print(f"+ CSV: {p.name}")
           print(f"✅ CSV ZIP hazır: {out_csv_zip}")
 
+          # PARQUET ZIP
           with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            for p in sel_pq: z.write(p, arcname=str(arcname_for(p))); print(f"+ PQ: {p.name}")
+            for p in sel_pq:
+              z.write(p, arcname=str(arcname_for(p)))
+              print(f"+ PQ: {p.name}")
           print(f"✅ Parquet ZIP hazır: {out_pq_zip}")
           PY
 
@@ -410,7 +297,6 @@ jobs:
           path: ${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip
           if-no-files-found: error
           retention-days: 14
-          overwrite: true
 
       - name: Upload FR outputs (Parquet ZIP)
         uses: actions/upload-artifact@v4
@@ -419,4 +305,3 @@ jobs:
           path: ${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip
           if-no-files-found: error
           retention-days: 14
-          overwrite: true
