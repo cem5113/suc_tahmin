@@ -137,14 +137,18 @@ jobs:
           ARTIFACT_DIR:   ${{ env.ARTIFACT_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
           FALLBACK_DIRS:  ${{ env.FALLBACK_DIRS }}
+          FR_311_IN:      ${{ env.ARTIFACT_DIR }}/sf_311_last_5_years.csv
+          FR_311_IN_PQ:   ${{ env.ARTIFACT_DIR }}/sf_311_last_5_years.parquet
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f update_311_fr.py ]; then PY=update_311_fr.py; elif [ -f scripts/update_311_fr.py ]; then PY=scripts/update_311_fr.py; else echo "⚠️ update_311_fr.py yok, adım atlanıyor"; exit 0; fi
-          python -u "$PY" || true
+          # Parquet varsa onu, yoksa CSV’yi göster
+          if [ -f "${FR_311_IN_PQ}" ]; then
+            export FR_311_IN="${FR_311_IN_PQ}"
+          fi
+          python -u update_311_fr.py || true
           echo "HEAD fr_crime_02.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_02.csv" || true
-
 
       - name: FR 03) Population
         env:
