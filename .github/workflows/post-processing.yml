@@ -255,7 +255,7 @@ jobs:
           elif [ -f scripts/risk_exports_fr.py ]; then PY=scripts/risk_exports_fr.py;
           else echo "❌ risk_exports_fr.py yok"; exit 1; fi
 
-          python -u "$PY" --df "${DF_PATH}" --proba-from-risk "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" --threshold 0.5 --out-prefix ""
+          python -u "$PY" --df "${DF_PATH}" --proba-from-risk "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" --threshold 0.5
 
           echo "---- head(risk_hourly_grid_full_labeled.csv) ----"
           head -n 3 "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv" || true
