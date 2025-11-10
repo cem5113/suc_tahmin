@@ -264,9 +264,94 @@ jobs:
           echo "HEAD fr_crime_09.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
 
-      # --- DİKKAT: FR 10 kaldırıldı; fr_crime_10 üretilmez/dahil edilmez ---
+      - name: 12) Run stacking risk pipeline (select + final, robust)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          # Zorunlu/temel
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN || '11' }}
+      
+          # Veri seti seçimi:
+          # 1) STACKING_DATASETS (virgüllü liste) dolu ise o kullanılır
+          # 2) değilse STACKING_DATASET kullanılır
+          STACKING_DATASETS: ${{ env.STACKING_DATASETS || '' }}
+          STACKING_DATASET:  ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
+      
+          # Spatial Target Encoding
+          ENABLE_SPATIAL_TE: "1"
+          TE_ALPHA: "50"
+          NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv 
+      
+          # Ablasyon/karşılaştırma
+          ENABLE_TE_ABLATION: "1"
+          ABLASYON_BASIS: "ohe"
+      
+          # Devriye önerileri
+          PATROL_HORIZON_DAYS: ${{ env.PATROL_HORIZON_DAYS }}
+          PATROL_TOP_K:        ${{ env.PATROL_TOP_K }}
+      
+          # Eğitim & CV
+          CV_JOBS: "4"
+          SUBSET_STRATEGY: "last12m"      # select fazı için
+          SUBSET_MIN_POS: "10000"         # yetersiz pozitifte 18/24 ay genişletme eşiği
+      
+        run: |
+          set -euo pipefail
+      
+          echo "▶ CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+          echo "▶ HORIZON=${PATROL_HORIZON_DAYS}, TOP_K=${PATROL_TOP_K}"
+          echo "▶ GEOID_LEN=${GEOID_LEN}"
+          echo "▶ CV_JOBS=${CV_JOBS}, SUBSET_STRATEGY=${SUBSET_STRATEGY}, SUBSET_MIN_POS=${SUBSET_MIN_POS}"
+      
+          # Veri seti belirle (çoklu liste öncelikli)
+          if [ -n "${STACKING_DATASETS}" ]; then
+            DATASETS="${STACKING_DATASETS}"
+            echo "📦 STACKING_DATASETS kullanılıyor: ${DATASETS}"
+          else
+            DATASETS="${STACKING_DATASET}"
+            echo "📄 STACKING_DATASET kullanılıyor: ${DATASETS}"
+          fi
+      
+          # Girdi mevcut mu?
+          # Virgüllüyse ilkini kontrol edip uyarı veriyoruz (tam kontrol yerine hızlı sigorta)
+          IFS=',' read -r FIRST_DATASET _ <<< "${DATASETS}"
+          if [ -n "${FIRST_DATASET}" ] && [ ! -f "${FIRST_DATASET}" ]; then
+            ALT="${CRIME_DATA_DIR}/$(basename "${FIRST_DATASET}")"
+            if [ -f "${ALT}" ]; then
+              echo "ℹ️ ${FIRST_DATASET} bulunamadı; ${ALT} kullanılabilir."
+            else
+              echo "❌ Veri seti bulunamadı: ${FIRST_DATASET}"
+              ls -lah "${CRIME_DATA_DIR}" || true
+              exit 2
+            fi
+          fi
+      
+          # Komşuluk dosyası yoksa Spatial-TE'yi otomatik kapat
+          if [ -z "${NEIGHBOR_FILE:-}" ] || [ ! -f "${NEIGHBOR_FILE}" ]; then
+            echo "ℹ️ NEIGHBOR_FILE bulunamadı → ENABLE_SPATIAL_TE=0"
+            export ENABLE_SPATIAL_TE=0
+            unset NEIGHBOR_FILE
+          else
+            echo "✅ NEIGHBOR_FILE: ${NEIGHBOR_FILE}"
+          fi
+      
+          # Faz 1: select (son 12 ay + hızlı ağaç sayıları)
+          echo "🚀 TRAIN_PHASE=select"
+          export TRAIN_PHASE=select
+          export STACKING_DATASETS="${DATASETS}"
+          python -u stacking_risk_pipeline.py
+      
+          # Faz 2: final (5 yıl + daha yüksek ağaç sayıları)
+          echo "🚀 TRAIN_PHASE=final"
+          export TRAIN_PHASE=final
+          python -u stacking_risk_pipeline_fr.py
+      
+          echo "📜 Üretilen başlıca çıktılar:"
+          ls -lah "${CRIME_DATA_DIR}" | sed -n '1,200p' || true
+          test -f "${CRIME_DATA_DIR}/stacking_manifest.csv" && \
+            (echo "─ stacking_manifest.csv:"; head -n 5 "${CRIME_DATA_DIR}/stacking_manifest.csv" || true)
 
-      - name: FR 12) Build 2 ZIPs with EXACT files (no fr_crime_10)
+      - name: FR 12) Build 2 ZIPs with EXACT files
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           ARTIFACT_DIR:   ${{ env.ARTIFACT_DIR }}
