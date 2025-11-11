@@ -267,14 +267,15 @@ jobs:
       - name: 12) Run stacking risk pipeline (select + final, robust)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
-          # Zorunlu/temel
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN: ${{ env.GEOID_LEN || '11' }}
-      
-          # Veri seti seçimi:
-          # 1) STACKING_DATASETS (virgüllü liste) dolu ise o kullanılır
-          # 2) değilse STACKING_DATASET kullanılır
-          STACKING_DATASETS: ${{ env.STACKING_DATASETS || '' }}
+
+          # 🔽 Çoklu veri seti tanımı
+          STACKING_DATASETS: |
+            ${{ env.CRIME_DATA_DIR }}/fr_crime_09.csv,
+            ${{ env.CRIME_DATA_DIR }}/fr_crime_Q1.csv,
+            ${{ env.CRIME_DATA_DIR }}/fr_crime_Q1Q2.csv
+
           STACKING_DATASET:  ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
       
           # Spatial Target Encoding
@@ -485,6 +486,7 @@ jobs:
         with:
           name: fr-crime-outputs-csv
           path: ${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip
+          overwrite: true   
           if-no-files-found: error
           retention-days: 14
 
@@ -493,5 +495,6 @@ jobs:
         with:
           name: fr-crime-outputs-parquet
           path: ${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip
+          overwrite: true   
           if-no-files-found: error
           retention-days: 14
