@@ -15,9 +15,11 @@ Aşama 2 (TRAIN_PHASE=final):
 """
 
 import os, re, json, warnings
+from pathlib import Path
 import numpy as np
 import pandas as pd
-from risk_exports import export_risk_tables, optional_top_crime_types
+from risk_exports_fr import build_hourly, build_daily_from_hourly
+from risk_exports import optional_top_crime_types 
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from datetime import datetime, timedelta 
@@ -701,13 +703,34 @@ if __name__ == "__main__":
         meta_name, proba_cols, p_stack, thr = fit_full_models_and_export(base_pipes, pre, X, y, choose_meta=chosen_meta)
         print(f"Saved models for {out_suffix}. Threshold ({meta_name}) = {thr:.4f}")
 
-        risk_hourly_path, patrol_path = export_risk_tables(
-            df=df,
-            y=y,
-            proba=p_stack,
-            threshold=thr,
-            out_prefix=out_suffix
-        )
+        _key_df = df.copy()
+        _key_df["date"] = pd.to_datetime(_key_df.get("date", pd.NaT), errors="coerce").dt.date.astype("string")
+        if "event_hour" in _key_df.columns:
+            h = pd.to_numeric(_key_df["event_hour"], errors="coerce")
+        else:
+            h = _key_df.get("hour_range", "").astype(str).str.extract(r"^(\d{1,2})")[0]
+            h = pd.to_numeric(h, errors="coerce")
+        _key_df["hour_range"] = h.fillna(0).astype(int) % 24
+        _key_df = _key_df[["GEOID","date","hour_range"]].copy()
+        hourly_df = build_hourly(_key_df, proba=p_stack, threshold=thr)
+        daily_df  = build_daily_from_hourly(hourly_df, threshold=thr)
+        
+        hourly_path = Path(CRIME_DIR) / "risk_hourly_grid_full_labeled.csv"
+        daily_path  = Path(CRIME_DIR) / "risk_daily_grid_full_labeled.csv"
+        
+        hourly_df.to_csv(hourly_path, index=False)
+        daily_df.to_csv(daily_path, index=False)
+        try:
+            hourly_df.to_parquet(hourly_path.with_suffix(".parquet"), index=False)
+            daily_df.to_parquet(daily_path.with_suffix(".parquet"), index=False)
+        except Exception:
+            pass
+        
+        print(f"✅ Hourly → {hourly_path} (rows={len(hourly_df)})")
+        print(f"✅ Daily  → {daily_path}  (rows={len(daily_df)})")
+
+        patrol_path = None
+        risk_hourly_path = str(hourly_path)
 
         try:
             types_path = optional_top_crime_types()
@@ -728,8 +751,8 @@ if __name__ == "__main__":
         summary_rows.append({
             "dataset_path": data_path,
             "suffix": out_suffix,
-            "risk_hourly_csv": risk_hourly_path,  # <-- düzeltildi
-            "risk_daily_csv": os.path.join(CRIME_DIR, f"risk_daily{out_suffix}.csv"),
+            "risk_hourly_csv": os.path.join(CRIME_DIR, "risk_hourly_grid_full_labeled.csv"),
+            "risk_daily_csv":  os.path.join(CRIME_DIR, "risk_daily_grid_full_labeled.csv"),
             "patrol_recs_csv": patrol_path,
             "metrics_base_csv": os.path.join(CRIME_DIR, f"metrics_base{out_suffix}.csv"),
             "metrics_stacking_csv": os.path.join(CRIME_DIR, f"metrics_stacking{out_suffix}.csv"),
