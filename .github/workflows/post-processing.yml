@@ -282,7 +282,11 @@ jobs:
           ENABLE_SPATIAL_TE: "1"
           TE_ALPHA: "50"
           NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv 
-      
+
+          RISK_HOURLY_WINDOW_DAYS: "7"      
+          RISK_DAILY_WINDOW_DAYS:  "365"   
+          RISK_BASELINE_WINDOW_DAYS: "30"   
+          
           # Ablasyon/karşılaştırma
           ENABLE_TE_ABLATION: "1"
           ABLASYON_BASIS: "ohe"
