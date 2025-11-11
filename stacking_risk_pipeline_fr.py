@@ -56,14 +56,17 @@ CV_JOBS     = int(os.getenv("CV_JOBS", "4"))
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 def _suffix_from_dataset(path: str) -> str:
-    """'.../fr_crime_Q1.csv' → '_Q1' ; '.../fr_crime_08.csv' → '_08' ; fallback ''"""
     try:
-        name = Path(path).stem  # örn: fr_crime_Q1
+        name = Path(path).stem
     except Exception:
         return ""
-    for tag in ["Q1Q2Q3Q4", "Q1Q2Q3", "Q1Q2", "Q1", "08", "09", "grid_full_labeled"]:
+    tags = ["Q1Q2Q3Q4", "Q1Q2Q3", "Q1Q2", "Q1", "08", "09", "grid_full_labeled"]
+    for tag in tags:
         if tag.lower() in name.lower():
             return f"_{tag}"
+    # 🔧 fr_crime temel dosyalarında sonek boş kalsın
+    if name.lower() in {"fr_crime", "fr-crime"}:
+        return ""
     parts = name.split("_")
     return f"_{parts[-1]}" if len(parts) >= 2 else ""
 
