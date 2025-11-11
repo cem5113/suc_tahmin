@@ -21,7 +21,6 @@ import pandas as pd
 from risk_exports_fr import build_hourly, build_daily_from_hourly
 from risk_exports import optional_top_crime_types 
 from zoneinfo import ZoneInfo
-from pathlib import Path
 from datetime import datetime, timedelta 
 from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
@@ -703,23 +702,43 @@ if __name__ == "__main__":
         meta_name, proba_cols, p_stack, thr = fit_full_models_and_export(base_pipes, pre, X, y, choose_meta=chosen_meta)
         print(f"Saved models for {out_suffix}. Threshold ({meta_name}) = {thr:.4f}")
 
+        # ---- Saatlik & Günlük risk tablolarını üret ve kaydet (robust)
         _key_df = df.copy()
-        _key_df["date"] = pd.to_datetime(_key_df.get("date", pd.NaT), errors="coerce").dt.date.astype("string")
+        
+        # 1) DATE: güvenli parse + SF zamanı fallback
+        _key_df["date"] = pd.to_datetime(_key_df.get("date", pd.NaT), errors="coerce").dt.date
+        if _key_df["date"].isna().all():
+            # Tümü NaT ise, SF saat diliminde bugünün tarihini kullan
+            fallback_date = pd.Timestamp.now(tz=FR_TZ).date()
+            _key_df["date"] = fallback_date
+        # Yazarken string’e çevir (CSV uyumluluğu)
+        _key_df["date"] = _key_df["date"].astype("string")
+        
+        # 2) HOUR_RANGE: önce event_hour (varsa), yoksa hour_range'tan saat başını çek
         if "event_hour" in _key_df.columns:
             h = pd.to_numeric(_key_df["event_hour"], errors="coerce")
         else:
             h = _key_df.get("hour_range", "").astype(str).str.extract(r"^(\d{1,2})")[0]
             h = pd.to_numeric(h, errors="coerce")
+        
+        # 0–23’e indir
         _key_df["hour_range"] = h.fillna(0).astype(int) % 24
-        _key_df = _key_df[["GEOID","date","hour_range"]].copy()
+        
+        # 3) Sadece gereken kolonlar
+        _key_df = _key_df[["GEOID", "date", "hour_range"]].copy()
+        
+        # 4) Risk tablolarını oluştur
         hourly_df = build_hourly(_key_df, proba=p_stack, threshold=thr)
         daily_df  = build_daily_from_hourly(hourly_df, threshold=thr)
         
-        hourly_path = Path(CRIME_DIR) / "risk_hourly_grid_full_labeled.csv"
-        daily_path  = Path(CRIME_DIR) / "risk_daily_grid_full_labeled.csv"
+        # 5) Çıktıları suffix'li isimlerle yaz (çoklu dataset’te overwrite olmaz)
+        hourly_path = Path(CRIME_DIR) / f"risk_hourly_grid_full_labeled{out_suffix}.csv"
+        daily_path  = Path(CRIME_DIR) / f"risk_daily_grid_full_labeled{out_suffix}.csv"
         
         hourly_df.to_csv(hourly_path, index=False)
         daily_df.to_csv(daily_path, index=False)
+        
+        # Parquet (opsiyonel, varsa yaz)
         try:
             hourly_df.to_parquet(hourly_path.with_suffix(".parquet"), index=False)
             daily_df.to_parquet(daily_path.with_suffix(".parquet"), index=False)
@@ -728,7 +747,8 @@ if __name__ == "__main__":
         
         print(f"✅ Hourly → {hourly_path} (rows={len(hourly_df)})")
         print(f"✅ Daily  → {daily_path}  (rows={len(daily_df)})")
-
+        
+        # Manifest için yollar (eğer kullanıyorsan)
         patrol_path = None
         risk_hourly_path = str(hourly_path)
 
@@ -751,8 +771,8 @@ if __name__ == "__main__":
         summary_rows.append({
             "dataset_path": data_path,
             "suffix": out_suffix,
-            "risk_hourly_csv": os.path.join(CRIME_DIR, "risk_hourly_grid_full_labeled.csv"),
-            "risk_daily_csv":  os.path.join(CRIME_DIR, "risk_daily_grid_full_labeled.csv"),
+            "risk_hourly_csv": str(hourly_path),  
+            "risk_daily_csv":  str(daily_path),  
             "patrol_recs_csv": patrol_path,
             "metrics_base_csv": os.path.join(CRIME_DIR, f"metrics_base{out_suffix}.csv"),
             "metrics_stacking_csv": os.path.join(CRIME_DIR, f"metrics_stacking{out_suffix}.csv"),
