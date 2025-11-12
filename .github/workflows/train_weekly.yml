@@ -1,0 +1,240 @@
+name: Train SUTAM Models (weekly)
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"   # Her Pazartesi 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: train-weekly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  train_heavy:
+    runs-on: ubuntu-latest
+    env:
+      # Yol/sabitler
+      CRIME_DATA_DIR: ${{ github.workspace }}/crime_prediction_data
+      ARTIFACT_DIR: artifact
+      ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
+      GEOID_LEN: "11"
+
+      # Ağır eğitim mod ENV'leri
+      FAST_MODE: "0"
+      SKIP_CV: "0"
+      REUSE_MODELS: "0"
+      BASE_MODELS: "lr_l1,ridge,rf,et,hgb,lgb"
+      FOLDS_SELECT: "3"
+      CV_JOBS: "4"
+
+      # Spatial Target Encoding (komşu dosyası varsa otomatik açacağız)
+      ENABLE_SPATIAL_TE: "1"
+      TE_ALPHA: "50"
+      NEIGHBOR_FILE: ${{ github.workspace }}/crime_prediction_data/neighbors.csv
+
+      # Stacking dataset(ler)i (dosya isimleri repo düzenine göre)
+      STACKING_DATASETS: |
+        ${{ github.workspace }}/crime_prediction_data/fr_crime_09.csv,
+        ${{ github.workspace }}/crime_prediction_data/fr_crime_Q1.csv,
+        ${{ github.workspace }}/crime_prediction_data/fr_crime_Q1Q2.csv
+      STACKING_DATASET:  ${{ github.workspace }}/crime_prediction_data/fr_crime.csv
+
+      # Seçim fazı altküme stratejisi
+      SUBSET_STRATEGY: "last12m"
+      SUBSET_MIN_POS: "10000"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure base dirs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
+          echo "CRIME_DATA_DIR=${CRIME_DATA_DIR}"
+          mkdir -p "${CRIME_DATA_DIR}"
+          mkdir -p "${ARTIFACT_DIR}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies (project)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip wheel setuptools
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          # Eğitim için ek kütüphaneler (opsiyonel booster'lar)
+          pip install pandas pyarrow scikit-learn joblib xgboost lightgbm
+
+      - name: Download latest data artifact from "Full SF Crime Pipeline"
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: Full SF Crime Pipeline       # pipeline dosyanın name: alanı
+          workflow_conclusion: success
+          branch: main
+          name: sf-crime-pipeline-output        # orada upload edilen artifact adı
+          path: artifact
+          if_no_artifact_found: error
+
+      - name: Show artifact tree (debug)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== artifact/ (after download) ==="
+          ls -lahR artifact || true
+
+      - name: Unzip artifact if present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "${ARTIFACT_ZIP}" ]; then
+            command -v unzip >/dev/null 2>&1 || { sudo apt-get update -y >/dev/null && sudo apt-get install -y unzip >/dev/null; }
+            echo "Unzipping: ${ARTIFACT_ZIP} -> ${ARTIFACT_DIR}"
+            unzip -o "${ARTIFACT_ZIP}" -d "${ARTIFACT_DIR}"
+          else
+            echo "❗ ${ARTIFACT_ZIP} bulunamadı — artifact paketleme ZIP'siz olabilir, bu durum sorun değil."
+          fi
+          echo "=== artifact/ (after optional unzip) ==="
+          ls -lahR artifact || true
+
+      - name: Mirror key CSVs into CRIME_DATA_DIR if needed
+        shell: bash
+        env:
+          SRC_DIR: artifact
+          DST_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Beklenen ana dosyalar varsa CRIME_DATA_DIR altına kopyala
+          for f in fr_crime.csv fr_crime_09.csv fr_crime_Q1.csv fr_crime_Q1Q2.csv sf_crime_grid_full_labeled.csv neighbors.csv; do
+            if [ -f "${SRC_DIR}/${f}" ] && [ ! -f "${DST_DIR}/${f}" ]; then
+              cp -v "${SRC_DIR}/${f}" "${DST_DIR}/${f}"
+            fi
+          done
+          # Alt dizinlerde ise bul-kopyala
+          for f in fr_crime.csv fr_crime_09.csv fr_crime_Q1.csv fr_crime_Q1Q2.csv; do
+            if [ ! -f "${DST_DIR}/${f}" ]; then
+              hit="$(find "${SRC_DIR}" -type f -name "${f}" | head -n1 || true)"
+              if [ -n "${hit}" ]; then
+                cp -v "${hit}" "${DST_DIR}/${f}"
+              fi
+            fi
+          done
+          ls -lah "${DST_DIR}" || true
+
+      - name: Optional — generate neighbors if missing
+        shell: bash
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "${CRIME_DATA_DIR}/neighbors.csv" ]; then
+            echo "neighbors.csv yoksa üretmeye çalışıyoruz..."
+            if [ -f scripts/make_neighbors_fr.py ]; then
+              python -u scripts/make_neighbors_fr.py || true
+            elif [ -f make_neighbors_fr.py ]; then
+              python -u make_neighbors_fr.py || true
+            else
+              echo "⚠️ make_neighbors_fr.py bulunamadı; Spatial-TE komşuluk desteği kapatılabilir."
+            fi
+          fi
+
+      - name: Decide Spatial-TE (neighbors present?)
+        id: ste
+        shell: bash
+        env:
+          NEIGHBOR_FILE: ${{ env.NEIGHBOR_FILE }}
+        run: |
+          set -euo pipefail
+          STE="1"
+          if [ -z "${NEIGHBOR_FILE:-}" ] || [ ! -f "${NEIGHBOR_FILE}" ]; then
+            STE="0"
+          fi
+          echo "enable=${STE}" >> "$GITHUB_OUTPUT"
+          echo "ENABLE_SPATIAL_TE=${STE}"
+
+      - name: Train — select phase (heavy CV)
+        shell: bash
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
+          STACKING_DATASETS: ${{ env.STACKING_DATASETS }}
+          STACKING_DATASET:  ${{ env.STACKING_DATASET }}
+          ENABLE_SPATIAL_TE: ${{ steps.ste.outputs.enable }}
+          TE_ALPHA: ${{ env.TE_ALPHA }}
+          NEIGHBOR_FILE: ${{ env.NEIGHBOR_FILE }}
+          FAST_MODE: ${{ env.FAST_MODE }}
+          SKIP_CV:  ${{ env.SKIP_CV }}
+          REUSE_MODELS: "0"
+          CV_JOBS: ${{ env.CV_JOBS }}
+          SUBSET_STRATEGY: ${{ env.SUBSET_STRATEGY }}
+          SUBSET_MIN_POS: ${{ env.SUBSET_MIN_POS }}
+          FOLDS_SELECT: ${{ env.FOLDS_SELECT }}
+        run: |
+          set -euo pipefail
+          echo "🚀 TRAIN_PHASE=select"
+          export TRAIN_PHASE=select
+          python -u stacking_risk_pipeline_fr.py
+
+      - name: Train — final phase (full data)
+        shell: bash
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN: ${{ env.GEOID_LEN }}
+          STACKING_DATASETS: ${{ env.STACKING_DATASETS }}
+          STACKING_DATASET:  ${{ env.STACKING_DATASET }}
+          ENABLE_SPATIAL_TE: ${{ steps.ste.outputs.enable }}
+          TE_ALPHA: ${{ env.TE_ALPHA }}
+          NEIGHBOR_FILE: ${{ env.NEIGHBOR_FILE }}
+          FAST_MODE: ${{ env.FAST_MODE }}
+          SKIP_CV:  ${{ env.SKIP_CV }}
+          REUSE_MODELS: "0"
+          CV_JOBS: ${{ env.CV_JOBS }}
+          SUBSET_STRATEGY: "none"
+          SUBSET_MIN_POS: ${{ env.SUBSET_MIN_POS }}
+          FOLDS_SELECT: ${{ env.FOLDS_SELECT }}
+        run: |
+          set -euo pipefail
+          echo "🚀 TRAIN_PHASE=final"
+          export TRAIN_PHASE=final
+          python -u stacking_risk_pipeline_fr.py
+
+      - name: Show trained model files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== ${CRIME_DATA_DIR}/models ==="
+          ls -lah "${CRIME_DATA_DIR}/models" || { echo "❌ models/ bulunamadı"; exit 1; }
+
+      - name: Upload trained models
+        uses: actions/upload-artifact@v4
+        with:
+          name: sutam-models
+          path: ${{ env.CRIME_DATA_DIR }}/models
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 21
+
+      - name: Upload training metrics (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sutam-training-metrics
+          path: |
+            ${{ env.CRIME_DATA_DIR }}/metrics_base*.csv
+            ${{ env.CRIME_DATA_DIR }}/metrics_stacking*.csv
+            ${{ env.CRIME_DATA_DIR }}/metrics_all*.csv
+            ${{ env.CRIME_DATA_DIR }}/stacking_manifest.csv
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 14
