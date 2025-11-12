@@ -94,7 +94,6 @@ if ABLASYON_BASIS not in {"ohe", "te"}:
 def phase_is_select() -> bool:
     return TRAIN_PHASE == "select"
 
-# -------------------- Helpers: date/hour --------------------
 def _hour_from_range(s: str) -> int:
     # "00-03" → 0; "21-00" → 21
     try:
@@ -115,16 +114,17 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
         s = out["hr_key"].astype(str)
         dt = pd.to_datetime(s, errors="coerce")
         # En yaygın kalıplar: 'YYYY-MM-DD HH', 'YYYY-MM-DD', 'YYYYMMDDHH', 'YYYYMMDD'
-        # Önce doğrudan parse etmeyi dene:
         if dt.notna().mean() <= 0.5:
             # Temizle → sadece rakamlar
             z = s.str.replace(r"[^0-9]", "", regex=True)
+
             def _to_iso(z_):
                 if len(z_) >= 10:  # YYYYMMDDHH
                     return f"{z_[:4]}-{z_[4:6]}-{z_[6:8]} {z_[8:10]}:00:00"
                 if len(z_) >= 8:   # YYYYMMDD
                     return f"{z_[:4]}-{z_[4:6]}-{z_[6:8]} 00:00:00"
                 return None
+
             dt = pd.to_datetime(z.map(_to_iso), errors="coerce")
         out["date"] = dt
     else:
@@ -138,13 +138,17 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
         return start.map(lambda x: f"{x:02d}") + "-" + end.map(lambda x: f"{x:02d}")
 
     if "hour_range" in out.columns:
+        # "HH-HH" desenini yakala; sadece başarılı eşleşmeleri dönüştür
         hr = out["hour_range"].astype(str).str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
         ok = hr.notna().all(axis=1)
-        out.loc[ok, "hour_range"] = (
-            hr[0].astype(float).astype(int).map("{:02d}".format) + "-" +
-            hr[1].astype(float).astype(int).map("{:02d}".format)
-        )
-        miss = out["hour_range"].isna()
+
+        if ok.any():
+            h0 = pd.to_numeric(hr.loc[ok, 0], errors="coerce").fillna(0).astype(int) % 24
+            h1 = pd.to_numeric(hr.loc[ok, 1], errors="coerce").fillna(0).astype(int) % 24
+            out.loc[ok, "hour_range"] = h0.map("{:02d}".format) + "-" + h1.map("{:02d}".format)
+
+        # Regex'i tutmayan satırlar (miss) için event_hour'dan üret
+        miss = ~ok
         if miss.any() and "event_hour" in out.columns:
             out.loc[miss, "hour_range"] = _hr_from_event_hour(out.loc[miss, "event_hour"])
     elif "event_hour" in out.columns:
