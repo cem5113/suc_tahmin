@@ -248,10 +248,10 @@ jobs:
       - name: Download latest trained models (from weekly workflow)
         uses: dawidd6/action-download-artifact@v6
         with:
-          workflow: Train SUTAM Models (weekly) 
+          workflow: train_weekly.yml              
           workflow_conclusion: success
           branch: main
-          name: sutam-models                   
+          name: sutam-models                     
           path: ${{ env.CRIME_DATA_DIR }}/models
           if_no_artifact_found: ignore
 
