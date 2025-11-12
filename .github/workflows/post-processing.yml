@@ -245,15 +245,40 @@ jobs:
           python -u "$PY" || true
           echo "HEAD fr_crime_09.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
 
+      - name: Download latest trained models (from weekly workflow)
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: Train SUTAM Models (weekly) 
+          workflow_conclusion: success
+          branch: main
+          name: sutam-models                   
+          path: ${{ env.CRIME_DATA_DIR }}/models
+          if_no_artifact_found: ignore
+
       - name: Gate (always proceed)
         id: gate
         run: echo "proceed=true" >> "$GITHUB_OUTPUT"
-        
+
+      - name: Decide if training is needed (models present?)
+        id: need_train
+        shell: bash
+        env:
+          MODELS_DIR: ${{ env.CRIME_DATA_DIR }}/models
+          REUSE_MODELS: ${{ env.REUSE_MODELS }}
+        run: |
+          set -euo pipefail
+          NEED="true"
+          if [ "${REUSE_MODELS:-1}" = "1" ] && [ -d "${MODELS_DIR}" ] && ls "${MODELS_DIR}"/stacking_*.joblib >/dev/null 2>&1; then
+            NEED="false"
+          fi
+          echo "need=${NEED}" >> "$GITHUB_OUTPUT"
+          echo "NEED_TRAIN=${NEED}"
+
       # ─────────────────────────────────────────────────────────
       # FR 10 — SADECE STACKING (risk export YOK)
       # ─────────────────────────────────────────────────────────
       - name: FR 10) Run stacking only (no risk exports)
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        if: ${{ steps.gate.outputs.proceed == 'true' && steps.need_train.outputs.need == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN: ${{ env.GEOID_LEN || '11' }}
@@ -267,34 +292,28 @@ jobs:
           ENABLE_SPATIAL_TE: "1"
           TE_ALPHA: "50"
           NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
-          # Eğitim & CV
+          # Eğitim & CV (günlükte hafif/kapatılabilir)
+          FAST_MODE: ${{ env.FAST_MODE }}
+          SKIP_CV:  ${{ env.SKIP_CV  }}
+          REUSE_MODELS: "0"   # bu adım eğitim yapacağı için 0
           CV_JOBS: "4"
           SUBSET_STRATEGY: "last12m"
           SUBSET_MIN_POS: "10000"
         shell: bash
         run: |
           set -euo pipefail
-          echo "▶ CRIME_DATA_DIR=${CRIME_DATA_DIR}"
-          echo "▶ GEOID_LEN=${GEOID_LEN}"
-          echo "▶ STACKING_DATASETS=${STACKING_DATASETS}"
-
-          # Komşuluk dosyası zorunlu değil → yoksa Spatial-TE kapat
           if [ -z "${NEIGHBOR_FILE:-}" ] || [ ! -f "${NEIGHBOR_FILE}" ]; then
             echo "ℹ️ NEIGHBOR_FILE yok → ENABLE_SPATIAL_TE=0"
             export ENABLE_SPATIAL_TE=0
             unset NEIGHBOR_FILE
           fi
-
           echo "🚀 TRAIN_PHASE=select"
           export TRAIN_PHASE=select
-          export STACKING_DATASETS="${STACKING_DATASETS}"
           python -u stacking_risk_pipeline_fr.py
-
           echo "🚀 TRAIN_PHASE=final"
           export TRAIN_PHASE=final
           python -u stacking_risk_pipeline_fr.py
-
-          echo "✅ Stacking tamamlandı — risk export bu adımda yapılmadı."
+          echo "✅ Training done (daily fallback)"
 
       # ─────────────────────────────────────────────────────────
       # FR 11 — RİSK CSV'LERİ (hourly + daily) AYRI ADIM
