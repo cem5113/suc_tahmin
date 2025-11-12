@@ -20,15 +20,17 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CRIME_DATA_DIR: ${{ github.workspace }}/crime_prediction_data
-      WX_LOCATION: "paris"
-      WX_UNIT: "metric"
-      GEOID_LEN: "11"
       ARTIFACT_ZIP: artifact/sf-crime-pipeline-output.zip
       ARTIFACT_DIR: artifact
       FR_OUTPUT_DIR: ${{ github.workspace }}/crime_prediction_data
       FALLBACK_DIRS: ${{ github.workspace }},${{ github.workspace }}/crime_prediction_data
       FR_LABEL_PATH: ${{ github.workspace }}/crime_prediction_data/sf_crime_grid_full_labeled.csv
-  
+      WX_LOCATION: "paris"
+      WX_UNIT: "metric"
+      GEOID_LEN: "11"
+      PATROL_HORIZON_DAYS: "1"
+      PATROL_TOP_K: "50"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -91,12 +93,9 @@ jobs:
           echo "=== artifact/ (after optional unzip) ==="
           ls -lahR artifact || true
 
-      # ------------------------------------------------------------------
-      # FR 00..09: Mevcut üretim adımların (fr_crime_09'a kadar)
-      # Her step scriptlerinin ARTIFACT_ZIP/ARTIFACT_DIR/FR_OUTPUT_DIR/FALLBACK_DIRS
-      # ortam değişkenlerini okuduğu varsayımıyla çalışır.
-      # ------------------------------------------------------------------
-
+      # ─────────────────────────────────────────────────────────
+      # FR 00..09 — Mevcut üretim adımlarınız (dosyalar varsa çalışır)
+      # ─────────────────────────────────────────────────────────
       - name: FR 00) Base grid / event label merge
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -109,11 +108,8 @@ jobs:
           set -euo pipefail
           if [ -f update_crime_fr.py ]; then PY=update_crime_fr.py; elif [ -f scripts/update_crime_fr.py ]; then PY=scripts/update_crime_fr.py; else echo "⚠️ update_crime_fr.py yok, adım atlanıyor"; exit 0; fi
           python -u "$PY"
-          echo "HEAD sf_crime_grid_full_labeled.csv:"
-          head -n 5 "./sf_crime_grid_full_labeled.csv" || true
-          echo "HEAD fr_crime.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime.csv" || true
-
+          echo "HEAD sf_crime_grid_full_labeled.csv:"; head -n 5 "./sf_crime_grid_full_labeled.csv" || true
+          echo "HEAD fr_crime.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime.csv" || true
 
       - name: FR 01) 911
         env:
@@ -127,8 +123,7 @@ jobs:
           set -euo pipefail
           if [ -f update_911_fr.py ]; then PY=update_911_fr.py; elif [ -f scripts/update_911_fr.py ]; then PY=scripts/update_911_fr.py; else echo "⚠️ update_911_fr.py yok, adım atlanıyor"; exit 0; fi
           python -u "$PY" || true
-          echo "HEAD fr_crime_01.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_01.csv" || true
+          echo "HEAD fr_crime_01.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_01.csv" || true
 
       - name: FR 02) 311
         env:
@@ -142,13 +137,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Parquet varsa onu, yoksa CSV’yi göster
-          if [ -f "${FR_311_IN_PQ}" ]; then
-            export FR_311_IN="${FR_311_IN_PQ}"
-          fi
+          if [ -f "${FR_311_IN_PQ}" ]; then export FR_311_IN="${FR_311_IN_PQ}"; fi
           python -u update_311_fr.py || true
-          echo "HEAD fr_crime_02.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_02.csv" || true
+          echo "HEAD fr_crime_02.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_02.csv" || true
 
       - name: FR 03) Population
         env:
@@ -162,8 +153,7 @@ jobs:
           set -euo pipefail
           if [ -f update_population_fr.py ]; then PY=update_population_fr.py; elif [ -f scripts/update_population_fr.py ]; then PY=scripts/update_population_fr.py; else echo "⚠️ update_population_fr.py yok, adım atlanıyor"; exit 0; fi
           python -u "$PY" || true
-          echo "HEAD fr_crime_03.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_03.csv" || true
+          echo "HEAD fr_crime_03.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_03.csv" || true
 
       - name: FR 04) Bus
         env:
@@ -177,8 +167,7 @@ jobs:
           set -euo pipefail
           if [ -f update_bus_fr.py ]; then PY=update_bus_fr.py; elif [ -f scripts/update_bus_fr.py ]; then PY=scripts/update_bus_fr.py; else echo "⚠️ update_bus_fr.py yok, adım atlanıyor"; exit 0; fi
           python -u "$PY" || true
-          echo "HEAD fr_crime_04.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_04.csv" || true
+          echo "HEAD fr_crime_04.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_04.csv" || true
 
       - name: FR 05) Train
         env:
@@ -192,8 +181,7 @@ jobs:
           set -euo pipefail
           if [ -f update_train_fr.py ]; then PY=update_train_fr.py; elif [ -f scripts/update_train_fr.py ]; then PY=scripts/update_train_fr.py; else echo "⚠️ update_train_fr.py yok, adım atlanıyor"; exit 0; fi
           python -u "$PY" || true
-          echo "HEAD fr_crime_05.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_05.csv" || true
+          echo "HEAD fr_crime_05.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_05.csv" || true
 
       - name: FR 06) POI
         env:
@@ -207,8 +195,7 @@ jobs:
           set -euo pipefail
           if [ -f update_poi_fr.py ]; then PY=update_poi_fr.py; elif [ -f scripts/update_poi_fr.py ]; then PY=scripts/update_poi_fr.py; else echo "⚠️ update_poi_fr.py yok, adım atlanıyor"; exit 0; fi
           python -u "$PY" || true
-          echo "HEAD fr_crime_06.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_06.csv" || true
+          echo "HEAD fr_crime_06.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_06.csv" || true
 
       - name: FR 07) Police & Gov
         env:
@@ -222,8 +209,7 @@ jobs:
           set -euo pipefail
           if [ -f update_police_gov_fr.py ]; then PY=update_police_gov_fr.py; elif [ -f scripts/update_police_gov_fr.py ]; then PY=scripts/update_police_gov_fr.py; else echo "⚠️ update_police_gov_fr.py yok, adım atlanıyor"; exit 0; fi
           python -u "$PY" || true
-          echo "HEAD fr_crime_07.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_07.csv" || true
+          echo "HEAD fr_crime_07.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_07.csv" || true
 
       - name: FR 08) Weather
         env:
@@ -237,8 +223,7 @@ jobs:
           set -euo pipefail
           if [ -f update_weather_fr.py ]; then PY=update_weather_fr.py; elif [ -f scripts/update_weather_fr.py ]; then PY=scripts/update_weather_fr.py; else echo "⚠️ update_weather_fr.py yok, adım atlanıyor"; exit 0; fi
           python -u "$PY" || true
-          echo "HEAD fr_crime_08.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_08.csv" || true
+          echo "HEAD fr_crime_08.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_08.csv" || true
 
       - name: FR 09) Neighbors
         env:
@@ -249,70 +234,61 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f scripts/make_neighbors_fr.py ]; then
-            PY=scripts/make_neighbors_fr.py
-          elif [ -f make_neighbors_fr.py ]; then
-            PY=make_neighbors_fr.py
-          else
-            echo "⚠️ make_neighbors_fr.py bulunamadı, adım atlanıyor."
-            exit 0
-          fi
-          if [ ! -f "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_08.csv" ]; then
-            echo "⚠️ fr_crime_08.csv bulunamadı (devam edilebilir)."
-          fi
+          if [ -f scripts/make_neighbors_fr.py ]; then PY=scripts/make_neighbors_fr.py
+          elif [ -f make_neighbors_fr.py ]; then PY=make_neighbors_fr.py
+          else echo "⚠️ make_neighbors_fr.py bulunamadı, adım atlanıyor."; exit 0; fi
           python -u "$PY" || true
-          echo "HEAD fr_crime_09.csv:"
-          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
+          echo "HEAD fr_crime_09.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
 
       - name: Gate (always proceed)
         id: gate
         run: echo "proceed=true" >> "$GITHUB_OUTPUT"
-
+        
       - name: 12) Run stacking risk pipeline (select + final, robust)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN: ${{ env.GEOID_LEN || '11' }}
 
-          # 🔽 Çoklu veri seti tanımı
+          # Çoklu dataset
           STACKING_DATASETS: |
             ${{ env.CRIME_DATA_DIR }}/fr_crime_09.csv,
             ${{ env.CRIME_DATA_DIR }}/fr_crime_Q1.csv,
             ${{ env.CRIME_DATA_DIR }}/fr_crime_Q1Q2.csv
-
           STACKING_DATASET:  ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
-      
+
           # Spatial Target Encoding
           ENABLE_SPATIAL_TE: "1"
           TE_ALPHA: "50"
-          NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv 
+          NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
 
-          RISK_HOURLY_WINDOW_DAYS: "7"      
-          RISK_DAILY_WINDOW_DAYS:  "365"   
-          RISK_BASELINE_WINDOW_DAYS: "30"   
-          
-          # Ablasyon/karşılaştırma
+          # Risk pencereleri
+          RISK_HOURLY_WINDOW_DAYS: "7"
+          RISK_DAILY_WINDOW_DAYS:  "365"
+          RISK_BASELINE_WINDOW_DAYS: "30"
+
+          # Ablasyon
           ENABLE_TE_ABLATION: "1"
           ABLASYON_BASIS: "ohe"
-      
-          # Devriye önerileri
-          PATROL_HORIZON_DAYS: ${{ env.PATROL_HORIZON_DAYS }}
-          PATROL_TOP_K:        ${{ env.PATROL_TOP_K }}
-      
+
+          # Devriye — boş gelirse de defaults
+          PATROL_HORIZON_DAYS: ${{ env.PATROL_HORIZON_DAYS || '1' }}
+          PATROL_TOP_K:        ${{ env.PATROL_TOP_K || '50' }}
+
           # Eğitim & CV
           CV_JOBS: "4"
-          SUBSET_STRATEGY: "last12m"      # select fazı için
-          SUBSET_MIN_POS: "10000"         # yetersiz pozitifte 18/24 ay genişletme eşiği
-      
+          SUBSET_STRATEGY: "last12m"
+          SUBSET_MIN_POS: "10000"
+        shell: bash
         run: |
           set -euo pipefail
-      
+
           echo "▶ CRIME_DATA_DIR=${CRIME_DATA_DIR}"
           echo "▶ HORIZON=${PATROL_HORIZON_DAYS}, TOP_K=${PATROL_TOP_K}"
           echo "▶ GEOID_LEN=${GEOID_LEN}"
           echo "▶ CV_JOBS=${CV_JOBS}, SUBSET_STRATEGY=${SUBSET_STRATEGY}, SUBSET_MIN_POS=${SUBSET_MIN_POS}"
-      
-          # Veri seti belirle (çoklu liste öncelikli)
+
+          # Veri seti seçimi
           if [ -n "${STACKING_DATASETS}" ]; then
             DATASETS="${STACKING_DATASETS}"
             echo "📦 STACKING_DATASETS kullanılıyor: ${DATASETS}"
@@ -320,9 +296,8 @@ jobs:
             DATASETS="${STACKING_DATASET}"
             echo "📄 STACKING_DATASET kullanılıyor: ${DATASETS}"
           fi
-      
-          # Girdi mevcut mu?
-          # Virgüllüyse ilkini kontrol edip uyarı veriyoruz (tam kontrol yerine hızlı sigorta)
+
+          # Hızlı mevcutluk kontrolü (ilk öge)
           IFS=',' read -r FIRST_DATASET _ <<< "${DATASETS}"
           if [ -n "${FIRST_DATASET}" ] && [ ! -f "${FIRST_DATASET}" ]; then
             ALT="${CRIME_DATA_DIR}/$(basename "${FIRST_DATASET}")"
@@ -334,8 +309,8 @@ jobs:
               exit 2
             fi
           fi
-      
-          # Komşuluk dosyası yoksa Spatial-TE'yi otomatik kapat
+
+          # Komşuluk dosyası zorunlu değil → yoksa Spatial-TE kapat
           if [ -z "${NEIGHBOR_FILE:-}" ] || [ ! -f "${NEIGHBOR_FILE}" ]; then
             echo "ℹ️ NEIGHBOR_FILE bulunamadı → ENABLE_SPATIAL_TE=0"
             export ENABLE_SPATIAL_TE=0
@@ -343,18 +318,18 @@ jobs:
           else
             echo "✅ NEIGHBOR_FILE: ${NEIGHBOR_FILE}"
           fi
-      
-          # Faz 1: select (son 12 ay + hızlı ağaç sayıları)
+
+          # Faz 1 — select
           echo "🚀 TRAIN_PHASE=select"
           export TRAIN_PHASE=select
           export STACKING_DATASETS="${DATASETS}"
           python -u stacking_risk_pipeline.py
-      
-          # Faz 2: final (5 yıl + daha yüksek ağaç sayıları)
+
+          # Faz 2 — final
           echo "🚀 TRAIN_PHASE=final"
           export TRAIN_PHASE=final
           python -u stacking_risk_pipeline_fr.py
-      
+
           echo "📜 Üretilen başlıca çıktılar:"
           ls -lah "${CRIME_DATA_DIR}" | sed -n '1,200p' || true
           test -f "${CRIME_DATA_DIR}/stacking_manifest.csv" && \
@@ -370,10 +345,10 @@ jobs:
           shopt -s nullglob
           echo "📂 Listing ${CRIME_DATA_DIR} (ilk 200 satır):"
           ls -lah "${CRIME_DATA_DIR}" | sed -n '1,200p' || true
-      
+
           hourly=( "${CRIME_DATA_DIR}"/risk_hourly_grid_full_labeled*.csv )
           daily=(  "${CRIME_DATA_DIR}"/risk_daily_grid_full_labeled*.csv )
-      
+
           if [[ ${#hourly[@]} -eq 0 ]]; then
             echo "❌ risk_hourly_grid_full_labeled*.csv bulunamadı"; exit 1
           fi
@@ -400,7 +375,7 @@ jobs:
           base.mkdir(parents=True, exist_ok=True)
           extra.mkdir(parents=True, exist_ok=True)
 
-          # --- Aranacak kalıplar (joker destekli)
+          # Aranacak kalıplar (jokerli)
           WANT_CSV_PATTERNS = [
               "fr_crime_09.csv",
               "risk_hourly_grid_full_labeled*.csv",
@@ -418,11 +393,9 @@ jobs:
           ]
 
           def rglob_many(root: Path, pattern: str):
-              # Path.rglob jokerli kalıpları destekler
               return [p for p in root.rglob(pattern) if p.is_file()]
 
           def find_first(pattern: str):
-              # Önce base sonra artifact içinde ara; ilkini döndür
               for root in (base, extra):
                   hits = rglob_many(root, pattern)
                   if hits:
@@ -430,14 +403,9 @@ jobs:
               return None
 
           def ensure_pair(pattern_csv: str, pattern_pq: str):
-              """
-              Verilen kalıplar için tek (tercihen base altında) CSV ve Parquet eşini döndür.
-              Biri yoksa diğeri üzerinden dönüştürmeye çalışır.
-              """
               csv_p = find_first(pattern_csv)
               pq_p  = find_first(pattern_pq)
 
-              # fr_crime_10* asla dahil edilmesin
               def bad(p): 
                   return p is not None and "fr_crime_10" in p.name
 
@@ -467,19 +435,18 @@ jobs:
 
               return (csv_p, pq_p)
 
-          # Zorunlu: fr_crime_09 (ikisi de garanti)
+          # Zorunlu: fr_crime_09
           fr09_csv, fr09_pq = ensure_pair("fr_crime_09.csv", "fr_crime_09.parquet")
           if fr09_csv is None and fr09_pq is None:
               print("❌ fr_crime_09.(csv|parquet) bulunamadı, üretim adımlarını kontrol edin.", file=sys.stderr)
               sys.exit(1)
 
-          # İsteğe bağlı diğerleri (varsa dahil edilir)
           OPTIONAL = [
               ("risk_hourly_grid_full_labeled*.csv", "risk_hourly_grid_full_labeled*.parquet"),
               ("risk_daily_grid_full_labeled*.csv",  "risk_daily_grid_full_labeled*.parquet"),
               ("metrics_stacking*.csv",              "metrics_stacking*.parquet"),
               ("metrics_all*.csv",                   "metrics_all*.parquet"),
-              ("stacking_manifest.csv",              "stacking_manifest.parquet"),  # parquet olmayabilir
+              ("stacking_manifest.csv",              "stacking_manifest.parquet"),
           ]
 
           selected_csv, selected_pq = [fr09_csv], [fr09_pq]
@@ -488,7 +455,6 @@ jobs:
               if c is not None: selected_csv.append(c)
               if p is not None: selected_pq.append(p)
 
-          # Tekilleştir (aynı dosya iki kökten gelirse)
           def unique_paths(paths):
               seen = set(); out = []
               for p in paths:
@@ -507,7 +473,6 @@ jobs:
           out_pq_zip  = base / "fr_parquet_outputs.zip"
 
           def arcname_for(p: Path):
-              # ZIP içinde stabil ve kısa isimler
               try:
                   pr = p.resolve()
                   br = base.resolve()
@@ -520,7 +485,6 @@ jobs:
                   pass
               return Path(p.name)
 
-          # CSV ZIP
           with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
               for p in sel_csv:
                   if "fr_crime_10" in p.name:
@@ -529,7 +493,6 @@ jobs:
                   print(f"+ CSV: {p}")
           print(f"✅ CSV ZIP hazır: {out_csv_zip}")
 
-          # PARQUET ZIP
           with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
               for p in sel_pq:
                   if "fr_crime_10" in p.name:
@@ -544,15 +507,16 @@ jobs:
         with:
           name: fr-crime-outputs-csv
           path: ${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip
-          overwrite: true   
+          overwrite: true
           if-no-files-found: error
           retention-days: 14
-
+      
       - name: Upload FR outputs (Parquet ZIP)
         uses: actions/upload-artifact@v4
         with:
           name: fr-crime-outputs-parquet
           path: ${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip
-          overwrite: true   
+          overwrite: true
           if-no-files-found: error
           retention-days: 14
+
