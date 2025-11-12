@@ -244,37 +244,24 @@ jobs:
         id: gate
         run: echo "proceed=true" >> "$GITHUB_OUTPUT"
         
-      - name: 12) Run stacking risk pipeline (select + final, robust)
+      # ─────────────────────────────────────────────────────────
+      # FR 10 — SADECE STACKING (risk export YOK)
+      # ─────────────────────────────────────────────────────────
+      - name: FR 10) Run stacking only (no risk exports)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN: ${{ env.GEOID_LEN || '11' }}
-
           # Çoklu dataset
           STACKING_DATASETS: |
             ${{ env.CRIME_DATA_DIR }}/fr_crime_09.csv,
             ${{ env.CRIME_DATA_DIR }}/fr_crime_Q1.csv,
             ${{ env.CRIME_DATA_DIR }}/fr_crime_Q1Q2.csv
           STACKING_DATASET:  ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
-
           # Spatial Target Encoding
           ENABLE_SPATIAL_TE: "1"
           TE_ALPHA: "50"
           NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
-
-          # Risk pencereleri
-          RISK_HOURLY_WINDOW_DAYS: "7"
-          RISK_DAILY_WINDOW_DAYS:  "365"
-          RISK_BASELINE_WINDOW_DAYS: "30"
-
-          # Ablasyon
-          ENABLE_TE_ABLATION: "1"
-          ABLASYON_BASIS: "ohe"
-
-          # Devriye — boş gelirse de defaults
-          PATROL_HORIZON_DAYS: ${{ env.PATROL_HORIZON_DAYS || '1' }}
-          PATROL_TOP_K:        ${{ env.PATROL_TOP_K || '50' }}
-
           # Eğitim & CV
           CV_JOBS: "4"
           SUBSET_STRATEGY: "last12m"
@@ -282,82 +269,71 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           echo "▶ CRIME_DATA_DIR=${CRIME_DATA_DIR}"
-          echo "▶ HORIZON=${PATROL_HORIZON_DAYS}, TOP_K=${PATROL_TOP_K}"
           echo "▶ GEOID_LEN=${GEOID_LEN}"
-          echo "▶ CV_JOBS=${CV_JOBS}, SUBSET_STRATEGY=${SUBSET_STRATEGY}, SUBSET_MIN_POS=${SUBSET_MIN_POS}"
-
-          # Veri seti seçimi
-          if [ -n "${STACKING_DATASETS}" ]; then
-            DATASETS="${STACKING_DATASETS}"
-            echo "📦 STACKING_DATASETS kullanılıyor: ${DATASETS}"
-          else
-            DATASETS="${STACKING_DATASET}"
-            echo "📄 STACKING_DATASET kullanılıyor: ${DATASETS}"
-          fi
-
-          # Hızlı mevcutluk kontrolü (ilk öge)
-          IFS=',' read -r FIRST_DATASET _ <<< "${DATASETS}"
-          if [ -n "${FIRST_DATASET}" ] && [ ! -f "${FIRST_DATASET}" ]; then
-            ALT="${CRIME_DATA_DIR}/$(basename "${FIRST_DATASET}")"
-            if [ -f "${ALT}" ]; then
-              echo "ℹ️ ${FIRST_DATASET} bulunamadı; ${ALT} kullanılabilir."
-            else
-              echo "❌ Veri seti bulunamadı: ${FIRST_DATASET}"
-              ls -lah "${CRIME_DATA_DIR}" || true
-              exit 2
-            fi
-          fi
+          echo "▶ STACKING_DATASETS=${STACKING_DATASETS}"
 
           # Komşuluk dosyası zorunlu değil → yoksa Spatial-TE kapat
           if [ -z "${NEIGHBOR_FILE:-}" ] || [ ! -f "${NEIGHBOR_FILE}" ]; then
-            echo "ℹ️ NEIGHBOR_FILE bulunamadı → ENABLE_SPATIAL_TE=0"
+            echo "ℹ️ NEIGHBOR_FILE yok → ENABLE_SPATIAL_TE=0"
             export ENABLE_SPATIAL_TE=0
             unset NEIGHBOR_FILE
-          else
-            echo "✅ NEIGHBOR_FILE: ${NEIGHBOR_FILE}"
           fi
 
-          # Faz 1 — select
           echo "🚀 TRAIN_PHASE=select"
           export TRAIN_PHASE=select
-          export STACKING_DATASETS="${DATASETS}"
+          export STACKING_DATASETS="${STACKING_DATASETS}"
           python -u stacking_risk_pipeline.py
 
-          # Faz 2 — final
           echo "🚀 TRAIN_PHASE=final"
           export TRAIN_PHASE=final
           python -u stacking_risk_pipeline_fr.py
 
-          echo "📜 Üretilen başlıca çıktılar:"
-          ls -lah "${CRIME_DATA_DIR}" | sed -n '1,200p' || true
-          test -f "${CRIME_DATA_DIR}/stacking_manifest.csv" && \
-            (echo "─ stacking_manifest.csv:"; head -n 5 "${CRIME_DATA_DIR}/stacking_manifest.csv" || true)
+          echo "✅ Stacking tamamlandı — risk export bu adımda yapılmadı."
 
-      - name: Assert risk outputs exist
+      # ─────────────────────────────────────────────────────────
+      # FR 11 — RİSK CSV'LERİ (hourly + daily) AYRI ADIM
+      # ─────────────────────────────────────────────────────────
+      - name: FR 11) Generate risk CSVs (hourly + daily)
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          WX_LOCATION: "paris"
+          WX_UNIT: "metric"
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "▶ risk_exports_fr.py çalıştırılıyor..."
+          if [ -f risk_exports_fr.py ]; then
+            python -u risk_exports_fr.py
+          elif [ -f scripts/risk_exports_fr.py ]; then
+            python -u scripts/risk_exports_fr.py
+          else
+            echo "❌ risk_exports_fr.py bulunamadı"; exit 1
+          fi
+
+          echo "📂 Üretilen risk dosyaları:"
+          ls -lah "${CRIME_DATA_DIR}" | grep -E 'risk_(hourly|daily)_grid_full_labeled' || true
+
+      # ─────────────────────────────────────────────────────────
+      # FR 12 — RİSK ÇIKTILARINI DOĞRULA
+      # ─────────────────────────────────────────────────────────
+      - name: FR 12) Assert risk outputs exist
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         shell: bash
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          echo "📂 Listing ${CRIME_DATA_DIR} (ilk 200 satır):"
-          ls -lah "${CRIME_DATA_DIR}" | sed -n '1,200p' || true
+          echo "📂 risk CSV kontrolü"
+          test -f "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv"
+          test -f "${CRIME_DATA_DIR}/risk_daily_grid_full_labeled.csv"
+          echo "✅ risk CSV’leri mevcut."
 
-          hourly=( "${CRIME_DATA_DIR}"/risk_hourly_grid_full_labeled*.csv )
-          daily=(  "${CRIME_DATA_DIR}"/risk_daily_grid_full_labeled*.csv )
-
-          if [[ ${#hourly[@]} -eq 0 ]]; then
-            echo "❌ risk_hourly_grid_full_labeled*.csv bulunamadı"; exit 1
-          fi
-          if [[ ${#daily[@]} -eq 0 ]]; then
-            echo "❌ risk_daily_grid_full_labeled*.csv bulunamadı"; exit 1
-          fi
-          echo "✅ Bulundu: ${#hourly[@]} hourly, ${#daily[@]} daily"
-
-      - name: FR 12) Build 2 ZIPs with EXACT files
+      # ─────────────────────────────────────────────────────────
+      # FR 13 — ZIP İNŞA (joker destekli, fr_crime_10 hariç)
+      # ─────────────────────────────────────────────────────────
+      - name: FR 13) Build 2 ZIPs with EXACT files
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
@@ -375,7 +351,6 @@ jobs:
           base.mkdir(parents=True, exist_ok=True)
           extra.mkdir(parents=True, exist_ok=True)
 
-          # Aranacak kalıplar (jokerli)
           WANT_CSV_PATTERNS = [
               "fr_crime_09.csv",
               "risk_hourly_grid_full_labeled*.csv",
@@ -406,7 +381,7 @@ jobs:
               csv_p = find_first(pattern_csv)
               pq_p  = find_first(pattern_pq)
 
-              def bad(p): 
+              def bad(p):
                   return p is not None and "fr_crime_10" in p.name
 
               if bad(csv_p): csv_p = None
@@ -435,7 +410,6 @@ jobs:
 
               return (csv_p, pq_p)
 
-          # Zorunlu: fr_crime_09
           fr09_csv, fr09_pq = ensure_pair("fr_crime_09.csv", "fr_crime_09.parquet")
           if fr09_csv is None and fr09_pq is None:
               print("❌ fr_crime_09.(csv|parquet) bulunamadı, üretim adımlarını kontrol edin.", file=sys.stderr)
@@ -458,10 +432,10 @@ jobs:
           def unique_paths(paths):
               seen = set(); out = []
               for p in paths:
-                  if p is None: 
+                  if p is None:
                       continue
                   key = str(p.resolve())
-                  if key in seen: 
+                  if key in seen:
                       continue
                   seen.add(key); out.append(p)
               return out
@@ -499,7 +473,8 @@ jobs:
                       continue
                   z.write(p, arcname=str(arcname_for(p)))
                   print(f"+ PQ: {p}")
-          print(f"✅ Parquet ZIP hazır: {out_pq_zip}")
+          print(f"✅ Parquet ZIP hazır: {out_pq_zip}"
+          )
           PY
 
       - name: Upload FR outputs (CSV ZIP)
@@ -510,7 +485,7 @@ jobs:
           overwrite: true
           if-no-files-found: error
           retention-days: 14
-      
+
       - name: Upload FR outputs (Parquet ZIP)
         uses: actions/upload-artifact@v4
         with:
@@ -519,4 +494,3 @@ jobs:
           overwrite: true
           if-no-files-found: error
           retention-days: 14
-
