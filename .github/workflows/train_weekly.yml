@@ -2,7 +2,7 @@ name: Train SUTAM Models (weekly)
 
 on:
   schedule:
-    - cron: "0 8 * * 1"   # Her Pazartesi 08:00 UTC
+    - cron: "1 6 * * 1"   # Her Pazartesi 16:00 UTC
   workflow_dispatch:
 
 permissions:
