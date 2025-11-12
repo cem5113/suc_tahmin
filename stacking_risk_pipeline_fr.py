@@ -130,42 +130,103 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["date"] = pd.NaT
 
-    # --- 2) HOUR_RANGE türet/normalize ---
-    def _hr_from_event_hour(s):
-        h = pd.to_numeric(s, errors="coerce").fillna(0).astype(int) % 24
-        start = (h // 3) * 3
-        end = (start + 3) % 24
-        return start.map(lambda x: f"{x:02d}") + "-" + end.map(lambda x: f"{x:02d}")
+# --- 2) HOUR_RANGE türet/normalize ---
+def _hr_from_event_hour(s):
+    h = pd.to_numeric(s, errors="coerce").fillna(0).astype(int) % 24
+    start = (h // 3) * 3
+    end = (start + 3) % 24
+    return start.map(lambda x: f"{x:02d}") + "-" + end.map(lambda x: f"{x:02d}")
 
-    if "hour_range" in out.columns:
-        # "HH-HH" desenini yakala; sadece başarılı eşleşmeleri dönüştür
-        hr = out["hour_range"].astype(str).str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
-        ok = hr.notna().all(axis=1)
+def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
 
-        if ok.any():
-            h0 = pd.to_numeric(hr.loc[ok, 0], errors="coerce").fillna(0).astype(int) % 24
-            h1 = pd.to_numeric(hr.loc[ok, 1], errors="coerce").fillna(0).astype(int) % 24
-            out.loc[ok, "hour_range"] = h0.map("{:02d}".format) + "-" + h1.map("{:02d}".format)
-
-        # Regex'i tutmayan satırlar (miss) için event_hour'dan üret
-        miss = ~ok
-        if miss.any() and "event_hour" in out.columns:
-            out.loc[miss, "hour_range"] = _hr_from_event_hour(out.loc[miss, "event_hour"])
-    elif "event_hour" in out.columns:
-        out["hour_range"] = _hr_from_event_hour(out["event_hour"])
+    # --- 1) DATE türet ---
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    elif "datetime" in out.columns:
+        out["date"] = pd.to_datetime(out["datetime"], errors="coerce")
+    elif "hr_key" in out.columns:
+        s = out["hr_key"].astype(str)
+        dt = pd.to_datetime(s, errors="coerce")
+        if dt.notna().mean() <= 0.5:
+            # Rakamları çekip YYYYMMDD[HH] → ISO
+            z = s.str.replace(r"[^0-9]", "", regex=True)
+            def _to_iso(z_):
+                if len(z_) >= 10:  # YYYYMMDDHH
+                    return f"{z_[:4]}-{z_[4:6]}-{z_[6:8]} {z_[8:10]}:00:00"
+                if len(z_) >= 8:   # YYYYMMDD
+                    return f"{z_[:4]}-{z_[4:6]}-{z_[6:8]} 00:00:00"
+                return None
+            dt = pd.to_datetime(z.map(_to_iso), errors="coerce")
+        out["date"] = dt
     else:
-        # hr_key biçimi 'YYYY-MM-DD HH' ise buradan saat çıkar
-        if "hr_key" in out.columns:
-            hh = out["hr_key"].astype(str).str.extract(r"\b(\d{1,2})\b")[0]
-            if hh.notna().any():
-                out["hour_range"] = _hr_from_event_hour(hh)
-            else:
-                out["hour_range"] = np.nan
+        out["date"] = pd.NaT
+
+# --- 2) HOUR_RANGE türet/normalize ---
+def _hr_from_event_hour(s):
+    h = pd.to_numeric(s, errors="coerce").fillna(0).astype(int) % 24
+    start = (h // 3) * 3
+    end = (start + 3) % 24
+    return start.map(lambda x: f"{x:02d}") + "-" + end.map(lambda x: f"{x:02d}")
+
+if "hour_range" in out.columns:
+    # Unicode dash’leri normalize et
+    hr_raw = (
+        out["hour_range"]
+        .astype(str)
+        .str.replace("\u2013", "-", regex=False)  # en dash
+        .str.replace("\u2014", "-", regex=False)  # em dash
+    )
+    # Sadece "HH-HH" yakala
+    hr = hr_raw.str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
+    ok = hr.notna().all(axis=1)
+
+    if ok.any():
+        h0 = pd.to_numeric(hr.loc[ok, 0], errors="coerce").fillna(0).astype(int) % 24
+        h1 = pd.to_numeric(hr.loc[ok, 1], errors="coerce").fillna(0).astype(int) % 24
+        out.loc[ok, "hour_range"] = h0.map("{:02d}".format) + "-" + h1.map("{:02d}".format)
+
+    # Regex’i tutmayanlar için event_hour’dan üret
+    miss = ~ok
+    if miss.any():
+        if "event_hour" in out.columns:
+            out.loc[miss, "hour_range"] = _hr_from_event_hour(out.loc[miss, "event_hour"])
+        elif "hr_key" in out.columns:
+            hh = out.loc[miss, "hr_key"].astype(str).str.extract(r"\b(\d{1,2})\b")[0]
+            out.loc[miss, "hour_range"] = _hr_from_event_hour(hh)
+        else:
+            out.loc[miss, "hour_range"] = "00-03"
+elif "event_hour" in out.columns:
+    out["hour_range"] = _hr_from_event_hour(out["event_hour"])
+else:
+    # hr_key biçimi 'YYYY-MM-DD HH' ise buradan saat çıkar
+    if "hr_key" in out.columns:
+        hh = out["hr_key"].astype(str).str.extract(r"\b(\d{1,2})\b")[0]
+        out["hour_range"] = _hr_from_event_hour(hh)
+    else:
+        out["hour_range"] = "00-03"
+
+return out
+
+    # Regex'i tutmayan satırlar (miss) için event_hour'dan üret
+    miss = ~ok
+    if miss.any() and "event_hour" in out.columns:
+        out.loc[miss, "hour_range"] = _hr_from_event_hour(out.loc[miss, "event_hour"])
+elif "event_hour" in out.columns:
+    out["hour_range"] = _hr_from_event_hour(out["event_hour"])
+else:
+    # hr_key biçimi 'YYYY-MM-DD HH' ise buradan saat çıkar
+    if "hr_key" in out.columns:
+        hh = out["hr_key"].astype(str).str.extract(r"\b(\d{1,2})\b")[0]
+        if hh.notna().any():
+            out["hour_range"] = _hr_from_event_hour(hh)
         else:
             out["hour_range"] = np.nan
+    else:
+        out["hour_range"] = np.nan
 
-    return out
-  
+return out
+
 def _load_neighbors(path: str):
     """
     Komşuluk dosyası opsiyonel. Format örnekleri:
