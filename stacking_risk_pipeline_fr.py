@@ -208,10 +208,10 @@ else:
 
 return out
 
-    # Regex'i tutmayan satırlar (miss) için event_hour'dan üret
-    miss = ~ok
-    if miss.any() and "event_hour" in out.columns:
-        out.loc[miss, "hour_range"] = _hr_from_event_hour(out.loc[miss, "event_hour"])
+# Regex'i tutmayan satırlar (miss) için event_hour'dan üret
+miss = ~ok
+if miss.any() and "event_hour" in out.columns:
+    out.loc[miss, "hour_range"] = _hr_from_event_hour(out.loc[miss, "event_hour"])
 elif "event_hour" in out.columns:
     out["hour_range"] = _hr_from_event_hour(out["event_hour"])
 else:
