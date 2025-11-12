@@ -283,7 +283,7 @@ jobs:
           echo "🚀 TRAIN_PHASE=select"
           export TRAIN_PHASE=select
           export STACKING_DATASETS="${STACKING_DATASETS}"
-          python -u stacking_risk_pipeline.py
+          python -u stacking_risk_pipeline_fr.py
 
           echo "🚀 TRAIN_PHASE=final"
           export TRAIN_PHASE=final
