@@ -53,6 +53,11 @@ GEOID_LEN   = int(os.getenv("GEOID_LEN", "11"))
 TRAIN_PHASE = os.getenv("TRAIN_PHASE", "select").strip().lower()  # select | final
 CV_JOBS     = int(os.getenv("CV_JOBS", "4"))
 warnings.filterwarnings("ignore", category=FutureWarning)
+FAST_MODE      = _env_flag("FAST_MODE", default=True)   # Günlükte hızlı çalış
+SKIP_CV        = _env_flag("SKIP_CV", default=True)     # CV ve OOF hesaplarını atla
+REUSE_MODELS   = _env_flag("REUSE_MODELS", default=True)# Varsa mevcut modelleri kullan
+FOLDS_SELECT   = int(os.getenv("FOLDS_SELECT", "2"))    # Select fazında 2 fold yeterli
+BASE_MODELS    = os.getenv("BASE_MODELS", "hgb,lgb").split(",")  # Günlük set
 
 def _suffix_from_dataset(path: str) -> str:
     try:
@@ -441,51 +446,49 @@ def build_preprocessor_forced(count_features, num_features, cat_features, use_sp
 # -------------------- Models --------------------
 def base_estimators(class_weight_balanced=True):
     cw = "balanced" if class_weight_balanced else None
-    light = phase_is_select()
+    light = phase_is_select() or FAST_MODE  # hızlı modda hafif ayarlar
 
     ests = []
-    ests.append(("lr_l1", LogisticRegression(
-        penalty="l1", solver="saga", C=0.5, max_iter=3000, class_weight=cw)))
-    ests.append(("ridge", RidgeClassifier(alpha=1.0, class_weight=cw)))
-
-    ests.append(("rf", RandomForestClassifier(
-        n_estimators=150 if light else 400, max_depth=14, min_samples_leaf=3,
-        class_weight="balanced_subsample" if class_weight_balanced else None,
-        n_jobs=-1, random_state=42)))
-    ests.append(("et", ExtraTreesClassifier(
-        n_estimators=200 if light else 500, max_depth=14, min_samples_leaf=3,
-        class_weight=cw, n_jobs=-1, random_state=42)))
-    ests.append(("hgb", HistGradientBoostingClassifier(
-        max_depth=8, learning_rate=0.07 if light else 0.06, max_bins=255,
-        l2_regularization=0.0, random_state=42)))
-
-    # Optional boosters
-    HAS_XGB = False
+    # Günlük hızlı modda yalnızca HGB + LGB (varsa)
+    if ("hgb" in BASE_MODELS) or FAST_MODE:
+        ests.append(("hgb", HistGradientBoostingClassifier(
+            max_depth=6 if light else 8,
+            learning_rate=0.08 if light else 0.06,
+            max_bins=255,
+            l2_regularization=0.0,
+            random_state=42
+        )))
     HAS_LGB = False
-    try:
-        from xgboost import XGBClassifier  # type: ignore
-        HAS_XGB = True
-    except Exception:
-        pass
     try:
         from lightgbm import LGBMClassifier  # type: ignore
         HAS_LGB = True
     except Exception:
         pass
-
-    if HAS_XGB:
-        from xgboost import XGBClassifier
-        ests.append(("xgb", XGBClassifier(
-            n_estimators=200 if light else 400, max_depth=6, learning_rate=0.06,
-            subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0, reg_alpha=0.0,
-            eval_metric="logloss", tree_method="hist", n_jobs=-1, random_state=42)))
-    if HAS_LGB:
+    if (("lgb" in BASE_MODELS) or FAST_MODE) and HAS_LGB:
         from lightgbm import LGBMClassifier
         ests.append(("lgb", LGBMClassifier(
-            n_estimators=300 if light else 600, num_leaves=31, learning_rate=0.07 if light else 0.05,
-            subsample=0.9, colsample_bytree=0.9, min_data_in_leaf=50,
-            force_col_wise=True, verbosity=-1, objective="binary",
-            class_weight=cw, n_jobs=-1, random_state=42)))
+            n_estimators=180 if light else 400,
+            num_leaves=31,
+            learning_rate=0.07 if light else 0.05,
+            subsample=0.9, colsample_bytree=0.9,
+            min_data_in_leaf=40 if light else 50,
+            force_col_wise=True, verbosity=-1,
+            objective="binary", class_weight=cw, n_jobs=-1, random_state=42
+        )))
+    # Ağır modelleri **sadece** FAST_MODE kapalıyken ekle
+    if not FAST_MODE:
+        from sklearn.linear_model import LogisticRegression as LR
+        from sklearn.linear_model import RidgeClassifier as RC
+        ests = [("lr_l1", LR(penalty="l1", solver="saga", C=0.5, max_iter=3000, class_weight=cw)),
+                ("ridge", RC(alpha=1.0, class_weight=cw))] + ests
+        from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
+        ests += [
+            ("rf", RandomForestClassifier(n_estimators=150 if light else 400, max_depth=14, min_samples_leaf=3,
+                                          class_weight="balanced_subsample" if class_weight_balanced else None,
+                                          n_jobs=-1, random_state=42)),
+            ("et", ExtraTreesClassifier(n_estimators=200 if light else 500, max_depth=14, min_samples_leaf=3,
+                                        class_weight=cw, n_jobs=-1, random_state=42)),
+        ]
     return ests
 
 # -------------------- Metrics & CV with progress --------------------
@@ -510,6 +513,8 @@ def optimal_threshold(y_true, proba, beta=1.0):
     return float(th[np.nanargmax(f[:-1])])
 
 def make_cv(df: pd.DataFrame, folds_select: int = 3, folds_final: int = 5):
+    if FAST_MODE:
+        folds_select = min(FOLDS_SELECT, folds_select)
     n_splits = folds_select if phase_is_select() else folds_final
     if "date" in df.columns and df["date"].notna().any():
         return TimeSeriesSplit(n_splits=n_splits), None
@@ -696,9 +701,20 @@ if __name__ == "__main__":
             counts = [c for c in counts if c not in sus]
             nums   = [c for c in nums   if c not in sus]
 
+        # ⬇️ Tamamen boş kalan özellikleri (tümü NaN) günlük koşumda sessizce çıkar
+        # Not: önce mevcut adaylardan geçici feature listesi oluşturuyoruz
+        _feature_cols_tmp = list(dict.fromkeys(counts + nums + cats))
+        empty_cols = [c for c in _feature_cols_tmp if (c in df.columns and df[c].isna().all())]
+        if empty_cols:
+            counts = [c for c in counts if c not in empty_cols]
+            nums   = [c for c in nums   if c not in empty_cols]
+            cats   = [c for c in cats   if c not in empty_cols]
+
+        # Boşlar temizlendikten sonra preprocessor ve nihai feature listesi
         pre = build_preprocessor(counts, nums, cats)
         feature_cols = list(dict.fromkeys(counts + nums + cats))
         X = df[feature_cols].copy()
+
         num_like = [c for c in feature_cols if (c in counts) or (c in nums)]
         if num_like:
             X[num_like] = X[num_like].apply(pd.to_numeric, errors="coerce").astype(np.float32)
@@ -709,18 +725,82 @@ if __name__ == "__main__":
         base_pipes = {name: Pipeline([("prep", pre), ("clf", est)], memory=MEM) for name, est in base_list}
         cv, _ = make_cv(df)
 
+out_models = Path(CRIME_DIR) / "models"
+stack_any = list(out_models.glob("stacking_*.joblib"))
+thr_any   = list(out_models.glob("threshold_*.json"))
+
+if REUSE_MODELS and stack_any and thr_any:
+    # Mevcut modeli yükle ve **sadece skorla** (eğitim yok)
+    print("♻️ REUSE_MODELS=1 → Mevcut stacking modeli ile sadece skorlanıyor.")
+    from joblib import load
+    pre = load(out_models / "preprocessor.joblib")
+    base_pipes = load(out_models / "base_pipes.joblib")
+    stack_obj  = load(stack_any[0])
+    proba_cols = stack_obj["names"]
+    meta       = stack_obj["meta"]
+    thr        = json.loads((thr_any[0]).read_text())["threshold"]
+
+    # Base proba matrisini hızlıca üret
+    mats = []
+    for name in proba_cols:
+        mdl = base_pipes[name]
+        if hasattr(mdl, "predict_proba"):
+            p = mdl.predict_proba(X)[:, 1]
+        else:
+            d = mdl.decision_function(X)
+            p = (d - d.min()) / (d.max() - d.min() + 1e-9)
+        mats.append(p.reshape(-1, 1))
+    Z_full = np.hstack(mats)
+    p_stack = meta.predict_proba(Z_full)[:, 1] if hasattr(meta, "predict_proba") else meta.decision_function(Z_full)
+
+    # CV/metrik üretimi atlanır (SKIP_CV)
+    base_metrics = pd.DataFrame()
+    meta_metrics = pd.DataFrame()
+
+else:
+    if SKIP_CV:
+        print("⚡ SKIP_CV=1 → CV/OOF atlanıyor; seçili baz modeller full-data ile fit ediliyor.")
+        MEM = Memory(location=os.path.join(CRIME_DIR, ".skcache"), verbose=0)
+        base_list  = base_estimators(class_weight_balanced=True)
+        base_pipes = {name: Pipeline([("prep", pre), ("clf", est)], memory=MEM) for name, est in base_list}
+
+        proba_cols, mats = [], []
+        for name, pipe in base_pipes.items():
+            pipe.fit(X, y)
+            if hasattr(pipe, "predict_proba"):
+                p = pipe.predict_proba(X)[:, 1]
+            else:
+                d = pipe.decision_function(X); p = (d - d.min())/(d.max()-d.min()+1e-9)
+            mats.append(p.reshape(-1,1)); proba_cols.append(name)
+        Z_full = np.hstack(mats)
+
+        # Meta: hızlı ve stabil
+        from sklearn.linear_model import LogisticRegression
+        meta = LogisticRegression(max_iter=5000)
+        meta.fit(Z_full, y)
+        p_stack = meta.predict_proba(Z_full)[:, 1]
+
+        # Eşik: F1-optimal
+        thr = optimal_threshold(y, p_stack)
+
+        # Modelleri kaydet (gelecekte REUSE_MODELS ile skorlamak için)
+        out_models.mkdir(parents=True, exist_ok=True)
+        dump(pre, out_models / "preprocessor.joblib")
+        dump(base_pipes, out_models / "base_pipes.joblib")
+        dump({"names": proba_cols, "meta": meta}, out_models / "stacking_meta_logreg.joblib")
+        (out_models / "threshold_meta_logreg.json").write_text(json.dumps({"threshold": float(thr)}), encoding="utf-8")
+
+        base_metrics = pd.DataFrame()
+        meta_metrics = pd.DataFrame()
+    else:
+        # Ağır yol (eskinin aynısı); haftalık job’a bırakılmalı
         print("\n🔎 Evaluating base + OOF (with progress)…")
-        base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(base_pipes, X, y, cv, cv_jobs=CV_JOBS)
-        Path(CRIME_DIR).mkdir(parents=True, exist_ok=True)
-        base_metrics.to_csv(os.path.join(CRIME_DIR, f"metrics_base{out_suffix}.csv"), index=False)
-        np.savez_compressed(os.path.join(CRIME_DIR, f"oof_base_probs{out_suffix}.npz"), **oof_map)
-
+        base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(...)
         meta_metrics = evaluate_meta_on_oof(Z, y)
-        meta_metrics.to_csv(os.path.join(CRIME_DIR, f"metrics_stacking{out_suffix}.csv"), index=False)
-
         best_row = meta_metrics.sort_values("pr_auc", ascending=False).iloc[0]
         chosen_meta = "lgb" if ("LightGBM" in best_row["model"]) else "logreg"
         meta_name, proba_cols, p_stack, thr = fit_full_models_and_export(base_pipes, pre, X, y, choose_meta=chosen_meta)
+      
         print(f"Saved models for {out_suffix}. Threshold ({meta_name}) = {thr:.4f}")
 
         # ---- Saatlik & Günlük risk tablolarını üret ve kaydet (robust)
@@ -748,8 +828,22 @@ if __name__ == "__main__":
         # 3) Sadece gereken kolonlar
         _key_df = _key_df[["GEOID", "date", "hour_range"]].copy()
         
-        # 4) Risk tablolarını oluştur
-        hourly_df = build_hourly(_key_df, proba=p_stack, threshold=thr)
+        # 3.1) Olasılıkları (p_stack) tekilleştirilecek anahtara hizala
+        grp_cols = ["GEOID", "date", "hour_range"]
+        _key_df["_row_id"] = np.arange(len(_key_df))
+        g = _key_df.groupby(grp_cols)["_row_id"].apply(list).reset_index(name="_rows")
+        
+        # p_stack → pandas Seri (satır-id ile)
+        p_series = pd.Series(p_stack, index=_key_df["_row_id"])
+        
+        # Her grup için ortalama olasılık (istersen 'max' da kullanabilirsin)
+        p_agg = g["_rows"].map(lambda idxs: float(np.mean(p_series.loc[idxs])))
+        
+        # Tekil anahtarlar
+        _key_unique = g[grp_cols].copy()
+        
+        # 4) Risk tablolarını oluştur (boyutlar artık uyumlu)
+        hourly_df = build_hourly(_key_unique, proba=p_agg.to_numpy(), threshold=thr)
         daily_df  = build_daily_from_hourly(hourly_df, threshold=thr)
         
         # 5) Çıktıları suffix'li isimlerle yaz (çoklu dataset’te overwrite olmaz)
