@@ -264,6 +264,10 @@ jobs:
           echo "HEAD fr_crime_09.csv:"
           head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
 
+      - name: Gate (always proceed)
+        id: gate
+        run: echo "proceed=true" >> "$GITHUB_OUTPUT"
+
       - name: 12) Run stacking risk pipeline (select + final, robust)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
@@ -356,7 +360,30 @@ jobs:
           test -f "${CRIME_DATA_DIR}/stacking_manifest.csv" && \
             (echo "─ stacking_manifest.csv:"; head -n 5 "${CRIME_DATA_DIR}/stacking_manifest.csv" || true)
 
+      - name: Assert risk outputs exist
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        shell: bash
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          echo "📂 Listing ${CRIME_DATA_DIR} (ilk 200 satır):"
+          ls -lah "${CRIME_DATA_DIR}" | sed -n '1,200p' || true
+      
+          hourly=( "${CRIME_DATA_DIR}"/risk_hourly_grid_full_labeled*.csv )
+          daily=(  "${CRIME_DATA_DIR}"/risk_daily_grid_full_labeled*.csv )
+      
+          if [[ ${#hourly[@]} -eq 0 ]]; then
+            echo "❌ risk_hourly_grid_full_labeled*.csv bulunamadı"; exit 1
+          fi
+          if [[ ${#daily[@]} -eq 0 ]]; then
+            echo "❌ risk_daily_grid_full_labeled*.csv bulunamadı"; exit 1
+          fi
+          echo "✅ Bulundu: ${#hourly[@]} hourly, ${#daily[@]} daily"
+
       - name: FR 12) Build 2 ZIPs with EXACT files
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           ARTIFACT_DIR:   ${{ env.ARTIFACT_DIR }}
@@ -373,115 +400,142 @@ jobs:
           base.mkdir(parents=True, exist_ok=True)
           extra.mkdir(parents=True, exist_ok=True)
 
-          # Mantıksal hedefler (birden fazla isim varyantı desteklenir)
-          CANDIDATES_CSV = [
-            "fr_crime_09.csv",
-            "risk_hourly_grid_full_labeled.csv",
-            "risk_hourly.csv",
-            "metrics_stacking_ohe.csv",
-            "metrics_all.csv",
+          # --- Aranacak kalıplar (joker destekli)
+          WANT_CSV_PATTERNS = [
+              "fr_crime_09.csv",
+              "risk_hourly_grid_full_labeled*.csv",
+              "risk_daily_grid_full_labeled*.csv",
+              "metrics_stacking*.csv",
+              "metrics_all*.csv",
+              "stacking_manifest.csv",
           ]
-          CANDIDATES_PQ  = [
-            "fr_crime_09.parquet",
-            "risk_hourly_grid_full_labeled.parquet",
-            "risk_hourly.parquet",
-            "metrics_stacking_ohe.parquet",
-            "metrics_all.parquet",
+          WANT_PQ_PATTERNS = [
+              "fr_crime_09.parquet",
+              "risk_hourly_grid_full_labeled*.parquet",
+              "risk_daily_grid_full_labeled*.parquet",
+              "metrics_stacking*.parquet",
+              "metrics_all*.parquet",
           ]
 
-          def find_all(name: str):
-            """Önce base, sonra artifact içinde tam ada göre ara (rglob)."""
-            found = []
-            for root in (base, extra):
-              for p in root.rglob(name):
-                if "fr_crime_10" in p.name:
-                  continue
-                found.append(p)
-            return found
+          def rglob_many(root: Path, pattern: str):
+              # Path.rglob jokerli kalıpları destekler
+              return [p for p in root.rglob(pattern) if p.is_file()]
 
-          def ensure_pair(csv_name: str, pq_name: str):
-            """Bir çıktının hem CSV hem Parquet versiyonunu üret/garanti et."""
-            csv_paths = find_all(csv_name)
-            pq_paths  = find_all(pq_name)
+          def find_first(pattern: str):
+              # Önce base sonra artifact içinde ara; ilkini döndür
+              for root in (base, extra):
+                  hits = rglob_many(root, pattern)
+                  if hits:
+                      return hits[0]
+              return None
 
-            csv_p, pq_p = (csv_paths[0] if csv_paths else None), (pq_paths[0] if pq_paths else None)
+          def ensure_pair(pattern_csv: str, pattern_pq: str):
+              """
+              Verilen kalıplar için tek (tercihen base altında) CSV ve Parquet eşini döndür.
+              Biri yoksa diğeri üzerinden dönüştürmeye çalışır.
+              """
+              csv_p = find_first(pattern_csv)
+              pq_p  = find_first(pattern_pq)
 
-            # YOKSA, mevcut olandan türet
-            if csv_p is None and pq_p is None:
-              return (None, None)
+              # fr_crime_10* asla dahil edilmesin
+              def bad(p): 
+                  return p is not None and "fr_crime_10" in p.name
 
-            if csv_p is None and pq_p is not None:
-              try:
-                df = pd.read_parquet(pq_p)
-                csv_p = pq_p.with_suffix(".csv")
-                df.to_csv(csv_p, index=False)
-                print(f"[MAKE] {csv_p.name} from {pq_p.name}")
-              except Exception as e:
-                print(f"[WARN] {csv_name} üretilemedi: {e}", file=sys.stderr)
+              if bad(csv_p): csv_p = None
+              if bad(pq_p):  pq_p  = None
 
-            if pq_p is None and csv_p is not None:
-              try:
-                df = pd.read_csv(csv_p, low_memory=False)
-                pq_p = csv_p.with_suffix(".parquet")
-                df.to_parquet(pq_p, index=False)
-                print(f"[MAKE] {pq_p.name} from {csv_p.name}")
-              except Exception as e:
-                print(f"[WARN] {pq_name} üretilemedi: {e}", file=sys.stderr)
+              if csv_p is None and pq_p is None:
+                  return (None, None)
 
-            return (csv_p, pq_p)
+              if csv_p is None and pq_p is not None:
+                  try:
+                      df = pd.read_parquet(pq_p)
+                      csv_p = pq_p.with_suffix(".csv")
+                      df.to_csv(csv_p, index=False)
+                      print(f"[MAKE] {csv_p.name} from {pq_p.name}")
+                  except Exception as e:
+                      print(f"[WARN] {pattern_csv} üretilemedi: {e}", file=sys.stderr)
 
-          # Zorunlu: fr_crime_09 (her iki formatta)
+              if pq_p is None and csv_p is not None:
+                  try:
+                      df = pd.read_csv(csv_p, low_memory=False)
+                      pq_p = csv_p.with_suffix(".parquet")
+                      df.to_parquet(pq_p, index=False)
+                      print(f"[MAKE] {pq_p.name} from {csv_p.name}")
+                  except Exception as e:
+                      print(f"[WARN] {pattern_pq} üretilemedi: {e}", file=sys.stderr)
+
+              return (csv_p, pq_p)
+
+          # Zorunlu: fr_crime_09 (ikisi de garanti)
           fr09_csv, fr09_pq = ensure_pair("fr_crime_09.csv", "fr_crime_09.parquet")
           if fr09_csv is None and fr09_pq is None:
-            print("❌ fr_crime_09.(csv|parquet) bulunamadı, üretim adımlarını kontrol edin.", file=sys.stderr)
-            sys.exit(1)
+              print("❌ fr_crime_09.(csv|parquet) bulunamadı, üretim adımlarını kontrol edin.", file=sys.stderr)
+              sys.exit(1)
 
-          # İsteğe bağlı: risk_hourly ve metrics (varsa dahil edilir)
-          rh_csv, rh_pq = ensure_pair("risk_hourly_grid_full_labeled.csv", "risk_hourly_grid_full_labeled.parquet")
-          if rh_csv is None and rh_pq is None:
-            # eski adla deneyelim
-            rh_csv, rh_pq = ensure_pair("risk_hourly.csv", "risk_hourly.parquet")
+          # İsteğe bağlı diğerleri (varsa dahil edilir)
+          OPTIONAL = [
+              ("risk_hourly_grid_full_labeled*.csv", "risk_hourly_grid_full_labeled*.parquet"),
+              ("risk_daily_grid_full_labeled*.csv",  "risk_daily_grid_full_labeled*.parquet"),
+              ("metrics_stacking*.csv",              "metrics_stacking*.parquet"),
+              ("metrics_all*.csv",                   "metrics_all*.parquet"),
+              ("stacking_manifest.csv",              "stacking_manifest.parquet"),  # parquet olmayabilir
+          ]
 
-          mx_csv, mx_pq = ensure_pair("metrics_stacking_ohe.csv", "metrics_stacking_ohe.parquet")
-          if mx_csv is None and mx_pq is None:
-              mx_csv, mx_pq = ensure_pair("metrics_all.csv", "metrics_all.parquet")
+          selected_csv, selected_pq = [fr09_csv], [fr09_pq]
+          for cpat, ppat in OPTIONAL:
+              c, p = ensure_pair(cpat, ppat)
+              if c is not None: selected_csv.append(c)
+              if p is not None: selected_pq.append(p)
 
-          # Seçilecek dosyaları topla (fr_crime_10 asla eklenmez)
-          sel_csv = [p for p in [fr09_csv, rh_csv, mx_csv] if p is not None]
-          sel_pq  = [p for p in [fr09_pq,  rh_pq,  mx_pq]  if p is not None]
+          # Tekilleştir (aynı dosya iki kökten gelirse)
+          def unique_paths(paths):
+              seen = set(); out = []
+              for p in paths:
+                  if p is None: 
+                      continue
+                  key = str(p.resolve())
+                  if key in seen: 
+                      continue
+                  seen.add(key); out.append(p)
+              return out
+
+          sel_csv = unique_paths(selected_csv)
+          sel_pq  = unique_paths(selected_pq)
 
           out_csv_zip = base / "fr_csv_outputs.zip"
           out_pq_zip  = base / "fr_parquet_outputs.zip"
 
           def arcname_for(p: Path):
-            try:
-              pr = p.resolve()
-              br = base.resolve()
-              er = extra.resolve()
-              if pr.as_posix().startswith(br.as_posix()):
-                return p.relative_to(base)
-              if pr.as_posix().startswith(er.as_posix()):
-                return Path("artifact") / p.relative_to(extra)
-            except Exception:
-              pass
-            return Path(p.name)
+              # ZIP içinde stabil ve kısa isimler
+              try:
+                  pr = p.resolve()
+                  br = base.resolve()
+                  er = extra.resolve()
+                  if str(pr).startswith(str(br)):
+                      return p.relative_to(base)
+                  if str(pr).startswith(str(er)):
+                      return Path("artifact") / p.relative_to(extra)
+              except Exception:
+                  pass
+              return Path(p.name)
 
           # CSV ZIP
           with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            for p in sel_csv:
-              if "fr_crime_10" in p.name:
-                continue
-              z.write(p, arcname=str(arcname_for(p)))
-              print(f"+ CSV: {p}")
+              for p in sel_csv:
+                  if "fr_crime_10" in p.name:
+                      continue
+                  z.write(p, arcname=str(arcname_for(p)))
+                  print(f"+ CSV: {p}")
           print(f"✅ CSV ZIP hazır: {out_csv_zip}")
 
           # PARQUET ZIP
           with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            for p in sel_pq:
-              if "fr_crime_10" in p.name:
-                continue
-              z.write(p, arcname=str(arcname_for(p)))
-              print(f"+ PQ: {p}")
+              for p in sel_pq:
+                  if "fr_crime_10" in p.name:
+                      continue
+                  z.write(p, arcname=str(arcname_for(p)))
+                  print(f"+ PQ: {p}")
           print(f"✅ Parquet ZIP hazır: {out_pq_zip}")
           PY
 
