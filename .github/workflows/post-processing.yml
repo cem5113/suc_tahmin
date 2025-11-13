@@ -275,31 +275,103 @@ jobs:
           echo "NEED_TRAIN=${NEED}"
 
       # ─────────────────────────────────────────────────────────
-      # FR 10 — SADECE STACKING (risk export YOK)
+      # FR 09.5 — Son özellik setini hazırla (fr_crime_10.csv)
+      #  - Varsa scripts/build_fr_crime_10.py çalışır
+      #  - Yoksa fr_crime_09.csv → fr_crime_10.csv kopyalanır
       # ─────────────────────────────────────────────────────────
-      - name: FR 10) Run stacking only (no risk exports)
-        if: ${{ steps.gate.outputs.proceed == 'true' && steps.need_train.outputs.need == 'true' }}
+      - name: FR 09.5) Build final feature set (fr_crime_10.csv)
+        shell: bash
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN: ${{ env.GEOID_LEN || '11' }}
-          # Çoklu dataset
-          STACKING_DATASETS: |
-            ${{ env.CRIME_DATA_DIR }}/fr_crime_09.csv,
-            ${{ env.CRIME_DATA_DIR }}/fr_crime_Q1.csv,
-            ${{ env.CRIME_DATA_DIR }}/fr_crime_Q1Q2.csv
-          STACKING_DATASET:  ${{ env.CRIME_DATA_DIR }}/fr_crime.csv
-          # Spatial Target Encoding
+        run: |
+          set -euo pipefail
+          OUT="${CRIME_DATA_DIR}/fr_crime_10.csv"
+          if [ -f scripts/build_fr_crime_10.py ]; then
+            python -u scripts/build_fr_crime_10.py
+          elif [ -f build_fr_crime_10.py ]; then
+            python -u build_fr_crime_10.py
+          else
+            echo "ℹ️ build_fr_crime_10.py yok → fr_crime_09.csv kopyalanıyor."
+            cp -f "${CRIME_DATA_DIR}/fr_crime_09.csv" "${OUT}"
+          fi
+          echo "HEAD fr_crime_10.csv:"; head -n 5 "${CRIME_DATA_DIR}/fr_crime_10.csv" || true
+
+      # ─────────────────────────────────────────────────────────
+      # FR 10 — FEATURE ANALYSIS (opsiyonel; Q1–Q4 İPTAL)
+      #  - SHAP/önem analizi üretir; quartile/Q1–Q4 kesinlikle yapılmaz
+      # ─────────────────────────────────────────────────────────
+      - name: FR 10.0) Install feature-analysis deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip wheel setuptools
+          pip install shap==0.46.0 matplotlib==3.9.2 scikit-learn joblib pandas numpy
+          pip install xgboost lightgbm || true
+
+      - name: FR 10.1) Feature analysis (no quartiles)
+        shell: bash
+        env:
+          FEATURE_DATASET: ${{ env.CRIME_DATA_DIR }}/fr_crime_10.csv
+          OUTPUT_DIR:      ${{ env.CRIME_DATA_DIR }}
+          DISABLE_QUARTILES: "1"   # Q1–Q4 tamamen kapalı
+        run: |
+          set -euo pipefail
+          if [ -f run_feature_analysis_fr.py ]; then PY=run_feature_analysis_fr.py
+          elif [ -f scripts/run_feature_analysis_fr.py ]; then PY=scripts/run_feature_analysis_fr.py
+          else echo "ℹ️ run_feature_analysis_fr.py yok, adım atlanıyor."; exit 0; fi
+          python -u "$PY"
+
+      # ─────────────────────────────────────────────────────────
+      # MODELLERİ KULLAN / GEREKİRSE EĞİT — SADECE STACKING
+      #  - Dataset: fr_crime_10.csv (tek)
+      #  - Spatial TE: neighbors.csv varsa açık
+      # ─────────────────────────────────────────────────────────
+      - name: Download latest trained models (from weekly workflow)
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: train_weekly.yml
+          workflow_conclusion: success
+          branch: main
+          name: sutam-models
+          path: ${{ env.CRIME_DATA_DIR }}/models
+          if_no_artifact_found: ignore
+
+      - name: Gate (always proceed)
+        id: gate
+        run: echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Decide if training is needed (models present?)
+        id: need_train
+        shell: bash
+        env:
+          MODELS_DIR:   ${{ env.CRIME_DATA_DIR }}/models
+          REUSE_MODELS: ${{ env.REUSE_MODELS }}
+        run: |
+          set -euo pipefail
+          NEED="true"
+          if [ "${REUSE_MODELS:-1}" = "1" ] && [ -d "${MODELS_DIR}" ] && ls "${MODELS_DIR}"/stacking_*.joblib >/dev/null 2>&1; then
+            NEED="false"
+          fi
+          echo "need=${NEED}" >> "$GITHUB_OUTPUT"
+          echo "NEED_TRAIN=${NEED}"
+
+      - name: FR 10.2) Run stacking (select + final) on fr_crime_10.csv
+        if: ${{ steps.gate.outputs.proceed == 'true' && steps.need_train.outputs.need == 'true' }}
+        shell: bash
+        env:
+          CRIME_DATA_DIR:   ${{ env.CRIME_DATA_DIR }}
+          GEOID_LEN:        ${{ env.GEOID_LEN || '11' }}
+          STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/fr_crime_10.csv
           ENABLE_SPATIAL_TE: "1"
           TE_ALPHA: "50"
-          NEIGHBOR_FILE: ${{ env.CRIME_DATA_DIR }}/neighbors.csv
-          # Eğitim & CV (günlükte hafif/kapatılabilir)
-          FAST_MODE: ${{ env.FAST_MODE }}
-          SKIP_CV:  ${{ env.SKIP_CV  }}
-          REUSE_MODELS: "0"   # bu adım eğitim yapacağı için 0
-          CV_JOBS: "4"
-          SUBSET_STRATEGY: "last12m"
-          SUBSET_MIN_POS: "10000"
-        shell: bash
+          NEIGHBOR_FILE:    ${{ env.CRIME_DATA_DIR }}/neighbors.csv
+          FAST_MODE:        ${{ env.FAST_MODE }}
+          SKIP_CV:          ${{ env.SKIP_CV  }}
+          REUSE_MODELS:     "0"
+          CV_JOBS:          "4"
+          SUBSET_STRATEGY:  "last12m"
+          SUBSET_MIN_POS:   "10000"
+          BASE_MODELS:      ${{ env.BASE_MODELS }}
         run: |
           set -euo pipefail
           if [ -z "${NEIGHBOR_FILE:-}" ] || [ ! -f "${NEIGHBOR_FILE}" ]; then
@@ -313,17 +385,17 @@ jobs:
           echo "🚀 TRAIN_PHASE=final"
           export TRAIN_PHASE=final
           python -u stacking_risk_pipeline_fr.py
-          echo "✅ Training done (daily fallback)"
+          echo "✅ Stacking training done."
 
       # ─────────────────────────────────────────────────────────
-      # FR 11 — RİSK CSV'LERİ (hourly + daily) AYRI ADIM
+      # FR 11 — RİSK ÇIKTILARI (hourly + daily)
       # ─────────────────────────────────────────────────────────
       - name: FR 11) Generate risk CSVs (hourly + daily)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          WX_LOCATION: "paris"
-          WX_UNIT: "metric"
+          WX_LOCATION:    "paris"
+          WX_UNIT:        "metric"
         shell: bash
         run: |
           set -euo pipefail
@@ -335,13 +407,9 @@ jobs:
           else
             echo "❌ risk_exports_fr.py bulunamadı"; exit 1
           fi
-
           echo "📂 Üretilen risk dosyaları:"
           ls -lah "${CRIME_DATA_DIR}" | grep -E 'risk_(hourly|daily)_grid_full_labeled' || true
 
-      # ─────────────────────────────────────────────────────────
-      # FR 12 — RİSK ÇIKTILARINI DOĞRULA
-      # ─────────────────────────────────────────────────────────
       - name: FR 12) Assert risk outputs exist
         if: ${{ steps.gate.outputs.proceed == 'true' }}
         shell: bash
@@ -349,157 +417,9 @@ jobs:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
-          echo "📂 risk CSV kontrolü"
           test -f "${CRIME_DATA_DIR}/risk_hourly_grid_full_labeled.csv"
           test -f "${CRIME_DATA_DIR}/risk_daily_grid_full_labeled.csv"
           echo "✅ risk CSV’leri mevcut."
-
-      # ─────────────────────────────────────────────────────────
-      # FR 13 — ZIP İNŞA (joker destekli, fr_crime_10 hariç)
-      # ─────────────────────────────────────────────────────────
-      - name: FR 13) Build 2 ZIPs with EXACT files
-        if: ${{ steps.gate.outputs.proceed == 'true' }}
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-          ARTIFACT_DIR:   ${{ env.ARTIFACT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os, sys, zipfile
-          from pathlib import Path
-          import pandas as pd
-
-          base  = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data")).expanduser().resolve()
-          extra = Path(os.environ.get("ARTIFACT_DIR","artifact")).expanduser().resolve()
-          base.mkdir(parents=True, exist_ok=True)
-          extra.mkdir(parents=True, exist_ok=True)
-
-          WANT_CSV_PATTERNS = [
-              "fr_crime_09.csv",
-              "risk_hourly_grid_full_labeled*.csv",
-              "risk_daily_grid_full_labeled*.csv",
-              "metrics_stacking*.csv",
-              "metrics_all*.csv",
-              "stacking_manifest.csv",
-          ]
-          WANT_PQ_PATTERNS = [
-              "fr_crime_09.parquet",
-              "risk_hourly_grid_full_labeled*.parquet",
-              "risk_daily_grid_full_labeled*.parquet",
-              "metrics_stacking*.parquet",
-              "metrics_all*.parquet",
-          ]
-
-          def rglob_many(root: Path, pattern: str):
-              return [p for p in root.rglob(pattern) if p.is_file()]
-
-          def find_first(pattern: str):
-              for root in (base, extra):
-                  hits = rglob_many(root, pattern)
-                  if hits:
-                      return hits[0]
-              return None
-
-          def ensure_pair(pattern_csv: str, pattern_pq: str):
-              csv_p = find_first(pattern_csv)
-              pq_p  = find_first(pattern_pq)
-
-              def bad(p):
-                  return p is not None and "fr_crime_10" in p.name
-
-              if bad(csv_p): csv_p = None
-              if bad(pq_p):  pq_p  = None
-
-              if csv_p is None and pq_p is None:
-                  return (None, None)
-
-              if csv_p is None and pq_p is not None:
-                  try:
-                      df = pd.read_parquet(pq_p)
-                      csv_p = pq_p.with_suffix(".csv")
-                      df.to_csv(csv_p, index=False)
-                      print(f"[MAKE] {csv_p.name} from {pq_p.name}")
-                  except Exception as e:
-                      print(f"[WARN] {pattern_csv} üretilemedi: {e}", file=sys.stderr)
-
-              if pq_p is None and csv_p is not None:
-                  try:
-                      df = pd.read_csv(csv_p, low_memory=False)
-                      pq_p = csv_p.with_suffix(".parquet")
-                      df.to_parquet(pq_p, index=False)
-                      print(f"[MAKE] {pq_p.name} from {csv_p.name}")
-                  except Exception as e:
-                      print(f"[WARN] {pattern_pq} üretilemedi: {e}", file=sys.stderr)
-
-              return (csv_p, pq_p)
-
-          fr09_csv, fr09_pq = ensure_pair("fr_crime_09.csv", "fr_crime_09.parquet")
-          if fr09_csv is None and fr09_pq is None:
-              print("❌ fr_crime_09.(csv|parquet) bulunamadı, üretim adımlarını kontrol edin.", file=sys.stderr)
-              sys.exit(1)
-
-          OPTIONAL = [
-              ("risk_hourly_grid_full_labeled*.csv", "risk_hourly_grid_full_labeled*.parquet"),
-              ("risk_daily_grid_full_labeled*.csv",  "risk_daily_grid_full_labeled*.parquet"),
-              ("metrics_stacking*.csv",              "metrics_stacking*.parquet"),
-              ("metrics_all*.csv",                   "metrics_all*.parquet"),
-              ("stacking_manifest.csv",              "stacking_manifest.parquet"),
-          ]
-
-          selected_csv, selected_pq = [fr09_csv], [fr09_pq]
-          for cpat, ppat in OPTIONAL:
-              c, p = ensure_pair(cpat, ppat)
-              if c is not None: selected_csv.append(c)
-              if p is not None: selected_pq.append(p)
-
-          def unique_paths(paths):
-              seen = set(); out = []
-              for p in paths:
-                  if p is None:
-                      continue
-                  key = str(p.resolve())
-                  if key in seen:
-                      continue
-                  seen.add(key); out.append(p)
-              return out
-
-          sel_csv = unique_paths(selected_csv)
-          sel_pq  = unique_paths(selected_pq)
-
-          out_csv_zip = base / "fr_csv_outputs.zip"
-          out_pq_zip  = base / "fr_parquet_outputs.zip"
-
-          def arcname_for(p: Path):
-              try:
-                  pr = p.resolve()
-                  br = base.resolve()
-                  er = extra.resolve()
-                  if str(pr).startswith(str(br)):
-                      return p.relative_to(base)
-                  if str(pr).startswith(str(er)):
-                      return Path("artifact") / p.relative_to(extra)
-              except Exception:
-                  pass
-              return Path(p.name)
-
-          with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-              for p in sel_csv:
-                  if "fr_crime_10" in p.name:
-                      continue
-                  z.write(p, arcname=str(arcname_for(p)))
-                  print(f"+ CSV: {p}")
-          print(f"✅ CSV ZIP hazır: {out_csv_zip}")
-
-          with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
-              for p in sel_pq:
-                  if "fr_crime_10" in p.name:
-                      continue
-                  z.write(p, arcname=str(arcname_for(p)))
-                  print(f"+ PQ: {p}")
-          print(f"✅ Parquet ZIP hazır: {out_pq_zip}"
-          )
-          PY
 
       - name: Upload FR outputs (CSV ZIP)
         uses: actions/upload-artifact@v4
