@@ -256,118 +256,107 @@ jobs:
           if_no_artifact_found: ignore
 
       # ─────────────────────────────────────────────────────────
-      # FR 09.5 — Son özellik setini hazırla (fr_crime_10.csv)
-      #  - Varsa scripts/build_fr_crime_10.py çalışır
-      #  - Yoksa fr_crime_09.csv → fr_crime_10.csv kopyalanır
+      # FR 09.5 — Özellik analizi + son özellik setini hazırla
+      #  - Girdi : fr_crime_09.csv
+      #  - Adım 1: run_feature_analysis_fr.py (Q1–Q4 YOK)
+      #  - Adım 2: En başarılı 10 değişken + zorunlu kolonlarla fr_crime_10.csv üret
       # ─────────────────────────────────────────────────────────
-      - name: FR 09.5) Build final feature set (fr_crime_10.csv)
+      - name: FR 09.5) Feature analysis + build fr_crime_10.csv (top 10)
         shell: bash
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
         run: |
           set -euo pipefail
-          OUT="${CRIME_DATA_DIR}/fr_crime_10.csv"
-          if [ -f scripts/build_fr_crime_10.py ]; then
-            python -u scripts/build_fr_crime_10.py
-          elif [ -f build_fr_crime_10.py ]; then
-            python -u build_fr_crime_10.py
-          else
-            echo "ℹ️ build_fr_crime_10.py yok → fr_crime_09.csv kopyalanıyor."
-            cp -f "${CRIME_DATA_DIR}/fr_crime_09.csv" "${OUT}"
-          fi
-          echo "HEAD fr_crime_10.csv:"; head -n 5 "${CRIME_DATA_DIR}/fr_crime_10.csv" || true
 
-      # ─────────────────────────────────────────────────────────
-      # FR 10 — FEATURE ANALYSIS (opsiyonel; Q1–Q4 İPTAL)
-      #  - SHAP/önem analizi üretir; quartile/Q1–Q4 kesinlikle yapılmaz
-      # ─────────────────────────────────────────────────────────
-      - name: FR 10.0) Install feature-analysis deps
-        shell: bash
-        run: |
-          set -euo pipefail
+          cd "${CRIME_DATA_DIR}"
+
+          echo "📦 Deps: shap / xgboost / lightgbm / sklearn / pandas / numpy"
           python -m pip install -U pip wheel setuptools
           pip install shap==0.46.0 matplotlib==3.9.2 scikit-learn joblib pandas numpy
           pip install xgboost lightgbm || true
 
-      - name: FR 10.1) Feature analysis (no quartiles)
-        shell: bash
-        env:
-          FEATURE_DATASET: ${{ env.CRIME_DATA_DIR }}/fr_crime_10.csv
-          OUTPUT_DIR:      ${{ env.CRIME_DATA_DIR }}
-          DISABLE_QUARTILES: "1"
-          CRIME_CSV_FR:    ${{ env.CRIME_DATA_DIR }}/fr_crime_10.csv   # 🔹 eklendi
-        run: |
-          set -euo pipefail
-          if [ -f run_feature_analysis_fr.py ]; then PY=run_feature_analysis_fr.py
-          elif [ -f scripts/run_feature_analysis_fr.py ]; then PY=scripts/run_feature_analysis_fr.py
-          else echo "ℹ️ run_feature_analysis_fr.py yok, adım atlanıyor."; exit 0; fi
+          export FEATURE_DATASET="${CRIME_DATA_DIR}/fr_crime_09.csv"
+          export OUTPUT_DIR="${CRIME_DATA_DIR}"
+          export DISABLE_QUARTILES="1"
+          export CRIME_CSV_FR="${CRIME_DATA_DIR}/fr_crime_09.csv"
+
+          if [ -f run_feature_analysis_fr.py ]; then
+            PY=run_feature_analysis_fr.py
+          elif [ -f scripts/run_feature_analysis_fr.py ]; then
+            PY=scripts/run_feature_analysis_fr.py
+          else
+            echo "⚠️ run_feature_analysis_fr.py bulunamadı, fr_crime_09.csv → fr_crime_10.csv kopyalanıyor."
+            cp -f "${CRIME_DATA_DIR}/fr_crime_09.csv" "${CRIME_DATA_DIR}/fr_crime_10.csv"
+            exit 0
+          fi
+
+          echo "🚀 Özellik analizi çalışıyor: $PY"
           python -u "$PY"
 
-      # ─────────────────────────────────────────────────────────
-      # MODELLERİ KULLAN / GEREKİRSE EĞİT — SADECE STACKING
-      #  - Dataset: fr_crime_10.csv (tek)
-      #  - Spatial TE: neighbors.csv varsa açık
-      # ─────────────────────────────────────────────────────────
-      - name: Download latest trained models (from weekly workflow)
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: train_weekly.yml
-          workflow_conclusion: success
-          branch: main
-          name: sutam-models
-          path: ${{ env.CRIME_DATA_DIR }}/models
-          if_no_artifact_found: ignore
-
-      - name: Gate (always proceed)
-        id: gate
-        run: echo "proceed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Decide if training is needed (models present?)
-        id: need_train
-        shell: bash
-        env:
-          MODELS_DIR:   ${{ env.CRIME_DATA_DIR }}/models
-          REUSE_MODELS: ${{ env.REUSE_MODELS }}
-        run: |
-          set -euo pipefail
-          NEED="true"
-          if [ "${REUSE_MODELS:-1}" = "1" ] && [ -d "${MODELS_DIR}" ] && ls "${MODELS_DIR}"/stacking_*.joblib >/dev/null 2>&1; then
-            NEED="false"
+          IMP_CSV=""
+          if [ -f "${OUTPUT_DIR}/shap_feature_importance_fr.csv" ]; then
+            IMP_CSV="${OUTPUT_DIR}/shap_feature_importance_fr.csv"
+          elif [ -f "${OUTPUT_DIR}/shap_feature_importance.csv" ]; then
+            IMP_CSV="${OUTPUT_DIR}/shap_feature_importance.csv"
+          else
+            echo "⚠️ Önem dosyası (shap_feature_importance*.csv) bulunamadı, fr_crime_09.csv → fr_crime_10.csv kopyalanıyor."
+            cp -f "${CRIME_DATA_DIR}/fr_crime_09.csv" "${CRIME_DATA_DIR}/fr_crime_10.csv"
+            exit 0
           fi
-          echo "need=${NEED}" >> "$GITHUB_OUTPUT"
-          echo "NEED_TRAIN=${NEED}"
 
-      - name: FR 10.2) Run stacking (select + final) on fr_crime_10.csv
-        if: ${{ steps.gate.outputs.proceed == 'true' && steps.need_train.outputs.need == 'true' }}
-        shell: bash
-        env:
-          CRIME_DATA_DIR:   ${{ env.CRIME_DATA_DIR }}
-          GEOID_LEN:        ${{ env.GEOID_LEN || '11' }}
-          STACKING_DATASET: ${{ env.CRIME_DATA_DIR }}/fr_crime_10.csv
-          ENABLE_SPATIAL_TE: "1"
-          TE_ALPHA: "50"
-          NEIGHBOR_FILE:    ${{ env.CRIME_DATA_DIR }}/neighbors.csv
-          FAST_MODE:        ${{ env.FAST_MODE }}
-          SKIP_CV:          ${{ env.SKIP_CV  }}
-          REUSE_MODELS:     "0"
-          CV_JOBS:          "4"
-          SUBSET_STRATEGY:  "last12m"
-          SUBSET_MIN_POS:   "10000"
-          BASE_MODELS:      ${{ env.BASE_MODELS }}
-        run: |
-          set -euo pipefail
-          if [ -z "${NEIGHBOR_FILE:-}" ] || [ ! -f "${NEIGHBOR_FILE}" ]; then
-            echo "ℹ️ NEIGHBOR_FILE yok → ENABLE_SPATIAL_TE=0"
-            export ENABLE_SPATIAL_TE=0
-            unset NEIGHBOR_FILE
-          fi
-          echo "🚀 TRAIN_PHASE=select"
-          export TRAIN_PHASE=select
-          python -u stacking_risk_pipeline_fr.py
-          echo "🚀 TRAIN_PHASE=final"
-          export TRAIN_PHASE=final
-          python -u stacking_risk_pipeline_fr.py
-          echo "✅ Stacking training done."
+          echo "📖 Önem dosyası: ${IMP_CSV}"
+          python - << 'PY'
+          import pandas as pd
+          from pathlib import Path
+          
+          crime_dir = Path("${CRIME_DATA_DIR}")
+          imp_path = Path("${IMP_CSV}")
+          src_path = crime_dir / "fr_crime_09.csv"
+          out_path = crime_dir / "fr_crime_10.csv"
+          
+          print(f"📖 fr_crime_09 okunuyor → {src_path}")
+          df = pd.read_csv(src_path)
+          
+          imp = pd.read_csv(imp_path)
+          
+          # Önem skor kolonu (önce 'importance', sonra 'mean_abs_shap', sonra ikinci kolon)
+          for col in ["importance", "mean_abs_shap", "value"]:
+              if col in imp.columns:
+                  score_col = col
+                  break
+          else:
+              score_col = imp.columns[1]
+          
+          # Özellik adı kolonu
+          feat_col = None
+          for c in ["feature", "feat", "column"]:
+              if c in imp.columns:
+                  feat_col = c
+                  break
+          if feat_col is None:
+              raise SystemExit("Özellik ismi için uygun kolon bulunamadı (feature/feat/column).")
+          
+          imp = imp.sort_values(score_col, ascending=False)
+          top_feats = imp[feat_col].head(10).tolist()
+          print("🔟 En başarılı 10 değişken:", top_feats)
+          
+          # Zorunlu kolonlar (var olanları tut)
+          key_cols = ["GEOID", "date", "hour_range", "Y_label"]
+          keep = []
+          for c in df.columns:
+              if c in key_cols or c in top_feats:
+                  keep.append(c)
+          
+          # benzersiz ve sıralı
+          keep = list(dict.fromkeys(keep))
+          print("📌 Tutulacak kolonlar:", keep)
+          
+          df_out = df[keep].copy()
+          df_out.to_csv(out_path, index=False)
+          print(f"✅ fr_crime_10.csv yazıldı → {out_path} (satır={df_out.shape[0]}, kolon={df_out.shape[1]})")
+          PY
+
+          echo "HEAD fr_crime_10.csv:"; head -n 5 "${CRIME_DATA_DIR}/fr_crime_10.csv" || true
 
       # ─────────────────────────────────────────────────────────
       # FR 11 — RİSK ÇIKTILARI (hourly + daily)
