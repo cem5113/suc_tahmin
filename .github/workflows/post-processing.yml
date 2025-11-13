@@ -256,7 +256,7 @@ jobs:
           if_no_artifact_found: ignore
 
       # ─────────────────────────────────────────────────────────
-      # FR 09.5 — Özellik analizi + son özellik setini hazırla
+      # FR 09.6 — Özellik analizi + son özellik setini hazırla
       #  - Girdi : fr_crime_09.csv
       #  - Adım 1: run_feature_analysis_fr.py (Q1–Q4 YOK)
       #  - Adım 2: En başarılı 10 değişken + zorunlu kolonlarla fr_crime_10.csv üret
