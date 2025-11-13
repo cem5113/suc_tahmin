@@ -19,14 +19,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from risk_exports_fr import build_hourly, build_daily_from_hourly
-from risk_exports import optional_top_crime_types 
+from risk_exports import optional_top_crime_types
 from zoneinfo import ZoneInfo
-from datetime import datetime, timedelta 
+from datetime import datetime, timedelta
 from sklearn.base import clone, BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_selection import VarianceThreshold, SelectFromModel
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression, RidgeClassifier
+from sklearn.linear import LogisticRegression, RidgeClassifier
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, average_precision_score, precision_recall_curve,
@@ -60,15 +60,17 @@ FOLDS_SELECT   = int(os.getenv("FOLDS_SELECT", "2"))    # Select fazında 2 fold
 BASE_MODELS    = os.getenv("BASE_MODELS", "hgb,lgb").split(",")  # Günlük set
 
 def _suffix_from_dataset(path: str) -> str:
+    """Çıktı dosya adlarına sonek üretimi (Q1..Q4 kaldırıldı)."""
     try:
         name = Path(path).stem
     except Exception:
         return ""
-    tags = ["Q1Q2Q3Q4", "Q1Q2Q3", "Q1Q2", "Q1", "08", "09", "grid_full_labeled"]
+    # REV: Quartile etiketleri tamamen kaldırıldı
+    tags = ["10", "09", "08", "grid_full_labeled"]  # REV: yalın sonekler
     for tag in tags:
         if tag.lower() in name.lower():
             return f"_{tag}"
-    # 🔧 fr_crime temel dosyalarında sonek boş kalsın
+    # fr_crime temel dosyalarında sonek boş kalsın
     if name.lower() in {"fr_crime", "fr-crime"}:
         return ""
     parts = name.split("_")
@@ -81,16 +83,14 @@ GEO_COL_NAME      = os.getenv("GEO_COL_NAME", "GEOID")            # GEOID kolon 
 FR_TZ = ZoneInfo("America/Los_Angeles")
 HORIZON_DAYS = int(os.getenv("PATROL_HORIZON_DAYS", "1"))
 
-# Eğer kullanıcı ENABLE_SPATIAL_TE vermediyse ama NEIGHBOR_FILE verdiyse,
-# Spatial-TE'yi otomatik aç (kullanışlı varsayılan).
 _env_has_te       = os.getenv("ENABLE_SPATIAL_TE")
 ENABLE_SPATIAL_TE = _env_flag("ENABLE_SPATIAL_TE", default=False)
 if _env_has_te is None and NEIGHBOR_FILE:
     ENABLE_SPATIAL_TE = 1
 
-# --- Ablation ayarları ---
-ENABLE_TE_ABLATION = _env_flag("ENABLE_TE_ABLATION", default=False)  # 1 → ikinci varyantı da koştur (OHE↔TE)
-ABLASYON_BASIS     = os.getenv("ABLASYON_BASIS", "ohe").strip().lower()  # 'ohe' ya da 'te'
+# --- Ablation ayarları (opsiyonel) ---
+ENABLE_TE_ABLATION = _env_flag("ENABLE_TE_ABLATION", default=False)
+ABLASYON_BASIS     = os.getenv("ABLASYON_BASIS", "ohe").strip().lower()
 if ABLASYON_BASIS not in {"ohe", "te"}:
     ABLASYON_BASIS = "ohe"
 
@@ -99,7 +99,6 @@ def phase_is_select() -> bool:
     return TRAIN_PHASE == "select"
 
 def _hour_from_range(s: str) -> int:
-    # "00-03" → 0; "21-00" → 21
     try:
         h = int(str(s).split("-")[0])
         return max(0, min(23, h))
@@ -125,18 +124,14 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     elif "hr_key" in out.columns:
         s = out["hr_key"].astype(str)
         dt = pd.to_datetime(s, errors="coerce")
-        # En yaygın kalıplar: 'YYYY-MM-DD HH', 'YYYY-MM-DD', 'YYYYMMDDHH', 'YYYYMMDD'
         if dt.notna().mean() <= 0.5:
-            # Temizle → sadece rakamlar
             z = s.str.replace(r"[^0-9]", "", regex=True)
-
             def _to_iso(z_):
                 if len(z_) >= 10:  # YYYYMMDDHH
                     return f"{z_[:4]}-{z_[4:6]}-{z_[6:8]} {z_[8:10]}:00:00"
                 if len(z_) >= 8:   # YYYYMMDD
                     return f"{z_[:4]}-{z_[4:6]}-{z_[6:8]} 00:00:00"
                 return None
-
             dt = pd.to_datetime(z.map(_to_iso), errors="coerce")
         out["date"] = dt
     else:
@@ -144,14 +139,12 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- 2) HOUR_RANGE türet/normalize ---
     if "hour_range" in out.columns:
-        # Unicode dash’leri normalize et
         hr_raw = (
             out["hour_range"]
             .astype(str)
-            .str.replace("\u2013", "-", regex=False)  # en dash
-            .str.replace("\u2014", "-", regex=False)  # em dash
+            .str.replace("\u2013", "-", regex=False)
+            .str.replace("\u2014", "-", regex=False)
         )
-        # Sadece "HH-HH" yakala
         hr = hr_raw.str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
         ok = hr.notna().all(axis=1)
 
@@ -160,7 +153,6 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
             h1 = pd.to_numeric(hr.loc[ok, 1], errors="coerce").fillna(0).astype(int) % 24
             out.loc[ok, "hour_range"] = h0.map("{:02d}".format) + "-" + h1.map("{:02d}".format)
 
-        # Regex’i tutmayanlar için event_hour’dan üret
         miss = ~ok
         if miss.any():
             if "event_hour" in out.columns:
@@ -180,7 +172,7 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
         out["hour_range"] = "00-03"
 
     return out
-      
+
 def ensure_date_hour_on_df_legacy(df: pd.DataFrame) -> pd.DataFrame:
     """(Gerekirse) eski çağrılar için isim değişmeden kalmış wrapper."""
     return ensure_date_hour_on_df(df)
@@ -227,15 +219,12 @@ class SpatialTargetEncoder(BaseEstimator, TransformerMixin):
         self.global_mean_ = None
 
     def _geo_series(self, X):
-        # Hem DataFrame hem ndarray destekle
         if isinstance(X, pd.DataFrame):
             if self.geo_col in X.columns:
                 return X[self.geo_col].astype(str)
-            # ColumnTransformer tek bir sütun seçince isim düşebilir → ilk sütunu al
             if X.shape[1] == 1:
                 return X.iloc[:, 0].astype(str)
             raise ValueError(f"{self.geo_col} kolonu bulunamadı ve çoklu sütun geldi.")
-        # ndarray yolu
         X = np.asarray(X)
         if X.ndim == 1:
             return pd.Series(X.ravel().astype(str))
@@ -249,12 +238,10 @@ class SpatialTargetEncoder(BaseEstimator, TransformerMixin):
         if len(s_geo) != len(y):
             raise ValueError("X ve y uzunlukları uyumsuz.")
 
-        # Grup istatistikleri
         grp = pd.DataFrame({"geo": s_geo, "y": y}).groupby("geo")["y"].agg(["sum", "count"])
         grp.columns = ["sum_y", "n"]
         self.global_mean_ = float(y.mean()) if len(y) else 0.5
 
-        # Komşuluk katkısı
         if self.neighbors_dict:
             sum_dict = grp["sum_y"].to_dict()
             n_dict   = grp["n"].to_dict()
@@ -292,7 +279,6 @@ def subset_last12m(df: pd.DataFrame, min_pos: int = 10_000) -> pd.DataFrame:
         return df
     sub = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=365))]
     if sub["Y_label"].sum() < min_pos:
-        # genişlet: 18 → 24 ay
         for months in (18, 24):
             sub2 = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=30*months))]
             if sub2["Y_label"].sum() >= min_pos:
@@ -306,12 +292,10 @@ def _normalize_geoid(s: pd.Series, target_len: int) -> pd.Series:
     return s.str[-target_len:].str.zfill(target_len)
 
 def _ensure_date_and_hour_legacy(df: pd.DataFrame) -> pd.DataFrame:
-    # Legacy inline converter for fr_crime_08 -> 09
     out = df.copy()
     if "GEOID" in out.columns:
         out["GEOID"] = _normalize_geoid(out["GEOID"], GEOID_LEN)
     out = ensure_date_hour_on_df(out)
-    # Impute numerics & cats softly
     count_cols = [c for c in out.columns if any(k in c.lower() for k in ["_count", "911_", "311_"])]
     for c in count_cols:
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
@@ -325,6 +309,7 @@ def _ensure_date_and_hour_legacy(df: pd.DataFrame) -> pd.DataFrame:
         out[c] = out[c].fillna(mode.iloc[0] if not mode.empty else "")
     return out
 
+# REV: 09 üretim fonksiyonları tutulabilir ama kullanılmayacak.
 def _make_fr_crime_09_inline():
     src = os.path.join(CRIME_DIR, "fr_crime_08.csv")
     dst = os.path.join(CRIME_DIR, "fr_crime_09.csv")
@@ -379,8 +364,7 @@ def find_leaky_numeric_features(df, feature_cols, y, corr_thr=0.995, auc_thr=0.9
     return sorted(leaky), details
 
 def build_preprocessor(count_features, num_features, cat_features) -> ColumnTransformer:
-    # GEOID varsa ayır: GEOID dışındaki kategoriler OHE, GEOID Spatial-TE (ENABLE_SPATIAL_TE=1 ise)
-    cat_features = list(cat_features)  # kopya
+    cat_features = list(cat_features)
     has_geo = GEO_COL_NAME in cat_features
 
     numeric_pipe_counts = Pipeline([
@@ -392,18 +376,16 @@ def build_preprocessor(count_features, num_features, cat_features) -> ColumnTran
     ])
 
     try:
-        # sklearn >= 1.2
         ohe = OneHotEncoder(
             handle_unknown="ignore",
-            sparse_output=False,   
-            min_frequency=100,     
-            dtype=np.float32,       
+            sparse_output=False,
+            min_frequency=100,
+            dtype=np.float32,
         )
     except TypeError:
-        # sklearn < 1.2
         ohe = OneHotEncoder(
             handle_unknown="ignore",
-            sparse=False,           
+            sparse=False,
             dtype=np.float32,
         )
 
@@ -420,16 +402,13 @@ def build_preprocessor(count_features, num_features, cat_features) -> ColumnTran
     neighbors_dict = _load_neighbors(NEIGHBOR_FILE) if (ENABLE_SPATIAL_TE and has_geo) else None
 
     if ENABLE_SPATIAL_TE and has_geo:
-        # GEOID → Spatial-TE
         transformers.append(
             ("geo_te", SpatialTargetEncoder(geo_col=GEO_COL_NAME, alpha=TE_ALPHA, neighbors_dict=neighbors_dict), [GEO_COL_NAME])
         )
-        # Diğer kategoriler OHE
         other_cats = [c for c in cat_features if c != GEO_COL_NAME]
         if other_cats:
             transformers.append(("cat", categorical_pipe_other, other_cats))
     else:
-        # Hepsi OHE
         if cat_features:
             transformers.append(("cat", categorical_pipe_other, cat_features))
 
@@ -441,10 +420,6 @@ def build_preprocessor(count_features, num_features, cat_features) -> ColumnTran
     return pre
 
 def build_preprocessor_forced(count_features, num_features, cat_features, use_spatial_te: bool) -> ColumnTransformer:
-    """
-    Mevcut global ENABLE_SPATIAL_TE değerini bozmadan, geçici olarak
-    (use_spatial_te ? 1 : 0) ile preprocessor üret.
-    """
     global ENABLE_SPATIAL_TE
     prev = ENABLE_SPATIAL_TE
     try:
@@ -456,10 +431,9 @@ def build_preprocessor_forced(count_features, num_features, cat_features, use_sp
 # -------------------- Models --------------------
 def base_estimators(class_weight_balanced=True):
     cw = "balanced" if class_weight_balanced else None
-    light = phase_is_select() or FAST_MODE  # hızlı modda hafif ayarlar
+    light = phase_is_select() or FAST_MODE
 
     ests = []
-    # Günlük hızlı modda yalnızca HGB + LGB (varsa)
     if ("hgb" in BASE_MODELS) or FAST_MODE:
         ests.append(("hgb", HistGradientBoostingClassifier(
             max_depth=6 if light else 8,
@@ -485,7 +459,6 @@ def base_estimators(class_weight_balanced=True):
             force_col_wise=True, verbosity=-1,
             objective="binary", class_weight=cw, n_jobs=-1, random_state=42
         )))
-    # Ağır modelleri **sadece** FAST_MODE kapalıyken ekle
     if not FAST_MODE:
         from sklearn.linear_model import LogisticRegression as LR
         from sklearn.linear_model import RidgeClassifier as RC
@@ -531,7 +504,6 @@ def make_cv(df: pd.DataFrame, folds_select: int = 3, folds_final: int = 5):
     return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42), None
 
 def cv_oof_and_metrics(pipes: dict, X: pd.DataFrame, y: pd.Series, cv, cv_jobs: int = 4):
-    # Manuel CV ile % ilerleme
     splits = list(cv.split(X, y))
     n_folds = len(splits)
     n_models = len(pipes)
@@ -556,7 +528,6 @@ def cv_oof_and_metrics(pipes: dict, X: pd.DataFrame, y: pd.Series, cv, cv_jobs: 
             done += 1
             print(f"Progress: {done}/{total} ({100.0*done/total:5.1f}%) — [{name}] fold {f_i}/{n_folds}")
 
-        # Model bazında OOF metrik
         proba = oof_probs[name]
         thr = optimal_threshold(y, proba)
         yhat = (proba >= thr).astype(int)
@@ -658,7 +629,8 @@ if __name__ == "__main__":
         if dataset_env:
             datasets = [dataset_env if os.path.isabs(dataset_env) else os.path.join(CRIME_DIR, dataset_env)]
         else:
-            datasets = [ensure_fr_crime_09()]
+            # REV: Varsayılan dataset doğrudan fr_crime_10.csv
+            datasets = [os.path.join(CRIME_DIR, "fr_crime_10.csv")]
 
     summary_rows = []
     all_metrics_concat = []
@@ -687,6 +659,8 @@ if __name__ == "__main__":
             strategy = os.getenv("SUBSET_STRATEGY", "last12m").lower()
             if strategy == "last12m":
                 df = subset_last12m(df, min_pos=min_pos)
+            elif strategy == "none":
+                pass
             after = df.shape
             print(f"🔧 Subset ({strategy}): {before} → {after} (pos={int(df['Y_label'].sum())})")
 
@@ -715,11 +689,10 @@ if __name__ == "__main__":
             counts = [c for c in counts if c not in sus]
             nums   = [c for c in nums   if c not in sus]
         feature_cols = list(dict.fromkeys(counts + nums + cats))
-      
+
         empty_cols = [c for c in feature_cols if (c in df.columns and df[c].isna().all())]
         if empty_cols:
             print(f"[CLEAN] Tamamen boş kolonlar atılıyor: {empty_cols}")
-
             counts = [c for c in counts if c not in empty_cols]
             nums   = [c for c in nums   if c not in empty_cols]
             cats   = [c for c in cats   if c not in empty_cols]
@@ -738,147 +711,122 @@ if __name__ == "__main__":
         base_pipes = {name: Pipeline([("prep", pre), ("clf", est)], memory=MEM) for name, est in base_list}
         cv, _ = make_cv(df)
 
-out_models = Path(CRIME_DIR) / "models"
-stack_any = list(out_models.glob("stacking_*.joblib"))
-thr_any   = list(out_models.glob("threshold_*.json"))
+        out_models = Path(CRIME_DIR) / "models"
+        stack_any = list(out_models.glob("stacking_*.joblib"))
+        thr_any   = list(out_models.glob("threshold_*.json"))
 
-if REUSE_MODELS and stack_any and thr_any:
-    # Mevcut modeli yükle ve **sadece skorla** (eğitim yok)
-    print("♻️ REUSE_MODELS=1 → Mevcut stacking modeli ile sadece skorlanıyor.")
-    from joblib import load
-    pre = load(out_models / "preprocessor.joblib")
-    base_pipes = load(out_models / "base_pipes.joblib")
-    stack_obj  = load(stack_any[0])
-    proba_cols = stack_obj["names"]
-    meta       = stack_obj["meta"]
-    thr        = json.loads((thr_any[0]).read_text())["threshold"]
+        # ---- Eğitim / Skorlama ----
+        reused = False
+        if REUSE_MODELS and stack_any and thr_any:
+            print("♻️ REUSE_MODELS=1 → Mevcut stacking modeli ile sadece skorlanıyor.")
+            from joblib import load
+            pre = load(out_models / "preprocessor.joblib")
+            base_pipes = load(out_models / "base_pipes.joblib")
+            stack_obj  = load(stack_any[0])
+            proba_cols = stack_obj["names"]
+            meta       = stack_obj["meta"]
+            try:
+                thr        = json.loads((thr_any[0]).read_text())["threshold"]
+            except Exception:
+                thr = 0.5  # REV: eşik bulunamazsa güvenli varsayılan
 
-    # Base proba matrisini hızlıca üret
-    mats = []
-    for name in proba_cols:
-        mdl = base_pipes[name]
-        if hasattr(mdl, "predict_proba"):
-            p = mdl.predict_proba(X)[:, 1]
-        else:
-            d = mdl.decision_function(X)
-            p = (d - d.min()) / (d.max() - d.min() + 1e-9)
-        mats.append(p.reshape(-1, 1))
-    Z_full = np.hstack(mats)
-    p_stack = meta.predict_proba(Z_full)[:, 1] if hasattr(meta, "predict_proba") else meta.decision_function(Z_full)
+            mats = []
+            for name in proba_cols:
+                mdl = base_pipes[name]
+                if hasattr(mdl, "predict_proba"):
+                    p = mdl.predict_proba(X)[:, 1]
+                else:
+                    d = mdl.decision_function(X)
+                    p = (d - d.min()) / (d.max() - d.min() + 1e-9)
+                mats.append(p.reshape(-1, 1))
+            Z_full = np.hstack(mats)
+            p_stack = meta.predict_proba(Z_full)[:, 1] if hasattr(meta, "predict_proba") else meta.decision_function(Z_full)
+            base_metrics = pd.DataFrame()
+            meta_metrics = pd.DataFrame()
+            reused = True
 
-    # CV/metrik üretimi atlanır (SKIP_CV)
-    base_metrics = pd.DataFrame()
-    meta_metrics = pd.DataFrame()
+        if not reused and SKIP_CV:
+            print("⚡ SKIP_CV=1 → CV/OOF atlanıyor; seçili baz modeller full-data ile fit ediliyor.")
+            MEM = Memory(location=os.path.join(CRIME_DIR, ".skcache"), verbose=0)
+            base_list  = base_estimators(class_weight_balanced=True)
+            base_pipes = {name: Pipeline([("prep", pre), ("clf", est)], memory=MEM) for name, est in base_list}
 
-else:
-    if SKIP_CV:
-        print("⚡ SKIP_CV=1 → CV/OOF atlanıyor; seçili baz modeller full-data ile fit ediliyor.")
-        MEM = Memory(location=os.path.join(CRIME_DIR, ".skcache"), verbose=0)
-        base_list  = base_estimators(class_weight_balanced=True)
-        base_pipes = {name: Pipeline([("prep", pre), ("clf", est)], memory=MEM) for name, est in base_list}
+            proba_cols, mats = [], []
+            for name, pipe in base_pipes.items():
+                pipe.fit(X, y)
+                if hasattr(pipe, "predict_proba"):
+                    p = pipe.predict_proba(X)[:, 1]
+                else:
+                    d = pipe.decision_function(X); p = (d - d.min())/(d.max()-d.min()+1e-9)
+                mats.append(p.reshape(-1,1)); proba_cols.append(name)
+            Z_full = np.hstack(mats)
 
-        proba_cols, mats = [], []
-        for name, pipe in base_pipes.items():
-            pipe.fit(X, y)
-            if hasattr(pipe, "predict_proba"):
-                p = pipe.predict_proba(X)[:, 1]
-            else:
-                d = pipe.decision_function(X); p = (d - d.min())/(d.max()-d.min()+1e-9)
-            mats.append(p.reshape(-1,1)); proba_cols.append(name)
-        Z_full = np.hstack(mats)
+            meta = LogisticRegression(max_iter=5000)
+            meta.fit(Z_full, y)
+            p_stack = meta.predict_proba(Z_full)[:, 1]
+            thr = optimal_threshold(y, p_stack)
 
-        # Meta: hızlı ve stabil
-        from sklearn.linear_model import LogisticRegression
-        meta = LogisticRegression(max_iter=5000)
-        meta.fit(Z_full, y)
-        p_stack = meta.predict_proba(Z_full)[:, 1]
+            out_models.mkdir(parents=True, exist_ok=True)
+            dump(pre, out_models / "preprocessor.joblib")
+            dump(base_pipes, out_models / "base_pipes.joblib")
+            dump({"names": proba_cols, "meta": meta}, out_models / "stacking_meta_logreg.joblib")
+            (out_models / "threshold_meta_logreg.json").write_text(json.dumps({"threshold": float(thr)}), encoding="utf-8")
+            base_metrics = pd.DataFrame()
+            meta_metrics = pd.DataFrame()
 
-        # Eşik: F1-optimal
-        thr = optimal_threshold(y, p_stack)
+        if not reused and not SKIP_CV:
+            print("\n🔎 Evaluating base + OOF (with progress)…")
+            base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(base_pipes, X, y, cv, cv_jobs=CV_JOBS)
+            meta_metrics = evaluate_meta_on_oof(Z, y)
+            best_row = meta_metrics.sort_values("pr_auc", ascending=False).iloc[0]
+            chosen_meta = "lgb" if ("LightGBM" in best_row["model"]) else "logreg"
+            meta_name, proba_cols, p_stack, thr = fit_full_models_and_export(base_pipes, pre, X, y, choose_meta=chosen_meta)
+            print(f"Saved models for {out_suffix}. Threshold ({meta_name}) = {thr:.4f}")
 
-        # Modelleri kaydet (gelecekte REUSE_MODELS ile skorlamak için)
-        out_models.mkdir(parents=True, exist_ok=True)
-        dump(pre, out_models / "preprocessor.joblib")
-        dump(base_pipes, out_models / "base_pipes.joblib")
-        dump({"names": proba_cols, "meta": meta}, out_models / "stacking_meta_logreg.joblib")
-        (out_models / "threshold_meta_logreg.json").write_text(json.dumps({"threshold": float(thr)}), encoding="utf-8")
-
-        base_metrics = pd.DataFrame()
-        meta_metrics = pd.DataFrame()
-    else:
-        # Ağır yol (eskinin aynısı); haftalık job’a bırakılmalı
-        print("\n🔎 Evaluating base + OOF (with progress)…")
-        base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(...)
-        meta_metrics = evaluate_meta_on_oof(Z, y)
-        best_row = meta_metrics.sort_values("pr_auc", ascending=False).iloc[0]
-        chosen_meta = "lgb" if ("LightGBM" in best_row["model"]) else "logreg"
-        meta_name, proba_cols, p_stack, thr = fit_full_models_and_export(base_pipes, pre, X, y, choose_meta=chosen_meta)
-      
-        print(f"Saved models for {out_suffix}. Threshold ({meta_name}) = {thr:.4f}")
-
-        # ---- Saatlik & Günlük risk tablolarını üret ve kaydet (robust)
+        # ---- Saatlik & Günlük risk tablolarını üret ve kaydet (her koşulda) ----
         _key_df = df.copy()
-        
-        # 1) DATE: güvenli parse + SF zamanı fallback
         _key_df["date"] = pd.to_datetime(_key_df.get("date", pd.NaT), errors="coerce").dt.date
         if _key_df["date"].isna().all():
-            # Tümü NaT ise, SF saat diliminde bugünün tarihini kullan
             fallback_date = pd.Timestamp.now(tz=FR_TZ).date()
             _key_df["date"] = fallback_date
-        # Yazarken string’e çevir (CSV uyumluluğu)
         _key_df["date"] = _key_df["date"].astype("string")
-        
-        # 2) HOUR_RANGE: önce event_hour (varsa), yoksa hour_range'tan saat başını çek
+
         if "event_hour" in _key_df.columns:
             h = pd.to_numeric(_key_df["event_hour"], errors="coerce")
         else:
             h = _key_df.get("hour_range", "").astype(str).str.extract(r"^(\d{1,2})")[0]
             h = pd.to_numeric(h, errors="coerce")
-        
-        # 0–23’e indir
+
         _key_df["hour_range"] = h.fillna(0).astype(int) % 24
-        
-        # 3) Sadece gereken kolonlar
-        _key_df = _key_df[["GEOID", "date", "hour_range"]].copy()
-        
-        # 3.1) Olasılıkları (p_stack) tekilleştirilecek anahtara hizala
+
         grp_cols = ["GEOID", "date", "hour_range"]
         _key_df["_row_id"] = np.arange(len(_key_df))
         g = _key_df.groupby(grp_cols)["_row_id"].apply(list).reset_index(name="_rows")
-        
-        # p_stack → pandas Seri (satır-id ile)
+
         p_series = pd.Series(p_stack, index=_key_df["_row_id"])
-        
-        # Her grup için ortalama olasılık (istersen 'max' da kullanabilirsin)
         p_agg = g["_rows"].map(lambda idxs: float(np.mean(p_series.loc[idxs])))
-        
-        # Tekil anahtarlar
+
         _key_unique = g[grp_cols].copy()
-        
-        # 4) Risk tablolarını oluştur (boyutlar artık uyumlu)
+
         hourly_df = build_hourly(_key_unique, proba=p_agg.to_numpy(), threshold=thr)
         daily_df  = build_daily_from_hourly(hourly_df, threshold=thr)
-        
-        # 5) Çıktıları suffix'li isimlerle yaz (çoklu dataset’te overwrite olmaz)
+
         hourly_path = Path(CRIME_DIR) / f"risk_hourly_grid_full_labeled{out_suffix}.csv"
         daily_path  = Path(CRIME_DIR) / f"risk_daily_grid_full_labeled{out_suffix}.csv"
-        
+
         hourly_df.to_csv(hourly_path, index=False)
         daily_df.to_csv(daily_path, index=False)
-        
-        # Parquet (opsiyonel, varsa yaz)
+
         try:
             hourly_df.to_parquet(hourly_path.with_suffix(".parquet"), index=False)
             daily_df.to_parquet(daily_path.with_suffix(".parquet"), index=False)
         except Exception:
             pass
-        
+
         print(f"✅ Hourly → {hourly_path} (rows={len(hourly_df)})")
         print(f"✅ Daily  → {daily_path}  (rows={len(daily_df)})")
-        
-        # Manifest için yollar (eğer kullanıyorsan)
+
         patrol_path = None
-        risk_hourly_path = str(hourly_path)
 
         try:
             types_path = optional_top_crime_types()
@@ -899,11 +847,9 @@ else:
         summary_rows.append({
             "dataset_path": data_path,
             "suffix": out_suffix,
-            "risk_hourly_csv": str(hourly_path),  
-            "risk_daily_csv":  str(daily_path),  
+            "risk_hourly_csv": str(hourly_path),
+            "risk_daily_csv":  str(daily_path),
             "patrol_recs_csv": patrol_path,
-            "metrics_base_csv": os.path.join(CRIME_DIR, f"metrics_base{out_suffix}.csv"),
-            "metrics_stacking_csv": os.path.join(CRIME_DIR, f"metrics_stacking{out_suffix}.csv"),
             "metrics_all_csv": os.path.join(CRIME_DIR, f"metrics_all{out_suffix}.csv")
         })
 
@@ -916,6 +862,5 @@ else:
     if all_metrics_concat:
         big = pd.concat(all_metrics_concat, ignore_index=True)
         big.to_csv(os.path.join(CRIME_DIR, "metrics_all_multi.csv"), index=False)
-        # Eski tek-dosya adıyla da bir kopya üret (uyumluluk için)
         big.to_csv(os.path.join(CRIME_DIR, "metrics_all.csv"), index=False)
         print("🧾 metrics_all_multi.csv ve metrics_all.csv yazıldı")
