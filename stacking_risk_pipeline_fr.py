@@ -26,7 +26,7 @@ from sklearn.base import clone, BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_selection import VarianceThreshold, SelectFromModel
 from sklearn.impute import SimpleImputer
-from sklearn.linear import LogisticRegression, RidgeClassifier
+from sklearn.linear_model import LogisticRegression, RidgeClassifier
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, average_precision_score, precision_recall_curve,
