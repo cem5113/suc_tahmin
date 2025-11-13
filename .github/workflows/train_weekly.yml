@@ -36,12 +36,8 @@ jobs:
       TE_ALPHA: "50"
       NEIGHBOR_FILE: ${{ github.workspace }}/crime_prediction_data/neighbors.csv
 
-      # Stacking dataset(ler)i (dosya isimleri repo düzenine göre)
-      STACKING_DATASETS: |
-        ${{ github.workspace }}/crime_prediction_data/fr_crime_09.csv,
-        ${{ github.workspace }}/crime_prediction_data/fr_crime_Q1.csv,
-        ${{ github.workspace }}/crime_prediction_data/fr_crime_Q1Q2.csv
-      STACKING_DATASET:  ${{ github.workspace }}/crime_prediction_data/fr_crime.csv
+      # Tek stacking dataset → fr_crime_10.csv (yoksa 09'dan kopyalanacak)
+      STACKING_DATASET:  ${{ github.workspace }}/crime_prediction_data/fr_crime_10.csv
 
       # Seçim fazı altküme stratejisi
       SUBSET_STRATEGY: "last12m"
@@ -117,13 +113,13 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           # Beklenen ana dosyalar varsa CRIME_DATA_DIR altına kopyala
-          for f in fr_crime.csv fr_crime_09.csv fr_crime_Q1.csv fr_crime_Q1Q2.csv sf_crime_grid_full_labeled.csv neighbors.csv; do
+          for f in fr_crime.csv fr_crime_09.csv fr_crime_10.csv sf_crime_grid_full_labeled.csv neighbors.csv; do
             if [ -f "${SRC_DIR}/${f}" ] && [ ! -f "${DST_DIR}/${f}" ]; then
               cp -v "${SRC_DIR}/${f}" "${DST_DIR}/${f}"
             fi
           done
-          # Alt dizinlerde ise bul-kopyala
-          for f in fr_crime.csv fr_crime_09.csv fr_crime_Q1.csv fr_crime_Q1Q2.csv; do
+          # Alt dizinlerde ise bul-kopyala (eski pipeline varyasyonları için)
+          for f in fr_crime.csv fr_crime_09.csv fr_crime_10.csv; do
             if [ ! -f "${DST_DIR}/${f}" ]; then
               hit="$(find "${SRC_DIR}" -type f -name "${f}" | head -n1 || true)"
               if [ -n "${hit}" ]; then
@@ -131,6 +127,11 @@ jobs:
               fi
             fi
           done
+          # Eğer fr_crime_10.csv yok ama fr_crime_09.csv varsa → 09'dan üret
+          if [ ! -f "${DST_DIR}/fr_crime_10.csv" ] && [ -f "${DST_DIR}/fr_crime_09.csv" ]; then
+            echo "ℹ️ fr_crime_10.csv yok, fr_crime_09.csv'den kopyalanıyor."
+            cp -v "${DST_DIR}/fr_crime_09.csv" "${DST_DIR}/fr_crime_10.csv"
+          fi
           ls -lah "${DST_DIR}" || true
 
       - name: Optional — generate neighbors if missing
@@ -169,7 +170,6 @@ jobs:
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN: ${{ env.GEOID_LEN }}
-          STACKING_DATASETS: ${{ env.STACKING_DATASETS }}
           STACKING_DATASET:  ${{ env.STACKING_DATASET }}
           ENABLE_SPATIAL_TE: ${{ steps.ste.outputs.enable }}
           TE_ALPHA: ${{ env.TE_ALPHA }}
@@ -192,7 +192,6 @@ jobs:
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           GEOID_LEN: ${{ env.GEOID_LEN }}
-          STACKING_DATASETS: ${{ env.STACKING_DATASETS }}
           STACKING_DATASET:  ${{ env.STACKING_DATASET }}
           ENABLE_SPATIAL_TE: ${{ steps.ste.outputs.enable }}
           TE_ALPHA: ${{ env.TE_ALPHA }}
