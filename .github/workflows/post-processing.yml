@@ -294,7 +294,8 @@ jobs:
         env:
           FEATURE_DATASET: ${{ env.CRIME_DATA_DIR }}/fr_crime_10.csv
           OUTPUT_DIR:      ${{ env.CRIME_DATA_DIR }}
-          DISABLE_QUARTILES: "1"   # Q1–Q4 tamamen kapalı
+          DISABLE_QUARTILES: "1"
+          CRIME_CSV_FR:    ${{ env.CRIME_DATA_DIR }}/fr_crime_10.csv   # 🔹 eklendi
         run: |
           set -euo pipefail
           if [ -f run_feature_analysis_fr.py ]; then PY=run_feature_analysis_fr.py
