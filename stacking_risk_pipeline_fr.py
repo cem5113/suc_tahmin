@@ -391,11 +391,22 @@ def build_preprocessor(count_features, num_features, cat_features) -> ColumnTran
         ("scaler", StandardScaler(with_mean=True, with_std=True)),
     ])
 
-    # OHE: nadir kategori birleştirme destekli (mümkünse)
+    # OHE: RAM-dostu, sparse + float32, nadir kategorileri birleştiren
     try:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False, min_frequency=50)
+        # sklearn >= 1.2
+        ohe = OneHotEncoder(
+            handle_unknown="ignore",
+            sparse_output=True,     # ❗ dense üretme
+            min_frequency=100,      # nadir kategorileri grupla → kolon sayısı düşer
+            dtype=np.float32,       # 8 byte yerine 4 byte
+        )
     except TypeError:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
+        # sklearn < 1.2
+        ohe = OneHotEncoder(
+            handle_unknown="ignore",
+            sparse=True,            # ❗ eski API'de sparse=True
+            dtype=np.float32,
+        )
 
     categorical_pipe_other = Pipeline([
         ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -696,23 +707,26 @@ if __name__ == "__main__":
                     df[col] = pd.to_numeric(m.fillna(df[col]), errors="coerce")
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-        sus, info = find_leaky_numeric_features(df, list(dict.fromkeys(counts+nums+cats)), df["Y_label"].astype(int))
+        sus, info = find_leaky_numeric_features(
+            df,
+            list(dict.fromkeys(counts + nums + cats)),
+            df["Y_label"].astype(int)
+        )
         if sus:
             counts = [c for c in counts if c not in sus]
             nums   = [c for c in nums   if c not in sus]
-
-        # ⬇️ Tamamen boş kalan özellikleri (tümü NaN) günlük koşumda sessizce çıkar
-        # Not: önce mevcut adaylardan geçici feature listesi oluşturuyoruz
-        _feature_cols_tmp = list(dict.fromkeys(counts + nums + cats))
-        empty_cols = [c for c in _feature_cols_tmp if (c in df.columns and df[c].isna().all())]
+        feature_cols = list(dict.fromkeys(counts + nums + cats))
+      
+        empty_cols = [c for c in feature_cols if (c in df.columns and df[c].isna().all())]
         if empty_cols:
+            print(f"[CLEAN] Tamamen boş kolonlar atılıyor: {empty_cols}")
+
             counts = [c for c in counts if c not in empty_cols]
             nums   = [c for c in nums   if c not in empty_cols]
             cats   = [c for c in cats   if c not in empty_cols]
+            feature_cols = [c for c in feature_cols if c not in empty_cols]
 
-        # Boşlar temizlendikten sonra preprocessor ve nihai feature listesi
         pre = build_preprocessor(counts, nums, cats)
-        feature_cols = list(dict.fromkeys(counts + nums + cats))
         X = df[feature_cols].copy()
 
         num_like = [c for c in feature_cols if (c in counts) or (c in nums)]
