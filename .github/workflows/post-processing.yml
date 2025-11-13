@@ -255,25 +255,6 @@ jobs:
           path: ${{ env.CRIME_DATA_DIR }}/models
           if_no_artifact_found: ignore
 
-      - name: Gate (always proceed)
-        id: gate
-        run: echo "proceed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Decide if training is needed (models present?)
-        id: need_train
-        shell: bash
-        env:
-          MODELS_DIR: ${{ env.CRIME_DATA_DIR }}/models
-          REUSE_MODELS: ${{ env.REUSE_MODELS }}
-        run: |
-          set -euo pipefail
-          NEED="true"
-          if [ "${REUSE_MODELS:-1}" = "1" ] && [ -d "${MODELS_DIR}" ] && ls "${MODELS_DIR}"/stacking_*.joblib >/dev/null 2>&1; then
-            NEED="false"
-          fi
-          echo "need=${NEED}" >> "$GITHUB_OUTPUT"
-          echo "NEED_TRAIN=${NEED}"
-
       # ─────────────────────────────────────────────────────────
       # FR 09.5 — Son özellik setini hazırla (fr_crime_10.csv)
       #  - Varsa scripts/build_fr_crime_10.py çalışır
