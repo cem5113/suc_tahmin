@@ -391,20 +391,19 @@ def build_preprocessor(count_features, num_features, cat_features) -> ColumnTran
         ("scaler", StandardScaler(with_mean=True, with_std=True)),
     ])
 
-    # OHE: RAM-dostu, sparse + float32, nadir kategorileri birleştiren
     try:
         # sklearn >= 1.2
         ohe = OneHotEncoder(
             handle_unknown="ignore",
-            sparse_output=True,     # ❗ dense üretme
-            min_frequency=100,      # nadir kategorileri grupla → kolon sayısı düşer
-            dtype=np.float32,       # 8 byte yerine 4 byte
+            sparse_output=False,   
+            min_frequency=100,     
+            dtype=np.float32,       
         )
     except TypeError:
         # sklearn < 1.2
         ohe = OneHotEncoder(
             handle_unknown="ignore",
-            sparse=True,            # ❗ eski API'de sparse=True
+            sparse=False,           
             dtype=np.float32,
         )
 
