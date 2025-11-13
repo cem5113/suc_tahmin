@@ -402,6 +402,92 @@ jobs:
           test -f "${CRIME_DATA_DIR}/risk_daily_grid_full_labeled.csv"
           echo "✅ risk CSV’leri mevcut."
 
+      - name: FR 13) Build 2 ZIPs with EXACT files
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          ARTIFACT_DIR:   ${{ env.ARTIFACT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, sys, zipfile
+          from pathlib import Path
+          import pandas as pd
+
+          base  = Path(os.environ.get("CRIME_DATA_DIR","crime_prediction_data")).expanduser().resolve()
+          extra = Path(os.environ.get("ARTIFACT_DIR","artifact")).expanduser().resolve()
+          base.mkdir(parents=True, exist_ok=True)
+          extra.mkdir(parents=True, exist_ok=True)
+
+          WANT = [
+              "fr_crime_09.csv","fr_crime_09.parquet",
+              "risk_hourly_grid_full_labeled.csv","risk_hourly_grid_full_labeled.parquet",
+              "risk_daily_grid_full_labeled.csv","risk_daily_grid_full_labeled.parquet",
+              "metrics_stacking.csv","metrics_stacking.parquet",
+              "metrics_all.csv","metrics_all.parquet",
+              "stacking_manifest.csv","stacking_manifest.parquet",
+          ]
+
+          def rglob_many(root: Path, pat: str):
+              return [p for p in root.rglob(pat) if p.is_file()]
+
+          def find_first(name: str):
+              for root in (base, extra):
+                  hits = rglob_many(root, name)
+                  if hits: return hits[0]
+              return None
+
+          sel=[]
+          for name in WANT:
+              p = find_first(name)
+              if p is None: continue
+              if "fr_crime_10" in p.name: continue
+              sel.append(p)
+
+          # eksik olan eş dosyaları dönüştür
+          pairs=[("risk_hourly_grid_full_labeled.csv","risk_hourly_grid_full_labeled.parquet"),
+                 ("risk_daily_grid_full_labeled.csv","risk_daily_grid_full_labeled.parquet"),
+                 ("fr_crime_09.csv","fr_crime_09.parquet"),
+                 ("metrics_stacking.csv","metrics_stacking.parquet"),
+                 ("metrics_all.csv","metrics_all.parquet")]
+          for csvn, pqn in pairs:
+              csvp, pqp = find_first(csvn), find_first(pqn)
+              if csvp and not pqp:
+                  try:
+                      df = pd.read_csv(csvp, low_memory=False)
+                      pqp = csvp.with_suffix(".parquet")
+                      df.to_parquet(pqp, index=False)
+                      sel.append(pqp)
+                  except Exception as e:
+                      print(f"[WARN] parquet üretilemedi: {e}", file=sys.stderr)
+              if pqp and not csvp:
+                  try:
+                      df = pd.read_parquet(pqp)
+                      csvp = pqp.with_suffix(".csv")
+                      df.to_csv(csvp, index=False)
+                      sel.append(csvp)
+                  except Exception as e:
+                      print(f"[WARN] csv üretilemedi: {e}", file=sys.stderr)
+
+          out_csv_zip = base / "fr_csv_outputs.zip"
+          out_pq_zip  = base / "fr_parquet_outputs.zip"
+
+          with zipfile.ZipFile(out_csv_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              for p in sel:
+                  if p.suffix.lower()==".csv":
+                      z.write(p, arcname=str(p.relative_to(base) if str(p).startswith(str(base)) else p.name))
+                      print(f"+ CSV: {p}")
+          print(f"✅ CSV ZIP: {out_csv_zip}")
+
+          with zipfile.ZipFile(out_pq_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              for p in sel:
+                  if p.suffix.lower()==".parquet":
+                      z.write(p, arcname=str(p.relative_to(base) if str(p).startswith(str(base)) else p.name))
+                      print(f"+ PQ: {p}")
+          print(f"✅ Parquet ZIP: {out_pq_zip}")
+          PY
+
       - name: Upload FR outputs (CSV ZIP)
         uses: actions/upload-artifact@v4
         with:
