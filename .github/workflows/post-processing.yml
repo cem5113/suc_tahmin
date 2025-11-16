@@ -108,6 +108,10 @@ jobs:
           ARTIFACT_DIR:   ${{ env.ARTIFACT_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
           FALLBACK_DIRS:  ${{ env.FALLBACK_DIRS }}
+
+          # 🔽 BURASI YENİ: sf_crime_y.csv ve sf_crime_L.csv artifact içinden gelsin
+          FR_EVENTS_PATH: ${{ env.ARTIFACT_DIR }}/sf_crime_y.csv
+          FR_LABEL_PATH:  ${{ env.ARTIFACT_DIR }}/sf_crime_L.csv
         shell: bash
         run: |
           set -euo pipefail
