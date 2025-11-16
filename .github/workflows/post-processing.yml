@@ -326,6 +326,51 @@ jobs:
           fi
           python -u "$PY"
 
+      - name: FR 11) Forecasts (24h / 7gün / 365gün)
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/forecast_fr.py ]; then
+            PY=scripts/forecast_fr.py
+          else
+            echo "❌ scripts/forecast_fr.py bulunamadı."
+            exit 1
+          fi
+          python -u "$PY"
+
+      - name: FR 12) SHAP (XGBoost global feature importance)
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/shap_fr.py ]; then
+            PY=scripts/shap_fr.py
+          else
+            echo "❌ scripts/shap_fr.py bulunamadı."
+            exit 1
+          fi
+          python -u "$PY"
+
+      - name: FR 13) GEOID / Zaman / Suç türü raporları
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f scripts/fr_reports_geo_time_crime.py ]; then
+            PY=scripts/fr_reports_geo_time_crime.py
+          else
+            echo "❌ scripts/fr_reports_geo_time_crime.py bulunamadı."
+            exit 1
+          fi
+          python -u "$PY"
+
       - name: Upload FR outputs (CSV ZIP)
         uses: actions/upload-artifact@v4
         with:
