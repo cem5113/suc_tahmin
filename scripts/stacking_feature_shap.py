@@ -84,13 +84,20 @@ def main() -> None:
     raw_path = base_dir / "fr_crime_09.csv"
     clean_path = output_dir / "fr_crime_09_clean.csv"
 
-    # sf_cells.geojson yolu
-    sf_cells_path_env = os.environ.get("SF_CELLS_PATH", "")
+    sf_cells_path_env = os.environ.get("SF_CELLS_PATH", "").strip()
+
     if sf_cells_path_env:
-        shp_path = Path(sf_cells_path_env).resolve()
+        cand = Path(sf_cells_path_env)
+
+        # Eğer absolute değilse, CRIME_DATA_DIR altında kabul et
+        if not cand.is_absolute():
+            cand = base_dir / cand
+
+        shp_path = cand.resolve()
+
     else:
-        # varsayılan: CRIME_DATA_DIR içinde sf_cells.geojson
-        shp_path = base_dir / "sf_cells.geojson"
+        # Varsayılan: CRIME_DATA_DIR/sf_cells.geojson
+        shp_path = (base_dir / "sf_cells.geojson").resolve()
 
     print("📂 CRIME_DATA_DIR :", base_dir)
     print("📂 FR_OUTPUT_DIR  :", output_dir)
@@ -98,10 +105,17 @@ def main() -> None:
     print("📄 CLEAN_PATH     :", clean_path)
     print("🗺  SF_CELLS_PATH :", shp_path)
 
+    # Dosya kontrolleri
     if not raw_path.exists():
         raise FileNotFoundError(f"❌ fr_crime_09.csv bulunamadı: {raw_path}")
+
     if not shp_path.exists():
-        raise FileNotFoundError(f"❌ sf_cells.geojson bulunamadı: {shp_path}")
+        raise FileNotFoundError(
+            f"❌ sf_cells.geojson bulunamadı.\n"
+            f"   Denenen yol: {shp_path}\n"
+            f"   Çözüm: SF_CELLS_PATH ortam değişkenini ayarla veya "
+            f"CRIME_DATA_DIR/sf_cells.geojson dosyasını yerleştir."
+        )
 
     # ============================================================
     # 1) CSV TEMİZLEME → fr_crime_09_clean.csv
