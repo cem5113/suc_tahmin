@@ -312,7 +312,8 @@ jobs:
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
-          SF_CELLS_PATH:  ${{ env.CRIME_DATA_DIR }}/sf_cells.geojson
+          # sf_cells.geojson repo kökünde (main'de)
+          SF_CELLS_PATH:  ${{ github.workspace }}/sf_cells.geojson
           FR_ML_DAYS:     "365"
           FR_NEG_FRAC:    "0.3"
         shell: bash
