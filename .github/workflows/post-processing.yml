@@ -310,16 +310,16 @@ jobs:
 
       - name: FR 10) Stacking + Feature + SHAP (fr_crime_09)
         env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}        # örn: $GITHUB_WORKSPACE/crime_prediction_data
-          FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}         # yoksa env’de tanımla, mesela $GITHUB_WORKSPACE/fr_outputs
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
           SF_CELLS_PATH:  ${{ env.CRIME_DATA_DIR }}/sf_cells.geojson
-          FR_ML_DAYS:     "365"                            # istersen override
+          FR_ML_DAYS:     "365"
           FR_NEG_FRAC:    "0.3"
         shell: bash
         run: |
           set -euo pipefail
           if [ -f scripts/stacking_feature_shap.py ]; then
-            PY=stacking_feature_shap.py
+            PY=scripts/stacking_feature_shap.py
           else
             echo "❌ stacking_feature_shap.py bulunamadı."
             exit 1
