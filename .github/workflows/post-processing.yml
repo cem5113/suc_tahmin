@@ -318,10 +318,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f scripts/stacking_feature_shap_fr09.py ]; then
-            PY=scripts/stacking_feature_shap_fr09.py
+          if [ -f scripts/stacking_feature_shap.py ]; then
+            PY=stacking_feature_shap.py
           else
-            echo "❌ stacking_feature_shap_fr09.py bulunamadı."
+            echo "❌ stacking_feature_shap.py bulunamadı."
             exit 1
           fi
           python -u "$PY"
