@@ -56,3 +56,5 @@ PyGithub==2.3.0
 # EXCEL OUTPUT
 # ----------------------------
 openpyxl>=3.1.0
+
+matplotlib>=3.8.0 
