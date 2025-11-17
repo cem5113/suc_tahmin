@@ -376,6 +376,42 @@ jobs:
           fi
           python -u "$PY"
 
+      - name: FR 14) Pack FR CSV & Parquet outputs (ZIP)
+        env:
+          FR_OUTPUT_DIR: ${{ env.FR_OUTPUT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$FR_OUTPUT_DIR"
+
+          echo "📦 FR CSV ve Parquet çıktıları zipleniyor..."
+          
+          rm -f fr_csv_outputs.zip fr_parquet_outputs.zip || true
+
+          # --- CSV ZIP ---
+          csv_list=$(ls fr_*.csv risk_*.csv shap_feature_importance_fr*.csv fr_report_*.csv 2>/dev/null || true)
+          if [ -n "$csv_list" ]; then
+            echo "🔎 CSV dosyaları bulundu:"
+            echo "$csv_list"
+            zip -r fr_csv_outputs.zip $csv_list
+          else
+            echo "⚠️ CSV bulunamadı, bilgi amaçlı küçük bir dosya ile zip oluşturuluyor."
+            echo "No CSV outputs produced in this FR run." > fr_csv_outputs_info.txt
+            zip fr_csv_outputs.zip fr_csv_outputs_info.txt
+          fi
+
+          # --- PARQUET ZIP ---
+          pq_list=$(ls fr_*.parquet risk_*.parquet 2>/dev/null || true)
+          if [ -n "$pq_list" ]; then
+            echo "🔎 Parquet dosyaları bulundu:"
+            echo "$pq_list"
+            zip -r fr_parquet_outputs.zip $pq_list
+          else
+            echo "⚠️ Parquet bulunamadı, bilgi amaçlı küçük bir dosya ile zip oluşturuluyor."
+            echo "No Parquet outputs produced in this FR run." > fr_parquet_outputs_info.txt
+            zip fr_parquet_outputs.zip fr_parquet_outputs_info.txt
+          fi
+
       - name: Upload FR outputs (CSV ZIP)
         uses: actions/upload-artifact@v4
         with:
