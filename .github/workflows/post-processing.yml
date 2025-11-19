@@ -432,11 +432,9 @@ jobs:
               pqf="${csvf%.csv}.parquet"
               if [ ! -f "$pqf" ]; then
                 echo "➡ Parquet üretiliyor: $csvf → $pqf"
-                python3 - <<EOF
-                import pandas as pd
-                df = pd.read_csv("$csvf")
-                df.to_parquet("$pqf", index=False)
-                EOF
+                python3 -c "import pandas as pd, sys; \
+                csvf=sys.argv[1]; pqf=sys.argv[2]; \
+                df=pd.read_csv(csvf); df.to_parquet(pqf, index=False)" "$csvf" "$pqf"
               fi
             fi
           done
