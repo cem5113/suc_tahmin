@@ -400,6 +400,22 @@ jobs:
             zip fr_csv_outputs.zip fr_csv_outputs_info.txt
           fi
 
+          # --- EXTRA: CSV → Parquet dönüştür (eksik parquetler için) ---
+          echo "📌 CSV dosyalarının Parquet versiyonları oluşturuluyor..."
+          for csvf in fr_*.csv risk_*.csv shap_feature_importance_fr*.csv fr_report_*.csv; do
+            if [ -f "$csvf" ]; then
+              pqf="${csvf%.csv}.parquet"
+              if [ ! -f "$pqf" ]; then
+                echo "➡ Parquet üretiliyor: $csvf → $pqf"
+                python3 - <<EOF
+                import pandas as pd
+                df = pd.read_csv("$csvf")
+                df.to_parquet("$pqf", index=False)
+                EOF
+              fi
+            fi
+          done
+
           # --- PARQUET ZIP ---
           pq_list=$(ls fr_*.parquet risk_*.parquet 2>/dev/null || true)
           if [ -n "$pq_list" ]; then
