@@ -326,7 +326,7 @@ jobs:
           BASE_MODELS: "hgb,lgb"
           FOLDS_SELECT: "2"
           PATROL_HORIZON_DAYS: "1"
-          STACKING_DATASET: "fr_crime_10.csv"   # Q1–Q4 iptal → ana dataset
+          STACKING_DATASET: "fr_crime_10_FA.csv"  
         shell: bash
         run: |
           set -euo pipefail
