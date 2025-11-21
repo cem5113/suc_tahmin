@@ -1,4 +1,4 @@
-# scripts/make_fr_crime_10.py
+# scripts/make_fr_crime_10_FA.py
 import os
 from pathlib import Path
 import pandas as pd
@@ -69,7 +69,7 @@ def build_fr_10(df: pd.DataFrame) -> pd.DataFrame:
 def main():
     df9 = read_fr_09()
     out = build_fr_10(df9)
-    out_path = BASE / "fr_crime_10.parquet"
+    out_path = BASE / "fr_crime_10_FA.parquet"
     out.to_parquet(out_path, index=False)
     print(f"✅ yazıldı: {out_path} | satır: {len(out)}")
 
