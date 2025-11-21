@@ -59,6 +59,14 @@ REUSE_MODELS   = _env_flag("REUSE_MODELS", default=True)# Varsa mevcut modelleri
 FOLDS_SELECT   = int(os.getenv("FOLDS_SELECT", "2"))    # Select fazında 2 fold yeterli
 BASE_MODELS    = os.getenv("BASE_MODELS", "hgb,lgb").split(",")  # Günlük set
 
+# ============================================================
+# 🔥 OUT-OF-TIME TRAIN/SCORE AYRIMI (in-sample'ı kırar)
+# ============================================================
+USE_OOT_SPLIT      = _env_flag("USE_OOT_SPLIT", default=True)  # 1 ise train/score split aktif
+TRAIN_CUTOFF_DATE  = os.getenv("TRAIN_CUTOFF_DATE", "").strip()  # "YYYY-MM-DD" (boşsa otomatik)
+SCORE_HORIZON_DAYS = int(os.getenv("SCORE_HORIZON_DAYS", str(HORIZON_DAYS)))  # default PATROL_HORIZON_DAYS
+MIN_TRAIN_DAYS     = int(os.getenv("MIN_TRAIN_DAYS", "365"))  # güvenlik: en az 1 yıl train
+
 def _suffix_from_dataset(path: str) -> str:
     """Çıktı dosya adlarına sonek üretimi (Q1..Q4 kaldırıldı)."""
     try:
@@ -652,6 +660,36 @@ if __name__ == "__main__":
         if "Y_label" not in df.columns:
             raise ValueError(f"{data_path} içinde Y_label kolonu yok.")
         df = ensure_date_hour_on_df(df)
+        
+        # ============================================================
+        # ✅ Train/Score split (out-of-time)
+        # ============================================================
+        if USE_OOT_SPLIT and "date" in df.columns and df["date"].notna().any():
+            df["_dt"] = pd.to_datetime(df["date"], errors="coerce")
+            dmax = df["_dt"].max()
+        
+            if TRAIN_CUTOFF_DATE:
+                cutoff = pd.to_datetime(TRAIN_CUTOFF_DATE)
+            else:
+                # otomatik: son tarihten horizon kadar gerisi train cutoff
+                cutoff = dmax - pd.Timedelta(days=SCORE_HORIZON_DAYS)
+        
+            # güvenlik: train çok küçük kalmasın
+            min_cut = dmax - pd.Timedelta(days=max(MIN_TRAIN_DAYS, SCORE_HORIZON_DAYS+1))
+            cutoff = max(cutoff, min_cut)
+        
+            train_df = df[df["_dt"] <= cutoff].copy()
+            score_df = df[df["_dt"] > cutoff].copy()
+        
+            if score_df.empty:
+                # en azından 1 horizon olsun
+                score_df = df[df["_dt"] > (dmax - pd.Timedelta(days=1))].copy()
+        
+            print(f"🧊 OOT split aktif | cutoff={cutoff.date()} | train={train_df.shape} | score={score_df.shape}")
+        else:
+            train_df = df.copy()
+            score_df = df.copy()
+            print("🧊 OOT split pasif → train=score=df (in-sample risk üretir!)")
 
         if phase_is_select():
             before = df.shape
@@ -724,12 +762,16 @@ if __name__ == "__main__":
             feature_cols = [c for c in feature_cols if c not in empty_cols]
           
         pre = build_preprocessor(counts, nums, cats)
-        X = df[feature_cols].copy()
-
+        
+        train_X = train_df[feature_cols].copy()
+        score_X = score_df[feature_cols].copy()
+        
         num_like = [c for c in feature_cols if (c in counts) or (c in nums)]
         if num_like:
-            X[num_like] = X[num_like].apply(pd.to_numeric, errors="coerce").astype(np.float32)
-        y = df["Y_label"].astype(int)
+            train_X[num_like] = train_X[num_like].apply(pd.to_numeric, errors="coerce").astype(np.float32)
+            score_X[num_like] = score_X[num_like].apply(pd.to_numeric, errors="coerce").astype(np.float32)
+        
+        train_y = train_df["Y_label"].astype(int)
 
         MEM = Memory(location=os.path.join(CRIME_DIR, ".skcache"), verbose=0)
         base_list = base_estimators(class_weight_balanced=True)
@@ -754,18 +796,19 @@ if __name__ == "__main__":
                 thr        = json.loads((thr_any[0]).read_text())["threshold"]
             except Exception:
                 thr = 0.5  # REV: eşik bulunamazsa güvenli varsayılan
-
+            
             mats = []
             for name in proba_cols:
                 mdl = base_pipes[name]
                 if hasattr(mdl, "predict_proba"):
-                    p = mdl.predict_proba(X)[:, 1]
+                    p = mdl.predict_proba(score_X)[:, 1]
                 else:
-                    d = mdl.decision_function(X)
+                    d = mdl.decision_function(score_X)
                     p = (d - d.min()) / (d.max() - d.min() + 1e-9)
                 mats.append(p.reshape(-1, 1))
             Z_full = np.hstack(mats)
             p_stack = meta.predict_proba(Z_full)[:, 1] if hasattr(meta, "predict_proba") else meta.decision_function(Z_full)
+
             base_metrics = pd.DataFrame()
             meta_metrics = pd.DataFrame()
             reused = True
@@ -778,18 +821,32 @@ if __name__ == "__main__":
 
             proba_cols, mats = [], []
             for name, pipe in base_pipes.items():
-                pipe.fit(X, y)
+                pipe.fit(train_X, train_y)
                 if hasattr(pipe, "predict_proba"):
-                    p = pipe.predict_proba(X)[:, 1]
+                    p = pipe.predict_proba(score_X)[:, 1]
                 else:
-                    d = pipe.decision_function(X); p = (d - d.min())/(d.max()-d.min()+1e-9)
+                    d = pipe.decision_function(score_X); p = (d - d.min())/(d.max()-d.min()+1e-9)
                 mats.append(p.reshape(-1,1)); proba_cols.append(name)
             Z_full = np.hstack(mats)
-
+            
             meta = LogisticRegression(max_iter=5000)
-            meta.fit(Z_full, y)
+            meta.fit(
+                np.column_stack([
+                    base_pipes[n].predict_proba(train_X)[:,1] if hasattr(base_pipes[n],"predict_proba")
+                    else (base_pipes[n].decision_function(train_X))
+                    for n in proba_cols
+                ]),
+                train_y
+            )
+            
             p_stack = meta.predict_proba(Z_full)[:, 1]
-            thr = optimal_threshold(y, p_stack)
+            thr = optimal_threshold(train_y, meta.predict_proba(
+                np.column_stack([
+                    base_pipes[n].predict_proba(train_X)[:,1] if hasattr(base_pipes[n],"predict_proba")
+                    else (base_pipes[n].decision_function(train_X))
+                    for n in proba_cols
+                ])
+            )[:,1])
 
             out_models.mkdir(parents=True, exist_ok=True)
             dump(pre, out_models / "preprocessor.joblib")
@@ -801,11 +858,31 @@ if __name__ == "__main__":
 
         if not reused and not SKIP_CV:
             print("\n🔎 Evaluating base + OOF (with progress)…")
-            base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(base_pipes, X, y, cv, cv_jobs=CV_JOBS)
-            meta_metrics = evaluate_meta_on_oof(Z, y)
+            base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(base_pipes, train_X, train_y, cv, cv_jobs=CV_JOBS)
+            meta_metrics = evaluate_meta_on_oof(Z, train_y)
+            
             best_row = meta_metrics.sort_values("pr_auc", ascending=False).iloc[0]
             chosen_meta = "lgb" if ("LightGBM" in best_row["model"]) else "logreg"
-            meta_name, proba_cols, p_stack, thr = fit_full_models_and_export(base_pipes, pre, X, y, choose_meta=chosen_meta)
+            
+            meta_name, proba_cols, _, thr = fit_full_models_and_export(base_pipes, pre, train_X, train_y, choose_meta=chosen_meta)
+            
+            # eğitilen full modellerle SCORE setini tahmin et
+            mats = []
+            for name in proba_cols:
+                mdl = base_pipes[name]
+                if hasattr(mdl, "predict_proba"):
+                    p = mdl.predict_proba(score_X)[:, 1]
+                else:
+                    d = mdl.decision_function(score_X)
+                    p = (d - d.min())/(d.max()-d.min()+1e-9)
+                mats.append(p.reshape(-1,1))
+            Z_full = np.hstack(mats)
+            
+            from joblib import load
+            stack_obj = load(Path(CRIME_DIR)/"models"/f"stacking_{meta_name}.joblib")
+            meta = stack_obj["meta"]
+            p_stack = meta.predict_proba(Z_full)[:, 1] if hasattr(meta,"predict_proba") else meta.decision_function(Z_full)
+
             print(f"Saved models for {out_suffix}. Threshold ({meta_name}) = {thr:.4f}")
 
         # ---- Saatlik & Günlük risk tablolarını üret ve kaydet (her koşulda) ----
