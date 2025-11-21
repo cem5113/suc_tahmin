@@ -500,7 +500,7 @@ def main():
                    help="Girdi CSV (vars: fr_crime_09.csv). Verilmezse CRIME_CSV_FR/CRIME_CSV ortam değişkeni kullanılır.")
     p.add_argument("--target", type=str, default="Y_label", help="Hedef sütun adı (varsa)")
     p.add_argument("--outdir", type=str, default="outputs_feature_analysis_fr", help="Çıktı klasörü")
-    p.add_argument("--out_csv", type=str, default="", help="Çıktı CSV yolu (vars: fr_crime_10.csv)")
+    p.add_argument("--out_csv", type=str, default="", help="Çıktı CSV yolu (vars: fr_crime_10_FA.csv)")
     p.add_argument("--topk", type=int, default=int(os.getenv("TOP_K", "10")), help="Seçilecek pozitif önemli temel değişken sayısı")  # REV
     args = p.parse_args()
 
