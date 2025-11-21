@@ -151,10 +151,7 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     elif "hr_key" in out.columns:
         s = out["hr_key"].astype(str)
         dt = pd.to_datetime(s, errors="coerce")
-        # En yaygın kalıplar: 'YYYY-MM-DD HH', 'YYYY-MM-DD', 'YYYYMMDDHH', 'YYYYMMDD'
-        # Önce doğrudan parse etmeyi dene:
         if dt.notna().mean() <= 0.5:
-            # Temizle → sadece rakamlar
             z = s.str.replace(r"[^0-9]", "", regex=True)
             def _to_iso(z_):
                 if len(z_) >= 10:  # YYYYMMDDHH
@@ -167,6 +164,46 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["date"] = pd.NaT
 
+    # --- 2) HOUR_RANGE türet/normalize ---
+    def _hr_from_event_hour(s):
+        h = pd.to_numeric(s, errors="coerce").fillna(0).astype(int) % 24
+        start = (h // 3) * 3
+        end = (start + 3) % 24
+        return start.map(lambda x: f"{x:02d}") + "-" + end.map(lambda x: f"{x:02d}")
+
+    if "hour_range" in out.columns:
+        hr = (
+            out["hour_range"].astype(str)
+            .str.replace("\u2013","-", regex=False)
+            .str.replace("\u2014","-", regex=False)
+            .str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
+        )
+        ok = hr.notna().all(axis=1)
+        if ok.any():
+            h0 = pd.to_numeric(hr.loc[ok,0], errors="coerce").fillna(0).astype(int) % 24
+            h1 = pd.to_numeric(hr.loc[ok,1], errors="coerce").fillna(0).astype(int) % 24
+            out.loc[ok,"hour_range"] = h0.map("{:02d}".format) + "-" + h1.map("{:02d}".format)
+
+        miss = ~ok
+        if miss.any():
+            if "event_hour" in out.columns:
+                out.loc[miss,"hour_range"] = _hr_from_event_hour(out.loc[miss,"event_hour"])
+            elif "hr_key" in out.columns:
+                hh = out.loc[miss,"hr_key"].astype(str).str.extract(r"\b(\d{1,2})\b")[0]
+                out.loc[miss,"hour_range"] = _hr_from_event_hour(hh)
+            else:
+                out.loc[miss,"hour_range"] = "00-03"
+
+    elif "event_hour" in out.columns:
+        out["hour_range"] = _hr_from_event_hour(out["event_hour"])
+    elif "hr_key" in out.columns:
+        hh = out["hr_key"].astype(str).str.extract(r"\b(\d{1,2})\b")[0]
+        out["hour_range"] = _hr_from_event_hour(hh)
+    else:
+        out["hour_range"] = "00-03"
+
+    return out
+
   # -------------------- Column Normalizer --------------------
 def normalize_temporal_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -174,31 +211,27 @@ def normalize_temporal_columns(df: pd.DataFrame) -> pd.DataFrame:
     day_of_week_x / day_of_week_y → day_of_week
     month_x / month_y → month
     """
+    if df is None:
+        raise ValueError("normalize_temporal_columns() içine df=None geldi.")
 
     rename_map = {}
 
-    # Season
     for col in ["season", "season_x", "season_y"]:
         if col in df.columns:
             rename_map[col] = "season"
             break
 
-    # Day of week
     for col in ["day_of_week", "day_of_week_x", "day_of_week_y"]:
         if col in df.columns:
             rename_map[col] = "day_of_week"
             break
 
-    # Month
     for col in ["month", "month_x", "month_y"]:
         if col in df.columns:
             rename_map[col] = "month"
             break
 
-    df = df.rename(columns=rename_map)
-
-    return df
-
+    return df.rename(columns=rename_map)
 
     # --- 2) HOUR_RANGE türet/normalize ---
     def _hr_from_event_hour(s):
