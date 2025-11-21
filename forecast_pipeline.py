@@ -15,8 +15,8 @@ from datetime import timedelta
 from zoneinfo import ZoneInfo
 from joblib import load
 
-from scripts.build_future_grid import build_future_grid  # az önce verdiğim dosya
-from scripts.forecast_exports import top_k_types         # az önce verdiğim dosya
+from build_future_grid import build_future_grid
+from forecast_exports import top_k_types
 
 CRIME_DIR = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
 FR_TZ     = ZoneInfo("America/Los_Angeles")
