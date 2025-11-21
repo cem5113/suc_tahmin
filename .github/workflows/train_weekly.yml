@@ -36,8 +36,8 @@ jobs:
       TE_ALPHA: "50"
       NEIGHBOR_FILE: ${{ github.workspace }}/crime_prediction_data/neighbors.csv
 
-      # Tek stacking dataset → fr_crime_10.csv (yoksa 09'dan kopyalanacak)
-      STACKING_DATASET:  ${{ github.workspace }}/crime_prediction_data/fr_crime_10.csv
+      # Tek stacking dataset → fr_crime_10_FA.csv (yoksa 09'dan kopyalanacak)
+      STACKING_DATASET:  ${{ github.workspace }}/crime_prediction_data/fr_crime_10_FA.csv
 
       # Seçim fazı altküme stratejisi
       SUBSET_STRATEGY: "last12m"
