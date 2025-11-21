@@ -167,6 +167,39 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["date"] = pd.NaT
 
+  # -------------------- Column Normalizer --------------------
+def normalize_temporal_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    season_x / season_y → season
+    day_of_week_x / day_of_week_y → day_of_week
+    month_x / month_y → month
+    """
+
+    rename_map = {}
+
+    # Season
+    for col in ["season", "season_x", "season_y"]:
+        if col in df.columns:
+            rename_map[col] = "season"
+            break
+
+    # Day of week
+    for col in ["day_of_week", "day_of_week_x", "day_of_week_y"]:
+        if col in df.columns:
+            rename_map[col] = "day_of_week"
+            break
+
+    # Month
+    for col in ["month", "month_x", "month_y"]:
+        if col in df.columns:
+            rename_map[col] = "month"
+            break
+
+    df = df.rename(columns=rename_map)
+
+    return df
+
+
     # --- 2) HOUR_RANGE türet/normalize ---
     def _hr_from_event_hour(s):
         h = pd.to_numeric(s, errors="coerce").fillna(0).astype(int) % 24
@@ -684,6 +717,7 @@ if __name__ == "__main__":
         if "Y_label" not in df.columns:
             raise ValueError(f"{data_path} içinde Y_label kolonu yok.")
         df = ensure_date_hour_on_df(df)
+        df = normalize_temporal_columns(df)
 
         if phase_is_select():
             before = df.shape
