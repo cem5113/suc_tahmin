@@ -339,12 +339,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f scripts/forecast_pipeline.py ]; then
-            PY=scripts/forecast_pipeline.py
+      
+          if [ -f forecast_pipeline.py ]; then
+            PY=forecast_pipeline.py
           else
-            echo "❌ scripts/forecast_pipeline.py bulunamadı."
+            echo "❌ forecast_pipeline.py bulunamadı."
+            ls -R .
             exit 1
           fi
+      
           python -u "$PY"
 
       - name: FR 12) SHAP (XGBoost global feature importance)
