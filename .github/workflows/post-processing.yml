@@ -312,24 +312,25 @@ jobs:
           python -u "$PY" || true
           echo "HEAD fr_crime_09.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
 
-      - name: FR 10) Stacking + Feature + SHAP (fr_crime_09)
+      - name: FR 10) Train stacking (risk + FA entegre)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
-          # sf_cells.geojson repo kökünde (main'de)
           SF_CELLS_PATH:  ${{ github.workspace }}/sf_cells.geojson
-          FR_ML_DAYS:     "365"
-          FR_NEG_FRAC:    "0.3"
+      
+          # yeni pipeline env'leri
+          TRAIN_PHASE: "final"          # günlük üretimde final
+          FAST_MODE: "1"
+          SKIP_CV: "1"
+          REUSE_MODELS: "1"
+          BASE_MODELS: "hgb,lgb"
+          FOLDS_SELECT: "2"
+          PATROL_HORIZON_DAYS: "1"
+          STACKING_DATASET: "fr_crime_10.csv"   # Q1–Q4 iptal → ana dataset
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f scripts/stacking_feature_shap.py ]; then
-            PY=scripts/stacking_feature_shap.py
-          else
-            echo "❌ stacking_feature_shap.py bulunamadı."
-            exit 1
-          fi
-          python -u "$PY"
+          python3 stacking_risk_pipeline.py
 
       - name: FR 11) Forecasts (24h / 7gün / 365gün)
         env:
@@ -338,10 +339,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f scripts/forecast_fr.py ]; then
-            PY=scripts/forecast_fr.py
+          if [ -f scripts/forecast_pipeline.py ]; then
+            PY=scripts/forecast_pipeline.py
           else
-            echo "❌ scripts/forecast_fr.py bulunamadı."
+            echo "❌ scripts/forecast_pipeline.py bulunamadı."
             exit 1
           fi
           python -u "$PY"
