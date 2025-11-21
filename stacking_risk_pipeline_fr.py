@@ -672,21 +672,20 @@ if __name__ == "__main__":
             if TRAIN_CUTOFF_DATE:
                 cutoff = pd.to_datetime(TRAIN_CUTOFF_DATE)
             else:
-                # otomatik: son tarihten horizon kadar gerisi train cutoff
                 cutoff = dmax - pd.Timedelta(days=SCORE_HORIZON_DAYS)
         
-            # güvenlik: train çok küçük kalmasın
-            min_cut = dmax - pd.Timedelta(days=max(MIN_TRAIN_DAYS, SCORE_HORIZON_DAYS+1))
+            min_cut = dmax - pd.Timedelta(days=max(MIN_TRAIN_DAYS, SCORE_HORIZON_DAYS + 1))
             cutoff = max(cutoff, min_cut)
         
             train_df = df[df["_dt"] <= cutoff].copy()
             score_df = df[df["_dt"] > cutoff].copy()
         
             if score_df.empty:
-                # en azından 1 horizon olsun
                 score_df = df[df["_dt"] > (dmax - pd.Timedelta(days=1))].copy()
+                print("⚠️ score_df boştu → son 1 gün fallback kullanıldı (risk in-sample'a yaklaşabilir).")
         
             print(f"🧊 OOT split aktif | cutoff={cutoff.date()} | train={train_df.shape} | score={score_df.shape}")
+        
         else:
             train_df = df.copy()
             score_df = df.copy()
@@ -721,11 +720,13 @@ if __name__ == "__main__":
                     })
                     df[col] = pd.to_numeric(m.fillna(df[col]), errors="coerce")
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-
+        
         sus, info = find_leaky_numeric_features(
             df,
             list(dict.fromkeys(counts + nums + cats)),
-            df["Y_label"].astype(int)
+            df["Y_label"].astype(int),
+            corr_thr=0.9995,
+            auc_thr=0.9995,
         )
         if sus:
             counts = [c for c in counts if c not in sus]
@@ -737,18 +738,28 @@ if __name__ == "__main__":
         if fa_list_path.exists():
             fa_list = pd.read_csv(fa_list_path)["feature"].tolist()
             print(f"🔎 Feature Analysis aktif → {len(fa_list)} özellik kullanılacak.")
-
-            # GEOID'i FA'den bağımsız koru, diğerlerini FA listesine göre filtrele
+        
+            FORCE_KEEP = {
+                # zaman anahtarları
+                "event_hour","hour_range","day_of_week","month","season",
+                "is_weekend","is_night","is_business_hour","is_school_hour",
+                # geçmiş yoğunluklar
+                "past_7d_crimes","prev_crime_1h","prev_crime_3h","crime_count_past_48h",
+                # çağrı gecikmeleri
+                "911_geo_hr_last3d","911_geo_hr_last7d","311_request_count",
+            }
+        
             fa_usable = []
             for c in feature_cols:
                 if c == "GEOID":
                     fa_usable.append(c)
-                elif c in fa_list:
+                elif (c in fa_list) or (c in FORCE_KEEP):
                     fa_usable.append(c)
-
-            if len(fa_usable) > 0:
+        
+            if fa_usable:
                 feature_cols = fa_usable
-                print(f"🎯 FA sonrası kullanılan sütun sayısı: {len(feature_cols)}")
+                print(f"🎯 FA sonrası kullanılan sütun sayısı: {len(feature_cols)} (FORCE_KEEP dahil)")
+
         else:
             print(f"⚠️ {fa_list_path} bulunamadı. Tüm özellikler kullanılacak.")
 
@@ -764,9 +775,18 @@ if __name__ == "__main__":
             nums   = [c for c in nums   if c not in empty_cols]
             cats   = [c for c in cats   if c not in empty_cols]
             feature_cols = [c for c in feature_cols if c not in empty_cols]
-          
+        if not feature_cols:
+            raise ValueError("feature_cols boş kaldı. FA/leakage sonrası en az 1 özellik kalmalı.")
+      
         pre = build_preprocessor(counts, nums, cats)
-        
+
+        if "GEOID" in score_df.columns:
+            score_df["GEOID"] = (
+                score_df["GEOID"].astype(str)
+                .str.extract(r"(\d+)")[0]
+                .str[-GEOID_LEN:]
+                .str.zfill(GEOID_LEN)
+            )
         train_X = train_df[feature_cols].copy()
         score_X = score_df[feature_cols].copy()
         
@@ -790,6 +810,7 @@ if __name__ == "__main__":
         reused = False
         if REUSE_MODELS and stack_any and thr_any:
             print("♻️ REUSE_MODELS=1 → Mevcut stacking modeli ile sadece skorlanıyor.")
+            print("   (Not: FA/leakage/dataset değiştiyse 1 kez REUSE_MODELS=0 ile yeniden eğit.)")
             from joblib import load
             pre = load(out_models / "preprocessor.joblib")
             base_pipes = load(out_models / "base_pipes.joblib")
@@ -902,10 +923,12 @@ if __name__ == "__main__":
         else:
             h = _key_df.get("hour_range", "").astype(str).str.extract(r"^(\d{1,2})")[0]
             h = pd.to_numeric(h, errors="coerce")
-
-        _key_df["hour_range"] = h.fillna(0).astype(int) % 24
-
+        
+        # ✅ export anahtarı 3 saatlik bin string olmalı: "00-03" vs.
+        _key_df["hour_range"] = _hr_from_event_hour(h)
+        
         grp_cols = ["GEOID", "date", "hour_range"]
+
         _key_df["_row_id"] = np.arange(len(_key_df))
         g = _key_df.groupby(grp_cols)["_row_id"].apply(list).reset_index(name="_rows")
 
