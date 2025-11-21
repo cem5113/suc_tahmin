@@ -398,7 +398,9 @@ def ensure_sf_crime_09() -> str:
 def build_feature_lists(df: pd.DataFrame):
     drop_cols = {"Y_label", "id", "datetime", "time"}
     count_like = [c for c in df.columns if any(k in c.lower() for k in ["_count", "911_", "311_"])]
-    num_cands  = [c for c in df.columns if df[c].dtype.kind in "fc" and c not in count_like and c not in drop_cols]
+    num_cands = [c for c in df.columns
+                 if pd.api.types.is_numeric_dtype(df[c])
+                 and c not in count_like and c not in drop_cols]
     cat_cands  = [c for c in df.columns if df[c].dtype == "object" and c not in drop_cols]
     return count_like, num_cands, cat_cands
 
