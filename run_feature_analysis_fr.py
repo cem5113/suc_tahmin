@@ -96,7 +96,6 @@ def pick_model():
         class_weight="balanced_subsample", random_state=42
     )
 
-
 def compute_class_weight(y: pd.Series) -> float:
     y = pd.to_numeric(y, errors="coerce").fillna(0).astype(int).clip(0,1)
     pos, neg = int((y==1).sum()), int((y==0).sum())
@@ -359,8 +358,12 @@ def unsupervised_feature_selection(df_raw: pd.DataFrame, outdir: Path, desired_o
     with open(outdir / "metrics_unsupervised.json","w",encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    print(f"✅ (Unsupervised) fr_crime_10.csv üretildi → {desired_output_csv}")
+    print(f"✅ (Unsupervised) FA dataseti üretildi → {desired_output_csv}")
 
+    # --- save feature list ---
+    sel_path = desired_output_csv.with_name("selected_features_fr.csv")
+    pd.DataFrame({"feature": selected_bases}).to_csv(sel_path, index=False)
+    print(f"🎯 Unsupervised FA → selected_features_fr.csv kaydedildi: {sel_path}")
 
 # ---------------- opsiyonel: hedef varsa denetimli ----------------
 def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desired_output_csv: Path, top_k: int) -> bool:
@@ -479,12 +482,16 @@ def supervised_if_target(df_raw: pd.DataFrame, target: str, outdir: Path, desire
         parts.append(geo.reset_index(drop=True))
     parts.extend([feat, yy])
     out_df = pd.concat(parts, axis=1)
+
+    # --- save feature list ---
+    sel_path = desired_output_csv.with_name("selected_features_fr.csv")
+    pd.DataFrame({"feature": selected_bases}).to_csv(sel_path, index=False)
+    print(f"🎯 Supervised FA → selected_features_fr.csv kaydedildi: {sel_path}")
+
     out_df.to_csv(desired_output_csv, index=False)
-
     joblib.dump(clf, outdir / "model_pipeline.joblib")
-    print(f"✅ (Supervised) fr_crime_10.csv üretildi → {desired_output_csv}")
+    print(f"✅ (Supervised) FA dataseti üretildi → {desired_output_csv}")
     return True
-
 
 # ---------------- main ----------------
 def main():
@@ -513,7 +520,9 @@ def main():
     fname = Path(csv_path).name.lower()
 
     desired_out = Path(args.out_csv) if args.out_csv else (
-        Path(csv_path).with_name("fr_crime_10.csv") if fname.startswith("fr_") else Path(csv_path).with_name("selected_output.csv")
+        # FA çıktısı → karışmaması için "_FA" uzantılı
+        Path(csv_path).with_name("fr_crime_10_FA.csv") if fname.startswith("fr_")
+        else Path(csv_path).with_name("selected_output_FA.csv")
     )
 
     # önce hedef var mı diye bak; varsa denetimli yoldan ilerle
