@@ -390,7 +390,7 @@ jobs:
           rm -f fr_csv_outputs.zip fr_parquet_outputs.zip || true
 
           # --- CSV ZIP ---
-          csv_list=$(ls fr_*.csv risk_*.csv shap_feature_importance_fr*.csv fr_report_*.csv 2>/dev/null || true)
+          csv_list=$(ls fr_*.csv risk_*.csv shap_feature_importance_fr*.csv fr_report_*.csv top3_types_next7d.csv top5_types_next365d.csv 2>/dev/null || true)
           if [ -n "$csv_list" ]; then
             echo "🔎 CSV dosyaları bulundu:"
             echo "$csv_list"
