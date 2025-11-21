@@ -638,8 +638,8 @@ if __name__ == "__main__":
         if dataset_env:
             datasets = [dataset_env if os.path.isabs(dataset_env) else os.path.join(CRIME_DIR, dataset_env)]
         else:
-            # REV: Varsayılan dataset doğrudan fr_crime_10.csv
-            datasets = [os.path.join(CRIME_DIR, "fr_crime_10.csv")]
+            # REV: Varsayılan dataset doğrudan fr_crime_10_FA.csv
+            datasets = [os.path.join(CRIME_DIR, "fr_crime_10_FA.csv")]
 
     summary_rows = []
     all_metrics_concat = []
