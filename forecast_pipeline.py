@@ -116,7 +116,7 @@ def export_forecast(fut_df, tag):
     return hourly_path, daily_path
 
 if __name__ == "__main__":
-    data_path = Path(CRIME_DIR) / "fr_crime_10.csv"
+    data_path = Path(CRIME_DIR) / "fr_crime_10_FA.csv"
     df = pd.read_csv(data_path, low_memory=False, dtype={"GEOID": str})
 
     if "datetime" not in df.columns:
