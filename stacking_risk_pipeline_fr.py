@@ -690,6 +690,31 @@ if __name__ == "__main__":
             nums   = [c for c in nums   if c not in sus]
         feature_cols = list(dict.fromkeys(counts + nums + cats))
 
+        # --- Feature Analysis varsa yükle ---
+        fa_list_path = Path(CRIME_DIR) / "selected_features_fr.csv"
+        if fa_list_path.exists():
+            fa_list = pd.read_csv(fa_list_path)["feature"].tolist()
+            print(f"🔎 Feature Analysis aktif → {len(fa_list)} özellik kullanılacak.")
+
+            # GEOID'i FA'den bağımsız koru, diğerlerini FA listesine göre filtrele
+            fa_usable = []
+            for c in feature_cols:
+                if c == "GEOID":
+                    fa_usable.append(c)
+                elif c in fa_list:
+                    fa_usable.append(c)
+
+            if len(fa_usable) > 0:
+                feature_cols = fa_usable
+                print(f"🎯 FA sonrası kullanılan sütun sayısı: {len(feature_cols)}")
+        else:
+            print(f"⚠️ {fa_list_path} bulunamadı. Tüm özellikler kullanılacak.")
+
+        # FA SONRASI: counts / nums / cats listelerini de feature_cols ile hizala
+        counts = [c for c in counts if c in feature_cols]
+        nums   = [c for c in nums   if c in feature_cols]
+        cats   = [c for c in cats   if c in feature_cols]
+
         empty_cols = [c for c in feature_cols if (c in df.columns and df[c].isna().all())]
         if empty_cols:
             print(f"[CLEAN] Tamamen boş kolonlar atılıyor: {empty_cols}")
@@ -697,7 +722,7 @@ if __name__ == "__main__":
             nums   = [c for c in nums   if c not in empty_cols]
             cats   = [c for c in cats   if c not in empty_cols]
             feature_cols = [c for c in feature_cols if c not in empty_cols]
-
+          
         pre = build_preprocessor(counts, nums, cats)
         X = df[feature_cols].copy()
 
@@ -853,6 +878,9 @@ if __name__ == "__main__":
             "metrics_all_csv": os.path.join(CRIME_DIR, f"metrics_all{out_suffix}.csv")
         })
 
+    print(f"[DEBUG] Son feature sayısı: {len(feature_cols)}")
+    print(f"[DEBUG] İlk 10 feature: {feature_cols[:10]}")
+  
     # --- 2) Global özet/manifest ---
     if summary_rows:
         manifest = pd.DataFrame(summary_rows)
