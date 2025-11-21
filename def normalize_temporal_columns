@@ -204,7 +204,7 @@ def ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
-  # -------------------- Column Normalizer --------------------
+# -------------------- Column Normalizer --------------------
 def normalize_temporal_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     season_x / season_y → season
@@ -232,38 +232,6 @@ def normalize_temporal_columns(df: pd.DataFrame) -> pd.DataFrame:
             break
 
     return df.rename(columns=rename_map)
-
-    # --- 2) HOUR_RANGE türet/normalize ---
-    def _hr_from_event_hour(s):
-        h = pd.to_numeric(s, errors="coerce").fillna(0).astype(int) % 24
-        start = (h // 3) * 3
-        end = (start + 3) % 24
-        return start.map(lambda x: f"{x:02d}") + "-" + end.map(lambda x: f"{x:02d}")
-
-    if "hour_range" in out.columns:
-        hr = out["hour_range"].astype(str).str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
-        ok = hr.notna().all(axis=1)
-        out.loc[ok, "hour_range"] = (
-            hr[0].astype(float).astype(int).map("{:02d}".format) + "-" +
-            hr[1].astype(float).astype(int).map("{:02d}".format)
-        )
-        miss = out["hour_range"].isna()
-        if miss.any() and "event_hour" in out.columns:
-            out.loc[miss, "hour_range"] = _hr_from_event_hour(out.loc[miss, "event_hour"])
-    elif "event_hour" in out.columns:
-        out["hour_range"] = _hr_from_event_hour(out["event_hour"])
-    else:
-        # hr_key biçimi 'YYYY-MM-DD HH' ise buradan saat çıkar
-        if "hr_key" in out.columns:
-            hh = out["hr_key"].astype(str).str.extract(r"\b(\d{1,2})\b")[0]
-            if hh.notna().any():
-                out["hour_range"] = _hr_from_event_hour(hh)
-            else:
-                out["hour_range"] = np.nan
-        else:
-            out["hour_range"] = np.nan
-
-    return out
   
 def _load_neighbors(path: str):
     """
@@ -751,7 +719,8 @@ if __name__ == "__main__":
             raise ValueError(f"{data_path} içinde Y_label kolonu yok.")
         df = ensure_date_hour_on_df(df)
         df = normalize_temporal_columns(df)
-
+        print("[DEBUG] after ensure_date_hour_on_df:", type(df), df.shape)
+      
         if phase_is_select():
             before = df.shape
             min_pos = int(os.getenv("SUBSET_MIN_POS", "10000"))
