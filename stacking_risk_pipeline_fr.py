@@ -701,7 +701,9 @@ if __name__ == "__main__":
                 pass
             after = train_df.shape
             print(f"🔧 Subset ({strategy}): {before} → {after} (pos={int(train_df['Y_label'].sum())})")
-        
+          
+        print(f"[DEBUG] score_df date span: {score_df['date'].min()} → {score_df['date'].max()}")
+      
         # feature engineering artık train_df üzerinden
         df = train_df
 
