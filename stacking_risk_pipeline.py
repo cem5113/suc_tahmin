@@ -90,6 +90,47 @@ if ABLASYON_BASIS not in {"ohe", "te"}:
 def phase_is_select() -> bool:
     return TRAIN_PHASE == "select"
 
+# -------------------- Baseline (GEOID × season × hour_range) export --------------------
+def export_baseline_geo_season_hour(
+    df: pd.DataFrame,
+    proba: np.ndarray,
+    out_dir: str,
+    out_suffix: str = "",
+):
+    """
+    Tarihten bağımsız (kronik) mevsimsel baseline risk yüzeyi üretir:
+      GEOID × season × hour_range  → risk_mean, risk_p90, n_obs
+
+    df: ensure_date_hour_on_df uygulanmış veri (season ve hour_range içerir)
+    proba: stacking olasılığı (p_stack)
+    """
+    if df is None or len(df) == 0:
+        print("[WARN] Baseline export skipped: df boş.")
+        return None
+
+    if "season" not in df.columns or "hour_range" not in df.columns or "GEOID" not in df.columns:
+        print("[WARN] Baseline export skipped: season/hour_range/GEOID yok.")
+        return None
+
+    tmp = df.copy()
+    tmp["risk_score"] = pd.to_numeric(proba, errors="coerce")
+
+    baseline = (
+        tmp.groupby(["GEOID", "season", "hour_range"], as_index=False)
+           .agg(
+               risk_mean=("risk_score", "mean"),
+               risk_p90=("risk_score", lambda x: x.quantile(0.90)),
+               n_obs=("risk_score", "size"),
+           )
+           .sort_values(["season", "hour_range", "risk_mean"], ascending=[True, True, False])
+           .reset_index(drop=True)
+    )
+
+    out_path = os.path.join(out_dir, f"risk_baseline_geo_season_hour{out_suffix}.csv")
+    baseline.to_csv(out_path, index=False)
+    print(f"✅ Baseline risk surface yazıldı → {out_path}")
+    return out_path
+
 # -------------------- Helpers: date/hour --------------------
 def _hour_from_range(s: str) -> int:
     # "00-03" → 0; "21-00" → 21
@@ -709,6 +750,13 @@ if __name__ == "__main__":
             out_prefix=out_suffix
         )
 
+        baseline_path = export_baseline_geo_season_hour(
+            df=df,
+            proba=p_stack,
+            out_dir=CRIME_DIR,
+            out_suffix=out_suffix
+        )
+      
         try:
             types_path = optional_top_crime_types()
             if types_path:
@@ -728,8 +776,9 @@ if __name__ == "__main__":
         summary_rows.append({
             "dataset_path": data_path,
             "suffix": out_suffix,
-            "risk_hourly_csv": risk_hourly_path,  # <-- düzeltildi
+            "risk_hourly_csv": risk_hourly_path,
             "risk_daily_csv": os.path.join(CRIME_DIR, f"risk_daily{out_suffix}.csv"),
+            "risk_baseline_geo_season_hour_csv": baseline_path,  # <-- NEW
             "patrol_recs_csv": patrol_path,
             "metrics_base_csv": os.path.join(CRIME_DIR, f"metrics_base{out_suffix}.csv"),
             "metrics_stacking_csv": os.path.join(CRIME_DIR, f"metrics_stacking{out_suffix}.csv"),
