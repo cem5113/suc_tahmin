@@ -113,13 +113,13 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           # Beklenen ana dosyalar varsa CRIME_DATA_DIR altına kopyala
-          for f in fr_crime.csv fr_crime_09.csv fr_crime_10.csv sf_crime_grid_full_labeled.csv neighbors.csv; do
+          for f in fr_crime.csv fr_crime_09.csv fr_crime_10_FA.csv sf_crime_grid_full_labeled.csv neighbors.csv; do
             if [ -f "${SRC_DIR}/${f}" ] && [ ! -f "${DST_DIR}/${f}" ]; then
               cp -v "${SRC_DIR}/${f}" "${DST_DIR}/${f}"
             fi
           done
           # Alt dizinlerde ise bul-kopyala (eski pipeline varyasyonları için)
-          for f in fr_crime.csv fr_crime_09.csv fr_crime_10.csv; do
+          for f in fr_crime.csv fr_crime_09.csv fr_crime_10_FA.csv; do
             if [ ! -f "${DST_DIR}/${f}" ]; then
               hit="$(find "${SRC_DIR}" -type f -name "${f}" | head -n1 || true)"
               if [ -n "${hit}" ]; then
@@ -127,10 +127,10 @@ jobs:
               fi
             fi
           done
-          # Eğer fr_crime_10.csv yok ama fr_crime_09.csv varsa → 09'dan üret
-          if [ ! -f "${DST_DIR}/fr_crime_10.csv" ] && [ -f "${DST_DIR}/fr_crime_09.csv" ]; then
-            echo "ℹ️ fr_crime_10.csv yok, fr_crime_09.csv'den kopyalanıyor."
-            cp -v "${DST_DIR}/fr_crime_09.csv" "${DST_DIR}/fr_crime_10.csv"
+          # Eğer fr_crime_10_FA.csv yok ama fr_crime_09.csv varsa → 09'dan üret
+          if [ ! -f "${DST_DIR}/fr_crime_10_FA.csv" ] && [ -f "${DST_DIR}/fr_crime_09.csv" ]; then
+            echo "ℹ️ fr_crime_10_FA.csv yok, fr_crime_09.csv'den kopyalanıyor."
+            cp -v "${DST_DIR}/fr_crime_09.csv" "${DST_DIR}/fr_crime_10_FA.csv"
           fi
           ls -lah "${DST_DIR}" || true
 
