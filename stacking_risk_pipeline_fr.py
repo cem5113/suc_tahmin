@@ -62,6 +62,9 @@ BASE_MODELS    = os.getenv("BASE_MODELS", "hgb,lgb").split(",")  # Günlük set
 # ============================================================
 # 🔥 OUT-OF-TIME TRAIN/SCORE AYRIMI (in-sample'ı kırar)
 # ============================================================
+FR_TZ = ZoneInfo("America/Los_Angeles")
+HORIZON_DAYS = int(os.getenv("PATROL_HORIZON_DAYS", "1"))
+
 USE_OOT_SPLIT      = _env_flag("USE_OOT_SPLIT", default=True)  # 1 ise train/score split aktif
 TRAIN_CUTOFF_DATE  = os.getenv("TRAIN_CUTOFF_DATE", "").strip()  # "YYYY-MM-DD" (boşsa otomatik)
 SCORE_HORIZON_DAYS = int(os.getenv("SCORE_HORIZON_DAYS", str(HORIZON_DAYS)))  # default PATROL_HORIZON_DAYS
@@ -88,8 +91,6 @@ def _suffix_from_dataset(path: str) -> str:
 NEIGHBOR_FILE     = os.getenv("NEIGHBOR_FILE", "").strip()        # 'GEOID,neighbor' iki sütunlu csv (opsiyonel)
 TE_ALPHA          = float(os.getenv("TE_ALPHA", "50"))            # Laplace smoothing gücü (m)
 GEO_COL_NAME      = os.getenv("GEO_COL_NAME", "GEOID")            # GEOID kolon adı
-FR_TZ = ZoneInfo("America/Los_Angeles")
-HORIZON_DAYS = int(os.getenv("PATROL_HORIZON_DAYS", "1"))
 
 _env_has_te       = os.getenv("ENABLE_SPATIAL_TE")
 ENABLE_SPATIAL_TE = _env_flag("ENABLE_SPATIAL_TE", default=False)
@@ -692,15 +693,18 @@ if __name__ == "__main__":
             print("🧊 OOT split pasif → train=score=df (in-sample risk üretir!)")
 
         if phase_is_select():
-            before = df.shape
+            before = train_df.shape
             min_pos = int(os.getenv("SUBSET_MIN_POS", "10000"))
             strategy = os.getenv("SUBSET_STRATEGY", "last12m").lower()
             if strategy == "last12m":
-                df = subset_last12m(df, min_pos=min_pos)
+                train_df = subset_last12m(train_df, min_pos=min_pos)
             elif strategy == "none":
                 pass
-            after = df.shape
-            print(f"🔧 Subset ({strategy}): {before} → {after} (pos={int(df['Y_label'].sum())})")
+            after = train_df.shape
+            print(f"🔧 Subset ({strategy}): {before} → {after} (pos={int(train_df['Y_label'].sum())})")
+        
+        # feature engineering artık train_df üzerinden
+        df = train_df
 
         counts, nums, cats = build_feature_lists(df)
         if "GEOID" in df.columns:
@@ -776,7 +780,7 @@ if __name__ == "__main__":
         MEM = Memory(location=os.path.join(CRIME_DIR, ".skcache"), verbose=0)
         base_list = base_estimators(class_weight_balanced=True)
         base_pipes = {name: Pipeline([("prep", pre), ("clf", est)], memory=MEM) for name, est in base_list}
-        cv, _ = make_cv(df)
+        cv, _ = make_cv(train_df)
 
         out_models = Path(CRIME_DIR) / "models"
         stack_any = list(out_models.glob("stacking_*.joblib"))
@@ -886,7 +890,7 @@ if __name__ == "__main__":
             print(f"Saved models for {out_suffix}. Threshold ({meta_name}) = {thr:.4f}")
 
         # ---- Saatlik & Günlük risk tablolarını üret ve kaydet (her koşulda) ----
-        _key_df = df.copy()
+        _key_df = score_df.copy()
         _key_df["date"] = pd.to_datetime(_key_df.get("date", pd.NaT), errors="coerce").dt.date
         if _key_df["date"].isna().all():
             fallback_date = pd.Timestamp.now(tz=FR_TZ).date()
