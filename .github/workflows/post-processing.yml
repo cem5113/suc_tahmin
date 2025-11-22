@@ -360,19 +360,11 @@ jobs:
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
+          PYTHONPATH: ${{ github.workspace }}:${{ env.CRIME_DATA_DIR }}:${{ github.workspace }}/scripts
         shell: bash
         run: |
           set -euo pipefail
-
-          # forecast_pipeline.py sadece root'ta
-          if [ -f forecast_pipeline.py ]; then
-            PY=forecast_pipeline.py
-          else
-            echo "❌ forecast_pipeline.py root'ta bulunamadı."
-            echo "Repo kökü:"
-            ls -lah .
-            exit 1
-          fi
+          python3 -u forecast_pipeline.py
 
           python3 -u "$PY"
 
