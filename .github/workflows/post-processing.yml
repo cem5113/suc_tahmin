@@ -11,9 +11,9 @@ permissions:
   actions: write
 
 concurrency:
-  group: post-processing-${{ github.ref }}
-  cancel-in-progress: true
-
+  group: post-processing-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+  
 jobs:
   run_fr:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
