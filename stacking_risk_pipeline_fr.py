@@ -63,6 +63,14 @@ SKIP_CV        = _env_flag("SKIP_CV", default=True)     # CV ve OOF hesapların�
 REUSE_MODELS   = _env_flag("REUSE_MODELS", default=True)# Varsa mevcut modelleri kullan
 FOLDS_SELECT   = int(os.getenv("FOLDS_SELECT", "2"))    # Select fazında 2 fold yeterli
 BASE_MODELS    = os.getenv("BASE_MODELS", "hgb,lgb").split(",")  # Günlük set
+if REUSE_MODELS and SKIP_CV:
+    raise SystemExit(
+        "⚠️ ENV çakışması: REUSE_MODELS=1 ve SKIP_CV=1 aynı anda açık!\n"
+        "✅ Günlük skorlamada:   REUSE_MODELS=1, SKIP_CV=1 (fit yok, sadece score)\n"
+        "✅ Eğitim gününde:      REUSE_MODELS=0, SKIP_CV=1 (full fit)\n"
+        "Not: Eğitimden sonra tekrar REUSE_MODELS=1'e dön."
+    )
+
 
 # ============================================================
 # 🔥 OUT-OF-TIME TRAIN/SCORE AYRIMI (in-sample'ı kırar)
@@ -867,10 +875,15 @@ if __name__ == "__main__":
             print("♻️ REUSE_MODELS=1 → Mevcut stacking modeli ile sadece skorlanıyor.")
             print("   (Not: FA/leakage/dataset değiştiyse 1 kez REUSE_MODELS=0 ile yeniden eğit.)")
         
+            # RAM koruması: REUSE modunda train set'i taşımaya gerek yok
+            del train_X
+            del train_y
+        
             from joblib import load
             pre = load(out_models / "preprocessor.joblib")
             base_pipes = load(out_models / "base_pipes.joblib")
             stack_obj  = load(stack_any[0])
+
             proba_cols = stack_obj["names"]
             meta       = stack_obj["meta"]
         
