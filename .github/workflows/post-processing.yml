@@ -160,10 +160,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # parquet varsa onu input yap
           if [ -f "${FR_311_IN_PQ}" ]; then
             export FR_311_IN="${FR_311_IN_PQ}"
           fi
-          python -u update_311_fr.py || true
+
+          # update_311_fr.py sadece root'ta
+          if [ -f update_311_fr.py ]; then
+            PY=update_311_fr.py
+          else
+            echo "⚠️ update_311_fr.py root'ta yok, adım atlanıyor"
+            exit 0
+          fi
+
+          python -u "$PY" || true
           echo "HEAD fr_crime_02.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_02.csv" || true
 
       - name: FR 03) Population
@@ -406,7 +417,6 @@ jobs:
           cd "$FR_OUTPUT_DIR"
 
           echo "📦 FR CSV ve Parquet çıktıları zipleniyor..."
-          
           rm -f fr_csv_outputs.zip fr_parquet_outputs.zip || true
 
           # --- CSV ZIP ---
@@ -422,40 +432,13 @@ jobs:
           fi
 
           # --- EXTRA: CSV → Parquet dönüştür (eksik parquetler için) ---
-          echo "📌 CSV dosyalarının Parquet versiyonları oluşturuluyor..."
-
+          echo "📌 CSV → Parquet (eksikler) ..."
           for csvf in fr_*.csv risk_*.csv shap_feature_importance_fr*.csv fr_report_*.csv; do
             if [ -f "$csvf" ]; then
               pqf="${csvf%.csv}.parquet"
               if [ ! -f "$pqf" ]; then
                 echo "➡ Parquet üretiliyor: $csvf → $pqf"
-                python3 -c "import pandas as pd, sys; df = pd.read_csv(sys.argv[1]); df.to_parquet(sys.argv[2], index=False)" "$csvf" "$pqf"
-              fi
-            fi
-          done
-
-          # --- PARQUET ZIP ---
-          pq_list=$(ls fr_*.parquet risk_*.parquet 2>/dev/null || true)
-          if [ -n "$pq_list" ]; then
-            echo "🔎 Parquet dosyaları bulundu:"
-            echo "$pq_list"
-            zip -r fr_parquet_outputs.zip $pq_list
-          else
-            echo "⚠️ Parquet bulunamadı, bilgi amaçlı küçük bir dosya ile zip oluşturuluyor."
-            echo "No Parquet outputs produced in this FR run." > fr_parquet_outputs_info.txt
-            zip fr_parquet_outputs.zip fr_parquet_outputs_info.txt
-          fi
-
-          # --- EXTRA: CSV → Parquet dönüştür (eksik parquetler için) ---
-          echo "📌 CSV dosyalarının Parquet versiyonları oluşturuluyor..."
-          for csvf in fr_*.csv risk_*.csv shap_feature_importance_fr*.csv fr_report_*.csv; do
-            if [ -f "$csvf" ]; then
-              pqf="${csvf%.csv}.parquet"
-              if [ ! -f "$pqf" ]; then
-                echo "➡ Parquet üretiliyor: $csvf → $pqf"
-                python3 -c "import pandas as pd, sys; \
-                csvf=sys.argv[1]; pqf=sys.argv[2]; \
-                df=pd.read_csv(csvf); df.to_parquet(pqf, index=False)" "$csvf" "$pqf"
+                python3 -c "import pandas as pd, sys; df=pd.read_csv(sys.argv[1]); df.to_parquet(sys.argv[2], index=False)" "$csvf" "$pqf"
               fi
             fi
           done
@@ -476,16 +459,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fr-crime-outputs-csv
-          path: ${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip
+          path: ${{ env.FR_OUTPUT_DIR }}/fr_csv_outputs.zip
           overwrite: true
           if-no-files-found: error
           retention-days: 14
-
+      
       - name: Upload FR outputs (Parquet ZIP)
         uses: actions/upload-artifact@v4
         with:
           name: fr-crime-outputs-parquet
-          path: ${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip
+          path: ${{ env.FR_OUTPUT_DIR }}/fr_parquet_outputs.zip
           overwrite: true
           if-no-files-found: error
           retention-days: 14
