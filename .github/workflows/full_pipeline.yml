@@ -108,6 +108,12 @@ jobs:
             echo "- Not: 07:00 kapısı nedeniyle adımlar atlandı. Manuel tetiklerken \`force=true\` verin."
           } >> $GITHUB_STEP_SUMMARY
 
+      - name: Stop workflow outside 07:00 (prevent downstream triggers)
+        if: ${{ steps.gate.outputs.proceed != 'true' }}
+        run: |
+          echo "Outside 07:00 SF. Failing run to avoid double workflow_run trigger."
+          exit 1
+
       # ================== EK: ENV BOOTSTRAP (mevcut satırları değiştirmeden override) ==================
       - name: Bootstrap env overrides (BACKFILL & FRESHNESS)
         if: ${{ steps.gate.outputs.proceed == 'true' }}
