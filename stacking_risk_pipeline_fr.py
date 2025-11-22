@@ -63,14 +63,8 @@ SKIP_CV        = _env_flag("SKIP_CV", default=True)     # CV ve OOF hesapların�
 REUSE_MODELS   = _env_flag("REUSE_MODELS", default=True)# Varsa mevcut modelleri kullan
 FOLDS_SELECT   = int(os.getenv("FOLDS_SELECT", "2"))    # Select fazında 2 fold yeterli
 BASE_MODELS    = os.getenv("BASE_MODELS", "hgb,lgb").split(",")  # Günlük set
-if REUSE_MODELS and SKIP_CV:
-    raise SystemExit(
-        "⚠️ ENV çakışması: REUSE_MODELS=1 ve SKIP_CV=1 aynı anda açık!\n"
-        "✅ Günlük skorlamada:   REUSE_MODELS=1, SKIP_CV=1 (fit yok, sadece score)\n"
-        "✅ Eğitim gününde:      REUSE_MODELS=0, SKIP_CV=1 (full fit)\n"
-        "Not: Eğitimden sonra tekrar REUSE_MODELS=1'e dön."
-    )
-
+if REUSE_MODELS and (not (Path(CRIME_DIR) / "models").exists()):
+    print("⚠️ REUSE_MODELS=1 ama models/ yok. İlk run REUSE_MODELS=0 olmalı.")
 
 # ============================================================
 # 🔥 OUT-OF-TIME TRAIN/SCORE AYRIMI (in-sample'ı kırar)
@@ -789,16 +783,32 @@ if __name__ == "__main__":
         print(f"[DEBUG] score_df date span: {score_df['date'].min()} → {score_df['date'].max()}")
       
         # feature engineering artık train_df üzerinden
-        df = train_df
-
+        # --- 1) Ana DF artık sadece training subset ---
+        df = train_df.copy()
+        
+        # Eğer strateji last30d ise score tarafı da limitli olsun (RAM koruma)
+        if strategy in ("last30d", "last1m", "last_30d"):
+            print("⚡ DEBUG: last30d → score_df = train_df olarak ayarlandı.")
+            score_df = train_df.copy()
+        
+        # ---------------------------------------------------------
+        # --- 2) Feature listeleri üret ve GEOID normalize et ---
+        # ---------------------------------------------------------
         counts, nums, cats = build_feature_lists(df)
+        
         if "GEOID" in df.columns:
-            df["GEOID"] = df["GEOID"].astype(str).str.extract(r"(\d+)")[0].str[-GEOID_LEN:].str.zfill(GEOID_LEN)
-
-        for col in [c for c in df.columns if c.startswith("is_")] + [
-            "is_weekend","is_night","is_school_hour","is_business_hour",
-            "is_near_police","is_near_government"
-        ]:
+            df["GEOID"] = (
+                df["GEOID"].astype(str)
+                .str.extract(r"(\d+)")[0]
+                .str[-GEOID_LEN:].str.zfill(GEOID_LEN)
+            )
+        
+        # Boolean kolon düzeltmeleri (TRAIN)
+        for col in (
+            [c for c in df.columns if c.startswith("is_")] +
+            ["is_weekend","is_night","is_school_hour","is_business_hour",
+             "is_near_police","is_near_government"]
+        ):
             if col in df.columns:
                 if df[col].dtype == object:
                     m = df[col].astype(str).str.lower().map({
@@ -807,6 +817,26 @@ if __name__ == "__main__":
                     df[col] = pd.to_numeric(m.fillna(df[col]), errors="coerce")
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
         
+        # ✅ Temizlenmiş df → train_df (tek sefer, doğru yer)
+        train_df = df
+        
+        # Boolean kolon düzeltmeleri (SCORE)  ← REUSE_MODELS için şart
+        for col in (
+            [c for c in score_df.columns if c.startswith("is_")] +
+            ["is_weekend","is_night","is_school_hour","is_business_hour",
+             "is_near_police","is_near_government"]
+        ):
+            if col in score_df.columns:
+                if score_df[col].dtype == object:
+                    m = score_df[col].astype(str).str.lower().map({
+                        "true":1,"yes":1,"y":1,"false":0,"no":0,"n":0,"1":1,"0":0
+                    })
+                    score_df[col] = pd.to_numeric(m.fillna(score_df[col]), errors="coerce")
+                score_df[col] = pd.to_numeric(score_df[col], errors="coerce").fillna(0).astype(int)
+
+        # ---------------------------------------------------------
+        # --- 3) Leakage temizliği ---
+        # ---------------------------------------------------------
         sus, info = find_leaky_numeric_features(
             df,
             list(dict.fromkeys(counts + nums + cats)),
@@ -817,43 +847,45 @@ if __name__ == "__main__":
         if sus:
             counts = [c for c in counts if c not in sus]
             nums   = [c for c in nums   if c not in sus]
+
         feature_cols = list(dict.fromkeys(counts + nums + cats))
 
-        # --- Feature Analysis varsa yükle ---
+        # ---------------------------------------------------------
+        # --- 4) Feature Analysis yükle (varsa) ---
+        # ---------------------------------------------------------
         fa_list_path = Path(CRIME_DIR) / "selected_features_fr.csv"
         if fa_list_path.exists():
-            fa_list = pd.read_csv(fa_list_path)["feature"].tolist()
+            fa_list = pd.read_csv(fa_list_path)["feature"].astype(str).tolist()
             print(f"🔎 Feature Analysis aktif → {len(fa_list)} özellik kullanılacak.")
-        
+
             FORCE_KEEP = {
-                # zaman anahtarları
                 "event_hour","hour_range","day_of_week","month","season",
                 "is_weekend","is_night","is_business_hour","is_school_hour",
-                # geçmiş yoğunluklar
                 "past_7d_crimes","prev_crime_1h","prev_crime_3h","crime_count_past_48h",
-                # çağrı gecikmeleri
                 "911_geo_hr_last3d","911_geo_hr_last7d","311_request_count",
             }
-        
+
             fa_usable = []
             for c in feature_cols:
                 if c == "GEOID":
                     fa_usable.append(c)
                 elif (c in fa_list) or (c in FORCE_KEEP):
                     fa_usable.append(c)
-        
+
             if fa_usable:
                 feature_cols = fa_usable
                 print(f"🎯 FA sonrası kullanılan sütun sayısı: {len(feature_cols)} (FORCE_KEEP dahil)")
-
         else:
             print(f"⚠️ {fa_list_path} bulunamadı. Tüm özellikler kullanılacak.")
 
-        # FA SONRASI: counts / nums / cats listelerini de feature_cols ile hizala
+        # FA sonrası hizalama
         counts = [c for c in counts if c in feature_cols]
         nums   = [c for c in nums   if c in feature_cols]
         cats   = [c for c in cats   if c in feature_cols]
 
+        # ---------------------------------------------------------
+        # --- 5) Tamamen boş kolonları at ---
+        # ---------------------------------------------------------
         empty_cols = [c for c in feature_cols if (c in df.columns and df[c].isna().all())]
         if empty_cols:
             print(f"[CLEAN] Tamamen boş kolonlar atılıyor: {empty_cols}")
@@ -861,19 +893,31 @@ if __name__ == "__main__":
             nums   = [c for c in nums   if c not in empty_cols]
             cats   = [c for c in cats   if c not in empty_cols]
             feature_cols = [c for c in feature_cols if c not in empty_cols]
+
         if not feature_cols:
-            raise ValueError("feature_cols boş kaldı. FA/leakage sonrası en az 1 özellik kalmalı.")
-      
+            raise ValueError("feature_cols boş kaldı (FA/leakage sonrası en az 1 özellik kalmalıdır).")
+
+        # ---------------------------------------------------------
+        # --- 6) Preprocessor oluştur ---
+        # ---------------------------------------------------------
         pre = build_preprocessor(counts, nums, cats)
 
+        # ---------------------------------------------------------
+        # --- 7) score_df GEOID düzeltmesi ---
+        # ---------------------------------------------------------
         if "GEOID" in score_df.columns:
             score_df["GEOID"] = (
                 score_df["GEOID"].astype(str)
                 .str.extract(r"(\d+)")[0]
-                .str[-GEOID_LEN:]
-                .str.zfill(GEOID_LEN)
+                .str[-GEOID_LEN:].str.zfill(GEOID_LEN)
             )
+
+        # ---------------------------------------------------------
+        # --- 8) Train / Score X matrisleri ---
+        # ---------------------------------------------------------
         train_X = train_df[feature_cols].copy()
+        
+        # Eğer last30d ise zaten score_df yukarıda eşitlendi
         score_X = score_df[feature_cols].copy()
         
         num_like = [c for c in feature_cols if (c in counts) or (c in nums)]
@@ -1044,15 +1088,17 @@ if __name__ == "__main__":
         
         grp_cols = ["GEOID", "date", "hour_range"]
 
-        _key_df["_row_id"] = np.arange(len(_key_df))
-        g = _key_df.groupby(grp_cols)["_row_id"].apply(list).reset_index(name="_rows")
+        _key_df["risk_p"] = p_stack.astype(np.float32, copy=False)
+        
+        # sadece grup ortalaması
+        agg = (
+            _key_df
+            .groupby(grp_cols, as_index=False)["risk_p"]
+            .mean()
+        )
+        
+        hourly_df = build_hourly(agg[grp_cols], proba=agg["risk_p"].to_numpy(), threshold=thr)
 
-        p_series = pd.Series(p_stack, index=_key_df["_row_id"])
-        p_agg = g["_rows"].map(lambda idxs: float(np.mean(p_series.loc[idxs])))
-
-        _key_unique = g[grp_cols].copy()
-
-        hourly_df = build_hourly(_key_unique, proba=p_agg.to_numpy(), threshold=thr)
         daily_df  = build_daily_from_hourly(hourly_df, threshold=thr)
 
         hourly_path = Path(CRIME_DIR) / f"risk_hourly_grid_full_labeled{out_suffix}.csv"
