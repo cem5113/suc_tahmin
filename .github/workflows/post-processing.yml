@@ -312,6 +312,23 @@ jobs:
           python -u "$PY" || true
           echo "HEAD fr_crime_09.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
 
+      - name: FR 09.5) Feature Analysis
+        env:
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh "${CRIME_DATA_DIR}"
+          test -f "${CRIME_DATA_DIR}/fr_crime_09.csv" || (echo "❌ fr_crime_09.csv yok"; exit 1)
+
+          python3 scripts/run_feature_analysis_fr.py \
+            --csv "${CRIME_DATA_DIR}/fr_crime_09.csv" \
+            --out_csv "${CRIME_DATA_DIR}/fr_crime_10_FA.csv" \
+            --outdir "${CRIME_DATA_DIR}/outputs_feature_analysis_fr" \
+            --topk 10
+
+          test -f "${CRIME_DATA_DIR}/fr_crime_10_FA.csv" || (echo "❌ fr_crime_10_FA.csv üretilmedi"; exit 1)
+
       - name: FR 10) Train stacking (risk + FA entegre)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
