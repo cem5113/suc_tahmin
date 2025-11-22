@@ -30,11 +30,12 @@ jobs:
       GEOID_LEN: "11"
       PATROL_HORIZON_DAYS: "1"
       PATROL_TOP_K: "50"
-      FAST_MODE: "0"
-      SKIP_CV: "0"
+      FAST_MODE: "1"
+      SKIP_CV: "1"
       REUSE_MODELS: "0"
-      BASE_MODELS: "hgb,lgb"
-      FOLDS_SELECT: "2"
+      BASE_MODELS: "lgb"
+      FOLDS_SELECT: "1"
+      RUN_FORECAST: "0"
 
     steps:
       - name: Checkout repository
@@ -340,22 +341,22 @@ jobs:
 
           test -f "${CRIME_DATA_DIR}/fr_crime_10_FA.csv" || (echo "❌ fr_crime_10_FA.csv üretilmedi"; exit 1)
 
-      - name: FR 10) Train stacking (risk + FA entegre)
+      - name: FR 10) Train stacking (risk + FA entegre) — LITE for GitHub runner
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
           SF_CELLS_PATH:  ${{ github.workspace }}/sf_cells.geojson
           TRAIN_PHASE: "final"
 
-          SUBSET_STRATEGY: "last1m"
-          SUBSET_MIN_POS: "2000"   # 1 ayda pos azsa büyütmeye izin versin
+          SUBSET_STRATEGY: "last1w"
+          SUBSET_MIN_POS: "1500"
 
-          FAST_MODE: "0"
-          SKIP_CV: "1"            # 1 ayda CV yerine hızlı full-fit öneririm
+          FAST_MODE: "1"
+          SKIP_CV: "1"
           REUSE_MODELS: "0"
 
-          BASE_MODELS: "hgb,lgb"
-          FOLDS_SELECT: "2"
+          BASE_MODELS: "lgb"
+          FOLDS_SELECT: "1"
           PATROL_HORIZON_DAYS: "1"
           STACKING_DATASET: "fr_crime_10_FA.csv"
         run: |
@@ -363,6 +364,7 @@ jobs:
           python3 stacking_risk_pipeline.py
 
       - name: FR 11) Forecasts (24h / 7gün / 365gün)
+        if: ${{ env.RUN_FORECAST == '1' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
@@ -371,8 +373,6 @@ jobs:
         run: |
           set -euo pipefail
           python3 -u forecast_pipeline.py
-
-          python3 -u "$PY"
 
       - name: FR 12) SHAP (XGBoost global feature importance)
         env:
