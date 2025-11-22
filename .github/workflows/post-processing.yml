@@ -11,8 +11,8 @@ permissions:
   actions: write
 
 concurrency:
-  group: post-processing-${{ github.event.workflow_run.head_sha }}
-  cancel-in-progress: true
+  group: post-processing-${{ github.run_id }}
+  cancel-in-progress: false
   
 jobs:
   run_fr:
@@ -340,7 +340,7 @@ jobs:
 
           test -f "${CRIME_DATA_DIR}/fr_crime_10_FA.csv" || (echo "❌ fr_crime_10_FA.csv üretilmedi"; exit 1)
 
-      - name: FR 10) Train stacking (risk + FA entegre)
+      - name: FR 10) Train stacking (risk + FA entegre) + resource monitor
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
@@ -354,7 +354,51 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 stacking_risk_pipeline.py
+
+          echo "=== SYSTEM INFO ==="
+          echo "CPU:"
+          lscpu | sed -n '1,30p' || true
+          echo
+          echo "RAM:"
+          free -h || true
+          echo
+          echo "DISK:"
+          df -h || true
+          echo
+
+          echo "=== LIVE MONITOR START (every 30s) ==="
+          (
+            while true; do
+              echo "--- $(date -u) ---"
+              free -h || true
+              ps -o pid,ppid,cmd,%mem,%cpu --sort=-%mem | head -n 15 || true
+              echo
+              sleep 30
+            done
+          ) &
+          MON_PID=$!
+          echo "Monitor PID=$MON_PID"
+
+          echo "=== TRAIN (with /usr/bin/time -v) ==="
+          # time -v tepe RAM/CPU ölçer
+          /usr/bin/time -v python3 stacking_risk_pipeline.py
+          TRAIN_RC=$?
+
+          echo "=== STOP MONITOR ==="
+          kill $MON_PID || true
+          wait $MON_PID 2>/dev/null || true
+
+          echo "TRAIN EXIT CODE=$TRAIN_RC"
+          exit $TRAIN_RC
+
+
+      - name: Debug OOM / kernel kills
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== dmesg (oom?) ==="
+          dmesg | egrep -i "killed process|out of memory|oom" || echo "No OOM lines"
 
       - name: FR 11) Forecasts (24h / 7gün / 365gün)
         env:
