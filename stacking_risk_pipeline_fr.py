@@ -859,20 +859,26 @@ if __name__ == "__main__":
 
         # ---- Eğitim / Skorlama ----
         reused = False
+        
+        # ------------------------------------------------------
+        # 1) REUSE_MODELS → sadece yükle ve score üret
+        # ------------------------------------------------------
         if REUSE_MODELS and stack_any and thr_any:
             print("♻️ REUSE_MODELS=1 → Mevcut stacking modeli ile sadece skorlanıyor.")
             print("   (Not: FA/leakage/dataset değiştiyse 1 kez REUSE_MODELS=0 ile yeniden eğit.)")
+        
             from joblib import load
             pre = load(out_models / "preprocessor.joblib")
             base_pipes = load(out_models / "base_pipes.joblib")
             stack_obj  = load(stack_any[0])
             proba_cols = stack_obj["names"]
             meta       = stack_obj["meta"]
+        
             try:
-                thr        = json.loads((thr_any[0]).read_text())["threshold"]
+                thr = json.loads(thr_any[0].read_text())["threshold"]
             except Exception:
-                thr = 0.5  # REV: eşik bulunamazsa güvenli varsayılan
-            
+                thr = 0.5
+        
             mats = []
             for name in proba_cols:
                 mdl = base_pipes[name]
@@ -882,68 +888,84 @@ if __name__ == "__main__":
                     d = mdl.decision_function(score_X)
                     p = (d - d.min()) / (d.max() - d.min() + 1e-9)
                 mats.append(p.reshape(-1, 1))
-            Z_full = np.hstack(mats)
+        
+            Z_full  = np.hstack(mats)
             p_stack = meta.predict_proba(Z_full)[:, 1] if hasattr(meta, "predict_proba") else meta.decision_function(Z_full)
-
+        
             base_metrics = pd.DataFrame()
             meta_metrics = pd.DataFrame()
             reused = True
-
-        if not reused and SKIP_CV:
-            print("⚡ SKIP_CV=1 → CV/OOF atlanıyor; seçili baz modeller full-data ile fit ediliyor.")
+        
+        
+        # ------------------------------------------------------
+        # 2) SKIP_CV=1 → full-data fit (CV/OOF yok)
+        # ------------------------------------------------------
+        elif SKIP_CV:
+            print("⚡ SKIP_CV=1 → CV/OOF atlanıyor; full-data stacking fit ediliyor.")
+        
             MEM = Memory(location=os.path.join(CRIME_DIR, ".skcache"), verbose=0)
             base_list  = base_estimators(class_weight_balanced=True)
-            base_pipes = {name: Pipeline([("prep", pre), ("clf", est)], memory=MEM) for name, est in base_list}
-
+            base_pipes = {
+                name: Pipeline([("prep", pre), ("clf", est)], memory=MEM)
+                for name, est in base_list
+            }
+        
             proba_cols, mats = [], []
             for name, pipe in base_pipes.items():
                 pipe.fit(train_X, train_y)
                 if hasattr(pipe, "predict_proba"):
                     p = pipe.predict_proba(score_X)[:, 1]
                 else:
-                    d = pipe.decision_function(score_X); p = (d - d.min())/(d.max()-d.min()+1e-9)
-                    p = p.astype(np.float32, copy=False)
-                    mats.append(p.reshape(-1,1)); proba_cols.append(name)
-                    Z_full = np.hstack(mats).astype(np.float32, copy=False)
-            
+                    d = pipe.decision_function(score_X)
+                    p = (d - d.min())/(d.max()-d.min()+1e-9)
+        
+                p = p.astype(np.float32, copy=False)
+                mats.append(p.reshape(-1, 1))
+                proba_cols.append(name)
+        
+            Z_full = np.hstack(mats).astype(np.float32, copy=False)
+        
             meta = LogisticRegression(max_iter=5000)
             Z_train = np.column_stack([
-                (base_pipes[n].predict_proba(train_X)[:,1] if hasattr(base_pipes[n],"predict_proba")
+                (base_pipes[n].predict_proba(train_X)[:, 1]
+                 if hasattr(base_pipes[n], "predict_proba")
                  else base_pipes[n].decision_function(train_X))
                 for n in proba_cols
             ]).astype(np.float32, copy=False)
-            
+        
             meta.fit(Z_train, train_y)
-
-            
             p_stack = meta.predict_proba(Z_full)[:, 1]
-            thr = optimal_threshold(train_y, meta.predict_proba(
-                np.column_stack([
-                    base_pipes[n].predict_proba(train_X)[:,1] if hasattr(base_pipes[n],"predict_proba")
-                    else (base_pipes[n].decision_function(train_X))
-                    for n in proba_cols
-                ])
-            )[:,1])
-
+            thr = optimal_threshold(train_y, meta.predict_proba(Z_train)[:, 1])
+        
             out_models.mkdir(parents=True, exist_ok=True)
             dump(pre, out_models / "preprocessor.joblib")
             dump(base_pipes, out_models / "base_pipes.joblib")
             dump({"names": proba_cols, "meta": meta}, out_models / "stacking_meta_logreg.joblib")
-            (out_models / "threshold_meta_logreg.json").write_text(json.dumps({"threshold": float(thr)}), encoding="utf-8")
+            (out_models / "threshold_meta_logreg.json").write_text(
+                json.dumps({"threshold": float(thr)}), encoding="utf-8"
+            )
+        
             base_metrics = pd.DataFrame()
             meta_metrics = pd.DataFrame()
-
-        if not reused and not SKIP_CV:
+        
+        
+        # ------------------------------------------------------
+        # 3) NORMAL CV/OOF (SKIP_CV=0)
+        # ------------------------------------------------------
+        else:
             print("\n🔎 Evaluating base + OOF (with progress)…")
-            base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(base_pipes, train_X, train_y, cv, cv_jobs=CV_JOBS)
+            base_metrics, Z, base_names, oof_map = cv_oof_and_metrics(
+                base_pipes, train_X, train_y, cv, cv_jobs=CV_JOBS
+            )
             meta_metrics = evaluate_meta_on_oof(Z, train_y)
-            
+        
             best_row = meta_metrics.sort_values("pr_auc", ascending=False).iloc[0]
             chosen_meta = "lgb" if ("LightGBM" in best_row["model"]) else "logreg"
-            
-            meta_name, proba_cols, _, thr = fit_full_models_and_export(base_pipes, pre, train_X, train_y, choose_meta=chosen_meta)
-            
-            # eğitilen full modellerle SCORE setini tahmin et
+        
+            meta_name, proba_cols, _, thr = fit_full_models_and_export(
+                base_pipes, pre, train_X, train_y, choose_meta=chosen_meta
+            )
+        
             mats = []
             for name in proba_cols:
                 mdl = base_pipes[name]
@@ -952,14 +974,15 @@ if __name__ == "__main__":
                 else:
                     d = mdl.decision_function(score_X)
                     p = (d - d.min())/(d.max()-d.min()+1e-9)
-                mats.append(p.reshape(-1,1))
+                mats.append(p.reshape(-1, 1))
+        
             Z_full = np.hstack(mats)
-            
+        
             from joblib import load
-            stack_obj = load(Path(CRIME_DIR)/"models"/f"stacking_{meta_name}.joblib")
+            stack_obj = load(out_models / f"stacking_{meta_name}.joblib")
             meta = stack_obj["meta"]
             p_stack = meta.predict_proba(Z_full)[:, 1] if hasattr(meta,"predict_proba") else meta.decision_function(Z_full)
-
+        
             print(f"Saved models for {out_suffix}. Threshold ({meta_name}) = {thr:.4f}")
 
         # ---- Saatlik & Günlük risk tablolarını üret ve kaydet (her koşulda) ----
