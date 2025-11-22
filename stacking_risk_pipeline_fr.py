@@ -722,14 +722,34 @@ if __name__ == "__main__":
             score_df = df.copy()
             print("🧊 OOT split pasif → train=score=df (in-sample risk üretir!)")
 
+        def subset_last_ndays(df: pd.DataFrame, days: int = 30, min_pos: int = 2_000) -> pd.DataFrame:
+            """Son N gün. Debug/ram koruma için."""
+            if "date" not in df.columns:
+                return df
+            dmax = pd.to_datetime(df["date"], errors="coerce").max()
+            if pd.isna(dmax):
+                return df
+        
+            sub = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=days))]
+        
+            # güvenlik: pozitif çok azsa pencereyi kademeli büyüt
+            if "Y_label" in df.columns and sub["Y_label"].sum() < min_pos:
+                for d in (60, 90, 120, 180, 365):
+                    sub2 = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=d))]
+                    if sub2["Y_label"].sum() >= min_pos:
+                        sub = sub2
+                        break
+            return sub
+        
+        
         def subset_last_nm(df: pd.DataFrame, months: int = 24, min_pos: int = 10_000) -> pd.DataFrame:
+            """Mevcut aylık pencere (dokunmadık)."""
             if "date" not in df.columns:
                 return df
             dmax = pd.to_datetime(df["date"], errors="coerce").max()
             if pd.isna(dmax):
                 return df
             sub = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=30*months))]
-            # güvenlik: pozitif azsa pencereyi büyüt
             if "Y_label" in df.columns and sub["Y_label"].sum() < min_pos:
                 for m in (36, 48, 60):
                     sub2 = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=30*m))]
@@ -737,16 +757,20 @@ if __name__ == "__main__":
                         sub = sub2
                         break
             return sub
+
         
         # --- select/final ikisinde de subset uygula ---
         before = train_df.shape
         min_pos = int(os.getenv("SUBSET_MIN_POS", "10000"))
         
-        # default: select=last12m, final=last24m
-        default_strategy = "last12m" if phase_is_select() else "last24m"
+        # default: select=last12m, final=last1m (debug/ram için)
+        default_strategy = "last12m" if phase_is_select() else "last1m"
         strategy = os.getenv("SUBSET_STRATEGY", default_strategy).lower()
         
-        if strategy == "last12m":
+        if strategy in ("last1m", "last30d", "last_30d"):
+            # 1 aylık eğitim
+            train_df = subset_last_ndays(train_df, days=30, min_pos=max(2000, min_pos//5))
+        elif strategy == "last12m":
             train_df = subset_last12m(train_df, min_pos=min_pos)
         elif strategy == "last24m":
             train_df = subset_last_nm(train_df, months=24, min_pos=min_pos)
@@ -754,6 +778,9 @@ if __name__ == "__main__":
             train_df = subset_last_nm(train_df, months=36, min_pos=min_pos)
         elif strategy == "none":
             pass
+        else:
+            print(f"⚠️ Bilinmeyen SUBSET_STRATEGY={strategy} → none gibi davranıyorum.")
+
         
         after = train_df.shape
         print(f"🔧 Subset ({strategy}): {before} → {after} (pos={int(train_df['Y_label'].sum())})")
