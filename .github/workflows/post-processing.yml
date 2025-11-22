@@ -340,65 +340,27 @@ jobs:
 
           test -f "${CRIME_DATA_DIR}/fr_crime_10_FA.csv" || (echo "❌ fr_crime_10_FA.csv üretilmedi"; exit 1)
 
-      - name: FR 10) Train stacking (risk + FA entegre) + resource monitor
+      - name: FR 10) Train stacking (risk + FA entegre)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
           SF_CELLS_PATH:  ${{ github.workspace }}/sf_cells.geojson
-
           TRAIN_PHASE: "final"
+
+          SUBSET_STRATEGY: "last1m"
+          SUBSET_MIN_POS: "2000"   # 1 ayda pos azsa büyütmeye izin versin
+
+          FAST_MODE: "0"
+          SKIP_CV: "1"            # 1 ayda CV yerine hızlı full-fit öneririm
+          REUSE_MODELS: "0"
+
           BASE_MODELS: "hgb,lgb"
           FOLDS_SELECT: "2"
           PATROL_HORIZON_DAYS: "1"
           STACKING_DATASET: "fr_crime_10_FA.csv"
-        shell: bash
         run: |
           set -euo pipefail
-
-          echo "=== SYSTEM INFO ==="
-          echo "CPU:"
-          lscpu | sed -n '1,30p' || true
-          echo
-          echo "RAM:"
-          free -h || true
-          echo
-          echo "DISK:"
-          df -h || true
-          echo
-
-          echo "=== LIVE MONITOR START (every 30s) ==="
-          (
-            while true; do
-              echo "--- $(date -u) ---"
-              free -h || true
-              ps -o pid,ppid,cmd,%mem,%cpu --sort=-%mem | head -n 15 || true
-              echo
-              sleep 30
-            done
-          ) &
-          MON_PID=$!
-          echo "Monitor PID=$MON_PID"
-
-          echo "=== TRAIN (with /usr/bin/time -v) ==="
-          # time -v tepe RAM/CPU ölçer
-          /usr/bin/time -v python3 stacking_risk_pipeline.py
-          TRAIN_RC=$?
-
-          echo "=== STOP MONITOR ==="
-          kill $MON_PID || true
-          wait $MON_PID 2>/dev/null || true
-
-          echo "TRAIN EXIT CODE=$TRAIN_RC"
-          exit $TRAIN_RC
-
-
-      - name: Debug OOM / kernel kills
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "=== dmesg (oom?) ==="
-          dmesg | egrep -i "killed process|out of memory|oom" || echo "No OOM lines"
+          python3 stacking_risk_pipeline.py
 
       - name: FR 11) Forecasts (24h / 7gün / 365gün)
         env:
