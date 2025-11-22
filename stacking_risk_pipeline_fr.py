@@ -381,13 +381,13 @@ def build_preprocessor(count_features, num_features, cat_features) -> ColumnTran
     ])
     numeric_pipe_cont = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
-        ("scaler", StandardScaler(with_mean=True, with_std=True)),
+        ("scaler", StandardScaler(with_mean=False, with_std=True)),
     ])
 
     try:
         ohe = OneHotEncoder(
             handle_unknown="ignore",
-            sparse_output=False,
+            sparse_output=True, 
             min_frequency=100,
             dtype=np.float32,
         )
@@ -449,7 +449,10 @@ def base_estimators(class_weight_balanced=True):
             learning_rate=0.08 if light else 0.06,
             max_bins=255,
             l2_regularization=0.0,
-            random_state=42
+            random_state=42,
+            early_stopping=True,        
+            n_iter_no_change=20,        
+            max_iter=500         
         )))
     HAS_LGB = False
     try:
@@ -466,7 +469,7 @@ def base_estimators(class_weight_balanced=True):
             subsample=0.9, colsample_bytree=0.9,
             min_data_in_leaf=40 if light else 50,
             force_col_wise=True, verbosity=-1,
-            objective="binary", class_weight=cw, n_jobs=-1, random_state=42
+            objective="binary", class_weight=cw, n_jobs=2, random_state=42
         )))
     if not FAST_MODE:
         from sklearn.linear_model import LogisticRegression as LR
@@ -477,9 +480,9 @@ def base_estimators(class_weight_balanced=True):
         ests += [
             ("rf", RandomForestClassifier(n_estimators=150 if light else 400, max_depth=14, min_samples_leaf=3,
                                           class_weight="balanced_subsample" if class_weight_balanced else None,
-                                          n_jobs=-1, random_state=42)),
+                                          n_jobs=2, random_state=42)),
             ("et", ExtraTreesClassifier(n_estimators=200 if light else 500, max_depth=14, min_samples_leaf=3,
-                                        class_weight=cw, n_jobs=-1, random_state=42)),
+                                        class_weight=cw, n_jobs=2, random_state=42)),
         ]
     return ests
 
@@ -556,7 +559,9 @@ def evaluate_meta_on_oof(Z: np.ndarray, y: pd.Series):
         models.append(("Stacking(meta=LightGBM)", LGBMClassifier(
             n_estimators=300 if phase_is_select() else 400, num_leaves=31, learning_rate=0.05,
             subsample=0.9, colsample_bytree=0.9, min_data_in_leaf=50,
-            force_col_wise=True, verbosity=-1, random_state=42
+            force_col_wise=True, verbosity=-1,
+            n_jobs=2,                   
+            random_state=42
         )))
     except Exception:
         pass
@@ -603,6 +608,7 @@ def fit_full_models_and_export(
                 n_estimators=300 if phase_is_select() else 400, num_leaves=31, learning_rate=0.05,
                 subsample=0.9, colsample_bytree=0.9, min_data_in_leaf=50,
                 force_col_wise=True, verbosity=-1, random_state=42
+                n_jobs=2,     
             )
             meta_name = "meta_lgb"
         except Exception:
