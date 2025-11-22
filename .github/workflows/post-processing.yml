@@ -321,7 +321,7 @@ jobs:
           ls -lh "${CRIME_DATA_DIR}"
           test -f "${CRIME_DATA_DIR}/fr_crime_09.csv" || (echo "❌ fr_crime_09.csv yok"; exit 1)
 
-          python3 scripts/run_feature_analysis_fr.py \
+          python3 run_feature_analysis_fr.py \
             --csv "${CRIME_DATA_DIR}/fr_crime_09.csv" \
             --out_csv "${CRIME_DATA_DIR}/fr_crime_10_FA.csv" \
             --outdir "${CRIME_DATA_DIR}/outputs_feature_analysis_fr" \
