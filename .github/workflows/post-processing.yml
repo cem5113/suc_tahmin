@@ -11,7 +11,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: post-processing-${{ github.event.workflow_run.id }}
+  group: post-processing-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: true
   
 jobs:
