@@ -15,6 +15,11 @@ Aşama 2 (TRAIN_PHASE=final):
 """
 
 import os, re, json, warnings
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -51,7 +56,7 @@ def _env_flag(name: str, default: bool = False) -> int:
 CRIME_DIR   = os.getenv("CRIME_DATA_DIR", "crime_prediction_data")
 GEOID_LEN   = int(os.getenv("GEOID_LEN", "11"))
 TRAIN_PHASE = os.getenv("TRAIN_PHASE", "select").strip().lower()  # select | final
-CV_JOBS     = int(os.getenv("CV_JOBS", "4"))
+CV_JOBS     = int(os.getenv("CV_JOBS", "1" if TRAIN_PHASE=="final" else "4"))
 warnings.filterwarnings("ignore", category=FutureWarning)
 FAST_MODE      = _env_flag("FAST_MODE", default=True)   # Günlükte hızlı çalış
 SKIP_CV        = _env_flag("SKIP_CV", default=True)     # CV ve OOF hesaplarını atla
@@ -445,15 +450,16 @@ def base_estimators(class_weight_balanced=True):
     ests = []
     if ("hgb" in BASE_MODELS) or FAST_MODE:
         ests.append(("hgb", HistGradientBoostingClassifier(
-            max_depth=6 if light else 8,
+            max_depth=6 if light else 7,          
             learning_rate=0.08 if light else 0.06,
             max_bins=255,
             l2_regularization=0.0,
             random_state=42,
-            early_stopping=True,        
-            n_iter_no_change=20,        
-            max_iter=500         
+            early_stopping=True,
+            n_iter_no_change=20,
+            max_iter=180 if light else 220         
         )))
+
     HAS_LGB = False
     try:
         from lightgbm import LGBMClassifier  # type: ignore
@@ -463,14 +469,18 @@ def base_estimators(class_weight_balanced=True):
     if (("lgb" in BASE_MODELS) or FAST_MODE) and HAS_LGB:
         from lightgbm import LGBMClassifier
         ests.append(("lgb", LGBMClassifier(
-            n_estimators=180 if light else 400,
+            n_estimators=150 if light else 220,    
             num_leaves=31,
             learning_rate=0.07 if light else 0.05,
             subsample=0.9, colsample_bytree=0.9,
             min_data_in_leaf=40 if light else 50,
+            max_bin=255,                          
             force_col_wise=True, verbosity=-1,
-            objective="binary", class_weight=cw, n_jobs=2, random_state=42
+            objective="binary", class_weight=cw,
+            n_jobs=1, num_threads=1,              
+            random_state=42
         )))
+
     if not FAST_MODE:
         from sklearn.linear_model import LogisticRegression as LR
         from sklearn.linear_model import RidgeClassifier as RC
@@ -557,12 +567,15 @@ def evaluate_meta_on_oof(Z: np.ndarray, y: pd.Series):
     try:
         from lightgbm import LGBMClassifier  # type: ignore
         models.append(("Stacking(meta=LightGBM)", LGBMClassifier(
-            n_estimators=300 if phase_is_select() else 400, num_leaves=31, learning_rate=0.05,
+            n_estimators=200 if phase_is_select() else 250,  # 400 → 250
+            num_leaves=31, learning_rate=0.05,
             subsample=0.9, colsample_bytree=0.9, min_data_in_leaf=50,
+            max_bin=255,
             force_col_wise=True, verbosity=-1,
-            n_jobs=2,                   
+            n_jobs=1, num_threads=1,
             random_state=42
         )))
+
     except Exception:
         pass
 
@@ -605,11 +618,15 @@ def fit_full_models_and_export(
         try:
             from lightgbm import LGBMClassifier
             meta = LGBMClassifier(
-                n_estimators=300 if phase_is_select() else 400, num_leaves=31, learning_rate=0.05,
+                n_estimators=200 if phase_is_select() else 250,
+                num_leaves=31, learning_rate=0.05,
                 subsample=0.9, colsample_bytree=0.9, min_data_in_leaf=50,
-                force_col_wise=True, verbosity=-1, n_jobs=2,
-                random_state=42     
+                max_bin=255,
+                force_col_wise=True, verbosity=-1,
+                n_jobs=1, num_threads=1,
+                random_state=42
             )
+
             meta_name = "meta_lgb"
         except Exception:
             meta = LogisticRegression(max_iter=5000); meta_name = "meta_logreg"
@@ -697,16 +714,42 @@ if __name__ == "__main__":
             score_df = df.copy()
             print("🧊 OOT split pasif → train=score=df (in-sample risk üretir!)")
 
-        if phase_is_select():
-            before = train_df.shape
-            min_pos = int(os.getenv("SUBSET_MIN_POS", "10000"))
-            strategy = os.getenv("SUBSET_STRATEGY", "last12m").lower()
-            if strategy == "last12m":
-                train_df = subset_last12m(train_df, min_pos=min_pos)
-            elif strategy == "none":
-                pass
-            after = train_df.shape
-            print(f"🔧 Subset ({strategy}): {before} → {after} (pos={int(train_df['Y_label'].sum())})")
+        def subset_last_nm(df: pd.DataFrame, months: int = 24, min_pos: int = 10_000) -> pd.DataFrame:
+            if "date" not in df.columns:
+                return df
+            dmax = pd.to_datetime(df["date"], errors="coerce").max()
+            if pd.isna(dmax):
+                return df
+            sub = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=30*months))]
+            # güvenlik: pozitif azsa pencereyi büyüt
+            if "Y_label" in df.columns and sub["Y_label"].sum() < min_pos:
+                for m in (36, 48, 60):
+                    sub2 = df[pd.to_datetime(df["date"], errors="coerce") >= (dmax - pd.Timedelta(days=30*m))]
+                    if sub2["Y_label"].sum() >= min_pos:
+                        sub = sub2
+                        break
+            return sub
+        
+        # --- select/final ikisinde de subset uygula ---
+        before = train_df.shape
+        min_pos = int(os.getenv("SUBSET_MIN_POS", "10000"))
+        
+        # default: select=last12m, final=last24m
+        default_strategy = "last12m" if phase_is_select() else "last24m"
+        strategy = os.getenv("SUBSET_STRATEGY", default_strategy).lower()
+        
+        if strategy == "last12m":
+            train_df = subset_last12m(train_df, min_pos=min_pos)
+        elif strategy == "last24m":
+            train_df = subset_last_nm(train_df, months=24, min_pos=min_pos)
+        elif strategy == "last36m":
+            train_df = subset_last_nm(train_df, months=36, min_pos=min_pos)
+        elif strategy == "none":
+            pass
+        
+        after = train_df.shape
+        print(f"🔧 Subset ({strategy}): {before} → {after} (pos={int(train_df['Y_label'].sum())})")
+
           
         print(f"[DEBUG] score_df date span: {score_df['date'].min()} → {score_df['date'].max()}")
       
@@ -859,18 +902,19 @@ if __name__ == "__main__":
                     p = pipe.predict_proba(score_X)[:, 1]
                 else:
                     d = pipe.decision_function(score_X); p = (d - d.min())/(d.max()-d.min()+1e-9)
-                mats.append(p.reshape(-1,1)); proba_cols.append(name)
-            Z_full = np.hstack(mats)
+                    p = p.astype(np.float32, copy=False)
+                    mats.append(p.reshape(-1,1)); proba_cols.append(name)
+                    Z_full = np.hstack(mats).astype(np.float32, copy=False)
             
             meta = LogisticRegression(max_iter=5000)
-            meta.fit(
-                np.column_stack([
-                    base_pipes[n].predict_proba(train_X)[:,1] if hasattr(base_pipes[n],"predict_proba")
-                    else (base_pipes[n].decision_function(train_X))
-                    for n in proba_cols
-                ]),
-                train_y
-            )
+            Z_train = np.column_stack([
+                (base_pipes[n].predict_proba(train_X)[:,1] if hasattr(base_pipes[n],"predict_proba")
+                 else base_pipes[n].decision_function(train_X))
+                for n in proba_cols
+            ]).astype(np.float32, copy=False)
+            
+            meta.fit(Z_train, train_y)
+
             
             p_stack = meta.predict_proba(Z_full)[:, 1]
             thr = optimal_threshold(train_y, meta.predict_proba(
