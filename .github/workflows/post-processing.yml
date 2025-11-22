@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: post-processing-${{ github.event.workflow_run.id }}
-  cancel-in-progress: false
+  cancel-in-progress: true
   
 jobs:
   run_fr:
