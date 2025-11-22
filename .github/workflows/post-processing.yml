@@ -30,9 +30,9 @@ jobs:
       GEOID_LEN: "11"
       PATROL_HORIZON_DAYS: "1"
       PATROL_TOP_K: "50"
-      FAST_MODE: "1"
-      SKIP_CV: "1"
-      REUSE_MODELS: "1"
+      FAST_MODE: "0"
+      SKIP_CV: "0"
+      REUSE_MODELS: "0"
       BASE_MODELS: "hgb,lgb"
       FOLDS_SELECT: "2"
 
@@ -345,13 +345,8 @@ jobs:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
           SF_CELLS_PATH:  ${{ github.workspace }}/sf_cells.geojson
-      
-          # ✅ TRAIN RUN (blok 3)
+
           TRAIN_PHASE: "final"
-          FAST_MODE: "0"        # full base set istiyorsan 0
-          SKIP_CV: "0"          # CV/OOF aktif
-          REUSE_MODELS: "0"     # baştan eğit
-      
           BASE_MODELS: "hgb,lgb"
           FOLDS_SELECT: "2"
           PATROL_HORIZON_DAYS: "1"
