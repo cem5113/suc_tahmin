@@ -367,16 +367,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-      
+
+          # forecast_pipeline.py sadece root'ta
           if [ -f forecast_pipeline.py ]; then
             PY=forecast_pipeline.py
           else
-            echo "❌ forecast_pipeline.py bulunamadı."
-            ls -R .
+            echo "❌ forecast_pipeline.py root'ta bulunamadı."
+            echo "Repo kökü:"
+            ls -lah .
             exit 1
           fi
-      
-          python -u "$PY"
+
+          python3 -u "$PY"
 
       - name: FR 12) SHAP (XGBoost global feature importance)
         env:
