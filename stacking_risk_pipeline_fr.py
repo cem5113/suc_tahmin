@@ -607,8 +607,8 @@ def fit_full_models_and_export(
             meta = LGBMClassifier(
                 n_estimators=300 if phase_is_select() else 400, num_leaves=31, learning_rate=0.05,
                 subsample=0.9, colsample_bytree=0.9, min_data_in_leaf=50,
-                force_col_wise=True, verbosity=-1, random_state=42
-                n_jobs=2,     
+                force_col_wise=True, verbosity=-1, n_jobs=2,
+                random_state=42     
             )
             meta_name = "meta_lgb"
         except Exception:
