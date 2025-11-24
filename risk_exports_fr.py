@@ -1,233 +1,103 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-risk_exports_fr.py — İki çıktı üretir (başlıkları AYNI):
-  1) crime_prediction_data/risk_hourly_grid_full_labeled.csv   (≤7 gün, saatlik; hour_range="HH-HH")
-  2) crime_prediction_data/risk_daily_grid_full_labeled.csv    (≤365 gün, günlük; hour_range="")
-Kolonlar:
-  GEOID,date,hour_range,risk_score,risk_level,risk_decile,expected_count,
-  top1_category,top1_prob,top1_expected,
-  top2_category,top2_prob,top2_expected,
-  top3_category,top3_prob,top3_expected
-"""
-
-import os, sys, re, math, argparse
+# risk_exports_fr.py  
+import os, math, argparse
 from pathlib import Path
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
 
-try:
-    from zoneinfo import ZoneInfo
-except Exception:
-    ZoneInfo = None
+CRIME_DIR = os.getenv("CRIME_DATA_DIR", os.getcwd())
+SF_TZ = ZoneInfo("America/Los_Angeles")
 
-# ──────────────────────────────────────────────────────────────
-# Ortam / Sabitler
-# ──────────────────────────────────────────────────────────────
-CRIME_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).resolve()
-CRIME_DIR.mkdir(parents=True, exist_ok=True)
+# =========================
+# Helpers
+# =========================
+def _normalize_hour_range(hr):
+    """
+    Saatlik slot formatını garanti et: "HH-(HH+1)"
+    - hr boşsa → "00-01"
+    - hr tek sayıysa → o saatten +1 slot üret
+    - hr "a-b" formatındaysa b ignore edilip a+1 üretilir (tutarlılık)
+    """
+    if pd.isna(hr):
+        return "00-01"
 
-REQ_COLS = [
-    "GEOID","date","hour_range","risk_score","risk_level","risk_decile","expected_count",
-    "top1_category","top1_prob","top1_expected",
-    "top2_category","top2_prob","top2_expected",
-    "top3_category","top3_prob","top3_expected",
-]
+    s = str(hr).strip().replace("–", "-").replace("—", "-")
 
-HOUR_WINDOW_DAYS   = int(os.getenv("RISK_HOURLY_WINDOW_DAYS", "7"))       # Saatlik (≤7 gün)
-DAILY_WINDOW_DAYS  = int(os.getenv("RISK_DAILY_WINDOW_DAYS", "365"))      # Günlük (≤365 gün)
-BASELINE_WINDOW    = int(os.getenv("RISK_BASELINE_WINDOW_DAYS", "30"))    # Beklenen için Poisson pencere
-GEOID_LEN          = int(os.getenv("GEOID_LEN","11"))
+    # "a-b" yakala
+    m = pd.Series([s]).str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
+    if m.notna().all(axis=1).iloc[0]:
+        a = int(float(m.iloc[0, 0])) % 24
+        b = (a + 1) % 24
+        return f"{a:02d}-{b:02d}"
 
-# ──────────────────────────────────────────────────────────────
-# Yardımcılar
-# ──────────────────────────────────────────────────────────────
-def _hr_slot_from_hour(h: int) -> str:
-    h = int(pd.to_numeric(h, errors="coerce")) if pd.notna(h) else 0
-    a = (h // 3) * 3
-    b = (a + 3) % 24
+    try:
+        h = int(float(s)) % 24
+    except Exception:
+        h = 0
+
+    a = h
+    b = (a + 1) % 24
     return f"{a:02d}-{b:02d}"
 
-def _now_sf_slot() -> str:
-    now = datetime.now(ZoneInfo("America/Los_Angeles")) if ZoneInfo else datetime.utcnow()
-    return _hr_slot_from_hour(now.hour)
 
-def _now_sf_date_str() -> str:
-    now = datetime.now(ZoneInfo("America/Los_Angeles")) if ZoneInfo else datetime.utcnow()
-    return now.date().isoformat()
-
-def _normalize_hour_range_series(s: pd.Series) -> pd.Series:
-    """Karışık saat/hh-hh değerlerini 'HH-HH' slotuna dönüştürür; metin 'HH-HH' ise korur."""
-    s = s.astype(str)
-    mask_slot = s.str.fullmatch(r"\s*\d{1,2}\s*-\s*\d{1,2}\s*")
-    mask_num  = ~mask_slot & s.str.fullmatch(r"\s*\d{1,2}\s*")
-
-    out = pd.Series(index=s.index, dtype="string")
-    # metin slot → boşlukları temizle, '12 - 15' → '12-15'
-    out[mask_slot] = s[mask_slot].str.replace(r"\s*", "", regex=True)
-    # tek sayı → slota çevir
-    out[mask_num]  = s[mask_num].apply(lambda x: _hr_slot_from_hour(int(x)))
-    # geriye kalanlar boş kalır (dışarıda dolduracağız)
-    return out
-
-def _ensure_date_hour(df: pd.DataFrame) -> pd.DataFrame:
+def _ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    GEOID, date(YYYY-MM-DD), hour_range('HH-HH') üretir/sağlamlaştırır.
-    - 'HH-HH' metinleri KORUNUR.
-    - Sayı → 'HH-HH'
-    - Eksik/bozuksa: post-processing ANINDAKİ SF slotu yazılır.
-    - date yoksa: DF'teki zamandan türet; yoksa sf_crime.csv max(date); o da yoksa SF bugünü.
+    df'de date + hour_range + GEOID'i güvenle hazırla.
+    date yoksa datetime'dan türet, ikisi de yoksa bugünkü SF tarihi.
+
+    ✅ hour_range: SAATLİK "HH-(HH+1)"
     """
-    d = df.copy()
-    low = {c.lower(): c for c in d.columns}
+    df = df.copy()
 
-    # GEOID normalize
-    if "GEOID" in d.columns:
-        d["GEOID"] = (
-            d["GEOID"].astype(str)
-              .str.extract(r"(\d+)", expand=False)
-              .fillna("")
-              .str.zfill(GEOID_LEN)
-        )
-
-    # date türet
-    got_date = False
-    if "date" in d.columns:
-        d["date"] = pd.to_datetime(d["date"], errors="coerce").dt.date.astype("string")
-        got_date = True
+    # --- date ---
+    if "date" in df.columns:
+        dt = pd.to_datetime(df["date"], errors="coerce")
+    elif "datetime" in df.columns:
+        dt = pd.to_datetime(df["datetime"], errors="coerce")
     else:
-        for c in ("datetime","incident_datetime","date_time","dt","event_time"):
-            if c in low:
-                dc = pd.to_datetime(d[low[c]], errors="coerce", utc=False)
-                if dc.notna().any():
-                    d["date"] = dc.dt.date.astype("string")
-                    got_date = True
-                    break
-    if (not got_date) or d["date"].isna().all() or (d["date"].astype(str)=="").all():
-        # sf_crime.csv max(date)
-        maxd = None
-        p = CRIME_DIR / "sf_crime.csv"
-        if p.is_file():
-            try:
-                tmp = pd.read_csv(p, low_memory=False)
-                cand_cols = [c for c in ("date","datetime","incident_datetime") if c in tmp.columns]
-                if cand_cols:
-                    td = pd.to_datetime(tmp[cand_cols[0]], errors="coerce")
-                    maxd = td.max().date() if td.notna().any() else None
-            except Exception:
-                pass
-        d["date"] = str(maxd) if maxd else _now_sf_date_str()
+        dt = pd.Series([pd.Timestamp(datetime.now(SF_TZ))] * len(df))
 
-    # hour_range → 'HH-HH'
-    if "hour_range" in d.columns:
-        hr = _normalize_hour_range_series(d["hour_range"])
-        remain = hr.isna()
-        # event_hour/hour vb.
-        if remain.any():
-            for c in ("event_hour","hour","hour_of_day"):
-                if c in low:
-                    tmp = pd.to_numeric(d.loc[remain, low[c]], errors="coerce")
-                    has = tmp.notna()
-                    hr.loc[remain & has] = tmp[has].astype(int).apply(_hr_slot_from_hour)
-                    remain = hr.isna()
-                    if not remain.any(): break
-        # datetime'dan
-        if remain.any():
-            for c in ("datetime","incident_datetime","date_time"):
-                if c in low:
-                    dt = pd.to_datetime(d.loc[remain, low[c]], errors="coerce", utc=False)
-                    has = dt.notna()
-                    hr.loc[remain & has] = dt[has].dt.hour.astype(int).apply(_hr_slot_from_hour)
-                    remain = hr.isna()
-                    if not remain.any(): break
-        # hâlâ boşsa SF anı
-        if remain.any():
-            hr.loc[remain] = _now_sf_slot()
-        d["hour_range"] = hr.astype("string")
+    if dt.notna().sum() == 0:
+        print("[WARN] date/datetime parse edilemedi → SF today fallback.")
+        dt = pd.Series([pd.Timestamp(datetime.now(SF_TZ))] * len(df))
+
+    df["date"] = dt.dt.date.astype("string")
+
+    # --- hour_range ---
+    if "hour_range" not in df.columns:
+        if "event_hour" in df.columns:
+            h = pd.to_numeric(df["event_hour"], errors="coerce").fillna(0).astype(int) % 24
+        elif "datetime" in df.columns:
+            h = pd.to_datetime(df["datetime"], errors="coerce").dt.hour.fillna(0).astype(int) % 24
+        else:
+            h = pd.Series(np.zeros(len(df), dtype=int))
+
+        a = h
+        b = (h + 1) % 24
+        df["hour_range"] = a.map("{:02d}".format) + "-" + pd.Series(b).map("{:02d}".format)
     else:
-        # kolon yoksa aynı mantık
-        filled = None
-        for c in ("event_hour","hour","hour_of_day"):
-            if c in low:
-                tmp = pd.to_numeric(d[low[c]], errors="coerce")
-                if tmp.notna().any():
-                    filled = tmp.astype(int).apply(_hr_slot_from_hour)
-                    break
-        if filled is None:
-            ref = None
-            for c in ("datetime","incident_datetime","date_time"):
-                if c in low:
-                    ref = pd.to_datetime(d[low[c]], errors="coerce", utc=False)
-                    break
-            if ref is not None and ref.notna().any():
-                filled = ref.dt.hour.astype(int).apply(_hr_slot_from_hour)
-            else:
-                filled = pd.Series([_now_sf_slot()]*len(d), index=d.index)
-        d["hour_range"] = filled.astype("string")
+        df["hour_range"] = df["hour_range"].apply(_normalize_hour_range)
 
-    return d
+    # --- GEOID ---
+    if "GEOID" in df.columns:
+        df["GEOID"] = df["GEOID"].astype(str)
 
-def _quantile_deciles(x: pd.Series) -> pd.Series:
-    try:
-        ranks = x.rank(method="first", pct=True)
-        if ranks.nunique() < 2:
-            return pd.Series(np.ones(len(x), dtype=int), index=x.index)
-        q = pd.qcut(ranks, 10, labels=False, duplicates="drop") + 1
-        return q.astype(int)
-    except Exception:
-        return pd.Series(np.ones(len(x), dtype=int), index=x.index)
+    return df
 
-def _risk_level_from_score(x: float, q80: float, q90: float, threshold: float) -> str:
-    if x >= max(threshold, q90):        return "high"
-    if x >= max(threshold*0.8, q80):    return "medium"
-    return "low"
 
-def _pick_first(*paths):
-    for p in paths:
-        if p and Path(p).is_file():
-            return str(p)
-    return None
+def _load_recent_crime(window_days=30):
+    """
+    Baseline ve top3 için sf_crime.csv'den son window_days verisini getir.
+    ✅ hour_range: SAATLİK
+    """
+    raw_path = os.path.join(CRIME_DIR, "sf_crime.csv")
+    if not os.path.exists(raw_path):
+        return None
 
-def _read_proba_path(pth: str) -> np.ndarray:
-    p = str(pth).lower()
-    if p.endswith(".npy"):
-        return np.load(pth)
-    dfp = pd.read_csv(pth)
-    for c in ("proba","prob","p","y_pred_proba","risk_score"):
-        if c in dfp.columns:
-            v = pd.to_numeric(dfp[c], errors="coerce").fillna(0.0).to_numpy()
-            return np.clip(v, 0.0, 1.0)
-    if dfp.shape[1] == 1:
-        v = pd.to_numeric(dfp.iloc[:,0], errors="coerce").fillna(0.0).to_numpy()
-        return np.clip(v, 0.0, 1.0)
-    raise ValueError("Proba dosyasında uygun kolon bulunamadı.")
+    dfc = pd.read_csv(raw_path, low_memory=False, dtype={"GEOID": str})
 
-def _risk_from_df_or_riskfile(df: pd.DataFrame, risk_csv: str | None) -> np.ndarray | None:
-    if "risk_score" in df.columns:
-        v = pd.to_numeric(df["risk_score"], errors="coerce").fillna(0.0).to_numpy()
-        return np.clip(v, 0.0, 1.0)
-    if risk_csv and Path(risk_csv).is_file():
-        try:
-            r = pd.read_csv(risk_csv, low_memory=False, dtype={"GEOID": str})
-            r = _ensure_date_hour(r)
-            need = {"GEOID","date","hour_range","risk_score"}
-            if need.issubset(r.columns):
-                key = ["GEOID","date","hour_range"]
-                m = df.merge(r[key + ["risk_score"]], on=key, how="left")
-                v = pd.to_numeric(m["risk_score"], errors="coerce").fillna(0.0).to_numpy()
-                return np.clip(v, 0.0, 1.0)
-        except Exception as e:
-            print(f"[WARN] risk file join failed: {e}", file=sys.stderr)
-    return None
-
-# ── Baseline için son 30 gün: hour_range anahtarı 'HH-HH'
-def _load_recent_crime_for_baseline(window_days=30) -> pd.DataFrame | None:
-    p = CRIME_DIR / "sf_crime.csv"
-    if not p.is_file(): return None
-    dfc = pd.read_csv(p, low_memory=False, dtype={"GEOID": str})
-
-    # tarih
     if "date" in dfc.columns:
         dt = pd.to_datetime(dfc["date"], errors="coerce")
     elif "datetime" in dfc.columns:
@@ -235,320 +105,449 @@ def _load_recent_crime_for_baseline(window_days=30) -> pd.DataFrame | None:
     else:
         return None
 
-    dfc = dfc.assign(_dt=dt).dropna(subset=["_dt"]).copy()
-    latest = dfc["_dt"].max()
-    start = latest.normalize() - pd.Timedelta(days=window_days-1)
-    dfc = dfc[(dfc["_dt"] >= start) & (dfc["_dt"] <= latest)].copy()
+    dfc["date"] = dt
+    dfc = dfc.dropna(subset=["date"])
+    latest = dfc["date"].max()
+    if pd.isna(latest):
+        return None
 
-    # hour_range → HH-HH
-    if "hour_range" in dfc.columns:
-        hr = _normalize_hour_range_series(dfc["hour_range"])
-        # tek sayı vb. için tamamla
-        remain = hr.isna()
-        if remain.any():
-            if "event_hour" in dfc.columns:
-                tmp = pd.to_numeric(dfc.loc[remain, "event_hour"], errors="coerce")
-                hr.loc[remain & tmp.notna()] = tmp[tmp.notna()].astype(int).apply(_hr_slot_from_hour)
-        dfc["hour_range"] = hr.fillna(_now_sf_slot()).astype("string")
-    else:
-        src = None
+    start = latest.normalize() - pd.Timedelta(days=window_days - 1)
+    dfc = dfc[(dfc["date"] >= start) & (dfc["date"] <= latest)].copy()
+
+    if "hour_range" not in dfc.columns:
         if "event_hour" in dfc.columns:
-            src = pd.to_numeric(dfc["event_hour"], errors="coerce")
-            dfc["hour_range"] = src.fillna(0).astype(int).apply(_hr_slot_from_hour)
+            h = pd.to_numeric(dfc["event_hour"], errors="coerce").fillna(0).astype(int) % 24
         else:
-            dfc["hour_range"] = dfc["_dt"].dt.hour.astype(int).apply(_hr_slot_from_hour)
+            h = dfc["date"].dt.hour.fillna(0).astype(int) % 24
+        a = h
+        b = (h + 1) % 24
+        dfc["hour_range"] = a.map("{:02d}".format) + "-" + pd.Series(b).map("{:02d}".format)
+    else:
+        dfc["hour_range"] = dfc["hour_range"].apply(_normalize_hour_range)
 
     if "category" not in dfc.columns:
         dfc["category"] = "all"
-    dfc["date"] = dfc["_dt"].dt.date.astype("string")
-    return dfc.drop(columns=["_dt"])
 
-def _build_poisson_baselines(window_days=30):
-    dfc = _load_recent_crime_for_baseline(window_days=window_days)
-    if dfc is None or len(dfc)==0:
+    return dfc
+
+
+def _compute_baselines(window_days=30):
+    """
+    Son window_days içinde:
+      - GEOID×hour_range için λ_base ve p_base  (hour_range SAATLİK)
+      - category payları
+      - city fallback (hour_range bazında)
+    """
+    dfc = _load_recent_crime(window_days=window_days)
+    if dfc is None or len(dfc) == 0:
         return {}, {}, {}, ({}, {}, {}), 1
 
-    dts = pd.to_datetime(dfc["date"], errors="coerce")
-    ndays = max(1, (dts.max().normalize() - dts.min().normalize()).days + 1)
+    ndays = max(
+        1,
+        (dfc["date"].max().normalize() - dfc["date"].min().normalize()).days + 1
+    )
 
-    key = ["GEOID","hour_range"]  # hour_range: 'HH-HH'
+    key = ["GEOID", "hour_range"]
+
     tot = dfc.groupby(key).size().rename("events").reset_index()
     tot["lambda_base"] = tot["events"] / ndays
     tot["p_base"] = 1.0 - np.exp(-tot["lambda_base"])
 
-    cat = (dfc.groupby(key+["category"]).size().rename("n").reset_index())
+    cat = dfc.groupby(key + ["category"]).size().rename("n").reset_index()
     cat_tot = cat.groupby(key)["n"].sum().rename("n_tot").reset_index()
     cat = cat.merge(cat_tot, on=key, how="left")
     cat["share"] = cat["n"] / cat["n_tot"].replace(0, np.nan)
 
     lam_map = {(r["GEOID"], r["hour_range"]): float(r["lambda_base"]) for _, r in tot.iterrows()}
     p_map   = {(r["GEOID"], r["hour_range"]): float(r["p_base"]) for _, r in tot.iterrows()}
+
     shares_map = {}
-    for (g, hr), grp in cat.groupby(["GEOID","hour_range"]):
-        shares_map[(g, hr)] = {row["category"]: float(row["share"])
-                               for _, row in grp.iterrows() if not pd.isna(row["share"])}
+    for (g, hr), grp in cat.groupby(key):
+        shares_map[(g, hr)] = {
+            row["category"]: float(row["share"])
+            for _, row in grp.iterrows()
+            if not pd.isna(row["share"])
+        }
 
     hr_tot = dfc.groupby(["hour_range"]).size().rename("events").reset_index()
-    # şehir bazında saat dilimi başına ortalama yoğunluk
-    n_geo = max(1, dfc["GEOID"].nunique())
-    hr_tot["lambda_hr_city"] = hr_tot["events"] / (ndays * n_geo)
+    hr_tot["lambda_hr_city"] = hr_tot["events"] / (ndays * max(1, dfc["GEOID"].nunique()))
     hr_tot["p_hr_city"] = 1.0 - np.exp(-hr_tot["lambda_hr_city"])
+
     lam_city = {r["hour_range"]: float(r["lambda_hr_city"]) for _, r in hr_tot.iterrows()}
     p_city   = {r["hour_range"]: float(r["p_hr_city"]) for _, r in hr_tot.iterrows()}
 
-    city_cat = (dfc.groupby(["hour_range","category"]).size().rename("n").reset_index())
+    city_cat = dfc.groupby(["hour_range", "category"]).size().rename("n").reset_index()
     city_cat_tot = city_cat.groupby(["hour_range"])["n"].sum().rename("n_tot").reset_index()
     city_cat = city_cat.merge(city_cat_tot, on="hour_range", how="left")
     city_cat["share"] = city_cat["n"] / city_cat["n_tot"].replace(0, np.nan)
+
     shares_city = {}
     for hr, grp in city_cat.groupby("hour_range"):
-        shares_city[hr] = {row["category"]: float(row["share"])
-                           for _, row in grp.iterrows() if not pd.isna(row["share"])}
+        shares_city[hr] = {
+            row["category"]: float(row["share"])
+            for _, row in grp.iterrows()
+            if not pd.isna(row["share"])
+        }
 
     return lam_map, p_map, shares_map, (lam_city, p_city, shares_city), ndays
 
-def _load_topk_categories(key_df: pd.DataFrame, base_dir: Path) -> pd.DataFrame:
-    """Multiclass proba kaynaklarından Top-3'ü 'HH-HH' anahtarıyla getirir."""
-    key_df = key_df.copy()
-    key_df["hour_range"] = _normalize_hour_range_series(key_df["hour_range"]).fillna(_now_sf_slot())
 
-    # A) long
-    for name in ("proba_multiclass.parquet","proba_multiclass.csv"):
-        p = _pick_first(base_dir/name, Path(".")/name)
-        if p:
-            try:
-                t = pd.read_parquet(p) if str(p).endswith(".parquet") else pd.read_csv(p)
-                need = {"GEOID","date","hour_range","category","prob"}
-                if need.issubset(t.columns):
-                    t = t.copy()
-                    t["hour_range"] = _normalize_hour_range_series(t["hour_range"]).fillna(_now_sf_slot())
-                    t["prob"] = pd.to_numeric(t["prob"], errors="coerce").fillna(0.0)
-                    t = t.sort_values(["GEOID","date","hour_range","prob"], ascending=[True,True,True,False])
-                    top3 = t.groupby(["GEOID","date","hour_range"]).head(3)
-                    def _expand(g):
-                        cats = g["category"].tolist()
-                        probs = g["prob"].tolist()
-                        row = {}
-                        for i in range(3):
-                            c = cats[i] if i < len(cats) else ""
-                            p_ = float(probs[i]) if i < len(probs) else 0.0
-                            row[f"top{i+1}_category"] = c
-                            row[f"top{i+1}_prob"] = p_
-                            row[f"top{i+1}_expected"] = p_
-                        return pd.Series(row)
-                    exp = top3.groupby(["GEOID","date","hour_range"]).apply(_expand).reset_index()
-                    return exp
-            except Exception as e:
-                print(f"[WARN] read {p} failed: {e}", file=sys.stderr)
-    # B) wide
-    for name in ("proba_multiclass_wide.parquet","proba_multiclass_wide.csv"):
-        p = _pick_first(base_dir/name, Path(".")/name)
-        if p:
-            try:
-                t = pd.read_parquet(p) if str(p).endswith(".parquet") else pd.read_csv(p)
-                t["hour_range"] = _normalize_hour_range_series(t["hour_range"]).fillna(_now_sf_slot())
-                prob_cols = [c for c in t.columns if c.startswith("prob_")]
-                need_key = {"GEOID","date","hour_range"}
-                if need_key.issubset(t.columns) and prob_cols:
-                    key = ["GEOID","date","hour_range"]
-                    def _top3_row(row):
-                        probs = {c[5:]: float(row[c]) if pd.notna(row[c]) else 0.0 for c in prob_cols}
-                        items = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:3]
-                        out = {}
-                        for i in range(3):
-                            c, p_ = items[i] if i < len(items) else ("", 0.0)
-                            out[f"top{i+1}_category"] = c
-                            out[f"top{i+1}_prob"] = p_
-                            out[f"top{i+1}_expected"] = p_
-                        return pd.Series(out)
-                    exp = t[key + prob_cols].copy()
-                    exp = pd.concat([exp[key], exp.apply(_top3_row, axis=1)], axis=1)
-                    return exp
-            except Exception as e:
-                print(f"[WARN] read {p} failed: {e}", file=sys.stderr)
+def _clip(v, lo, hi):
+    return max(lo, min(hi, v))
 
-    # C) kaynak yoksa: boş top alanlarıyla anahtar setini döndür
-    k = key_df[["GEOID","date","hour_range"]].drop_duplicates().copy()
-    for i in (1,2,3):
-        k[f"top{i}_category"] = ""
-        k[f"top{i}_prob"] = 0.0
-        k[f"top{i}_expected"] = 0.0
-    return k
+# =========================================================
+# Main API
+# =========================================================
+def export_risk_tables(df, y, proba, threshold, out_prefix=""):
+    """
+    Saatlik + günlük risk çıktıları üretir (hour_range saatlik).
 
-# ──────────────────────────────────────────────────────────────
-# Çekirdek üretimler
-# ──────────────────────────────────────────────────────────────
-def build_hourly(df_in: pd.DataFrame, proba: np.ndarray, threshold: float) -> pd.DataFrame:
-    df = _ensure_date_hour(df_in)
+    df: GEOID, date/datetime, hour_range/event_hour içeren tablo
+    proba: aynı uzunlukta risk olasılığı (0-1)
+    threshold: risk eşiği (OOF thr önerilir)
+    """
 
-    # ≤7 gün filtresi
-    dt = pd.to_datetime(df["date"], errors="coerce")
-    last = dt.max()
-    if pd.notna(last):
-        start = (last.normalize() - pd.Timedelta(days=HOUR_WINDOW_DAYS-1)).date().isoformat()
-        df = df[dt.dt.date.astype("string") >= start].copy()
+    # ---- ENV knobs ----
+    WINDOW_DAYS = int(os.getenv("TOP3_WINDOW_DAYS", "30"))
+    EPS = float(os.getenv("RISK_EPS", "1e-6"))
 
-    key = ["GEOID","date","hour_range"]  # hour_range: 'HH-HH'
-    out = df.copy()
-    out["risk_score"] = np.clip(np.asarray(proba).astype(float), 0.0, 1.0)
+    # shrinkage (baseline ile yumuşatma)
+    RISK_SHRINK_ALPHA = float(os.getenv("RISK_SHRINK_ALPHA", "0.7"))  # 0.6-0.8 iyi
+    RISK_SHRINK_ALPHA = float(np.clip(RISK_SHRINK_ALPHA, 0.0, 1.0))
 
-    # decile & level
-    q80 = out["risk_score"].quantile(0.8)
-    q90 = out["risk_score"].quantile(0.9)
-    out["risk_decile"] = _quantile_deciles(pd.to_numeric(out["risk_score"], errors="coerce").fillna(0.0))
-    out["risk_level"]  = out["risk_score"].apply(lambda x: _risk_level_from_score(x, q80, q90, threshold))
+    # opsiyonel rank-score
+    ENABLE_RANK_SCORE  = os.getenv("ENABLE_RANK_SCORE", "0") in ("1","true","True")
+    RANK_LOW  = float(os.getenv("RANK_LOW",  "0.05"))
+    RANK_HIGH = float(os.getenv("RANK_HIGH", "0.95"))
 
-    # Poisson baseline (HH-HH anahtarıyla)
-    lam_map, p_map, shares_map, city_fb, _ = _build_poisson_baselines(window_days=BASELINE_WINDOW)
+    df = _ensure_date_hour_on_df(df)
+
+    cols = [c for c in ["GEOID", "date", "hour_range"] if c in df.columns]
+    if not cols:
+        raise ValueError("export_risk_tables: df içinde GEOID/date/hour_range yok.")
+
+    risk = df[cols].copy()
+
+    proba = np.asarray(proba).reshape(-1)
+    if len(proba) != len(risk):
+        raise ValueError(f"proba uzunluğu uyumsuz (proba={len(proba)} vs df={len(risk)}).")
+
+    # risk score → float + clip
+    risk["risk_score_raw"] = pd.to_numeric(proba, errors="coerce").astype(float)
+    risk["risk_score_raw"] = risk["risk_score_raw"].fillna(0.0).clip(0.0, 1.0)
+
+    risk["hour_range"] = risk["hour_range"].apply(_normalize_hour_range)
+    if set(["GEOID", "date", "hour_range"]).issubset(risk.columns):
+        risk = risk.drop_duplicates(["GEOID", "date", "hour_range"], keep="last")
+
+    # ---- baselines ----
+    lam_map, p_map, shares_map, city_fb, _ = _compute_baselines(window_days=WINDOW_DAYS)
     lam_city, p_city, shares_city = city_fb
 
-    # Top-3 (multiclass)
-    tops = _load_topk_categories(out[key].drop_duplicates(), CRIME_DIR)
-    tops = _ensure_date_hour(tops)
-    out = out.merge(tops, on=key, how="left")
-
-    # expected + boş top alanlarını doldur
-    EPS = 1e-6
+    # ---- SHRINKAGE (raw proba → baseline-mix) ----
+    p_final_list = []
     exp_vals = []
-    for idx, row in out.iterrows():
-        g  = row.get("GEOID","")
-        hr = row.get("hour_range", _now_sf_slot())  # 'HH-HH'
-        p_pred = float(np.clip(row.get("risk_score", 0.0), 0.0, 1.0))
+    tops = {f"top{i}_{k}": [] for i in [1,2,3] for k in ["category","prob","expected"]}
 
-        lam_base = lam_map.get((g,hr), lam_city.get(hr, 0.0))
-        p_base   = p_map.get((g,hr), p_city.get(hr, 0.0))
-        if (p_base <= EPS and lam_base <= 0):
-            exp_vals.append(p_pred)  # minimal fallback
-        else:
-            adj = p_pred / max(p_base, EPS)
-            adj = max(0.2, min(3.0, adj))
-            lam_h = max(0.0, lam_base * adj)
-            exp_vals.append(lam_h)
+    for _, row in risk.iterrows():
+        g  = row.get("GEOID", "")
+        hr = row.get("hour_range", "00-01")
 
-        for i in (1,2,3):
-            ccol = f"top{i}_category"; pcol = f"top{i}_prob"; ecol = f"top{i}_expected"
-            if pd.isna(row.get(ccol, np.nan)): out.at[idx, ccol] = ""
-            if pd.isna(row.get(pcol, np.nan)): out.at[idx, pcol] = 0.0
-            if pd.isna(row.get(ecol, np.nan)): out.at[idx, ecol] = float(out.at[idx, pcol])
+        p_pred = float(np.clip(row["risk_score_raw"], EPS, 1.0-EPS))
 
-    out["expected_count"] = exp_vals
+        # baseline p
+        p_base = p_map.get((g, hr), p_city.get(hr, 0.0))
+        p_base = float(np.clip(p_base, 0.0, 1.0))
 
-    # REQ_COLS sırala + eksikleri tamamla
-    for c in REQ_COLS:
-        if c not in out.columns:
-            out[c] = "" if c.endswith("_category") else (0 if c in ("risk_decile",) else 0.0)
-    out = out[REQ_COLS].copy()
-    return out
+        # α p_pred + (1-α) p_base
+        p_mix = RISK_SHRINK_ALPHA * p_pred + (1.0 - RISK_SHRINK_ALPHA) * p_base
+        p_mix = float(np.clip(p_mix, EPS, 1.0-EPS))
+        p_final_list.append(p_mix)
 
-def build_daily_from_hourly(hourly_df: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    h = hourly_df.copy()
+        # expected_count & top3 (senin eski mantığın)
+        lam_base = lam_map.get((g, hr), lam_city.get(hr, 0.0))
+        lam_base = float(max(lam_base, 0.0))
 
-    # ≤365 gün filtresi
-    dt = pd.to_datetime(h["date"], errors="coerce")
-    last = dt.max()
-    if pd.notna(last):
-        start = (last.normalize() - pd.Timedelta(days=DAILY_WINDOW_DAYS-1)).date().isoformat()
-        h = h[dt.dt.date.astype("string") >= start].copy()
+        if p_base < EPS and lam_base <= 0:
+            lam_base = lam_city.get(hr, 0.0)
+            p_base   = p_city.get(hr, 0.0)
 
-    # Günlük risk_score = 1 - ∏(1 - p_h)
-    p = pd.to_numeric(h["risk_score"], errors="coerce").clip(0,1).fillna(0.0)
-    h["_one_minus_p"] = 1.0 - p
+        adj = (p_mix / max(p_base, EPS)) if p_base > 0 else (p_mix / max(p_city.get(hr, EPS), EPS))
+        adj = _clip(adj, 0.2, 3.0)
+
+        lamh = max(0.0, lam_base * adj)
+        exp_vals.append(lamh)
+
+        shares = shares_map.get((g, hr), shares_city.get(hr, {}))
+        if not shares:
+            shares = {"all": 1.0}
+
+        cat_items = sorted(shares.items(), key=lambda x: x[1], reverse=True)[:3]
+        cat_items += [("", 0.0)] * max(0, 3 - len(cat_items))
+
+        for i, (cat, sh) in enumerate(cat_items, start=1):
+            lam_k = lamh * float(sh)
+            p_k = 1.0 - math.exp(-lam_k)
+            tops[f"top{i}_category"].append(cat)
+            tops[f"top{i}_prob"].append(p_k)
+            tops[f"top{i}_expected"].append(lam_k)
+
+    risk["risk_score"] = p_final_list
+    risk["expected_count"] = exp_vals
+    for k, v in tops.items():
+        risk[k] = v
+
+    # ---- OPTIONAL RANK-SCORE (dashboard için yayma) ----
+    if ENABLE_RANK_SCORE:
+        r = pd.to_numeric(risk["risk_score"], errors="coerce").fillna(0.0).clip(EPS, 1.0-EPS)
+        rk = r.rank(method="average", pct=True)  # 0-1 percentil
+        rk = rk.clip(0.0, 1.0)
+        risk["risk_score"] = (RANK_LOW + (RANK_HIGH - RANK_LOW) * rk).clip(0.0, 1.0)
+        print(f"✅ Rank-score aktif: risk_score {RANK_LOW}-{RANK_HIGH} bandına yayıldı.")
+
+    # ---- risk levels (quantile + threshold) ----
+    q80 = risk["risk_score"].quantile(0.8)
+    q90 = risk["risk_score"].quantile(0.9)
+
+    def _level(x):
+        if x >= max(threshold, q90):
+            return "critical"
+        if x >= max(threshold * 0.8, q80):
+            return "high"
+        if x >= 0.5 * threshold:
+            return "medium"
+        return "low"
+
+    risk["risk_level"] = risk["risk_score"].apply(_level)
+
+    # ---- deciles ----
+    _r = pd.to_numeric(risk["risk_score"], errors="coerce").fillna(0.0)
+    _ranks = _r.rank(method="first", pct=True)
+    if _ranks.nunique() < 2:
+        risk["risk_decile"] = 1
+    else:
+        risk["risk_decile"] = pd.qcut(_ranks, q=10, labels=False, duplicates="drop") + 1
+    risk["risk_decile"] = pd.to_numeric(risk["risk_decile"], errors="coerce").fillna(1).astype(int)
+
+    # ---- hourly export ----
+    risk["date"] = pd.to_datetime(risk["date"], errors="coerce").dt.date.astype("string")
+    hourly_path = os.path.join(CRIME_DIR, f"risk_hourly{out_prefix}.csv")
+    risk.to_csv(hourly_path, index=False)
+
+    # =========================================================
+    # Daily aggregation
+    # =========================================================
+    p = pd.to_numeric(risk["risk_score"], errors="coerce").clip(0, 1).fillna(0.0)
+    risk["_one_minus_p"] = 1.0 - p
+
     daily = (
-        h.groupby(["GEOID","date"], as_index=False)
-         .agg(
-             risk_score=("_one_minus_p", lambda s: 1.0 - float(np.prod(s.fillna(1.0).values))),
-             expected_count=("expected_count","sum")
-         )
+        risk.groupby(["GEOID", "date"], as_index=False)
+            .agg(
+                risk_score_day=("_one_minus_p",
+                                lambda s: 1.0 - float(np.prod(s.fillna(1.0).values))),
+                expected_count_day=("expected_count", "sum")
+            )
     )
 
-    # Günlük Top-3 (λ toplamına göre)
-    stack = pd.concat([
-        h[["GEOID","date","top1_category","top1_expected"]].rename(columns={"top1_category":"cat","top1_expected":"lam"}),
-        h[["GEOID","date","top2_category","top2_expected"]].rename(columns={"top2_category":"cat","top2_expected":"lam"}),
-        h[["GEOID","date","top3_category","top3_expected"]].rename(columns={"top3_category":"cat","top3_expected":"lam"}),
-    ], ignore_index=True)
-    stack = stack[stack["cat"].astype(str) != ""]
-    sumlam = stack.groupby(["GEOID","date","cat"], as_index=False)["lam"].sum()
+    q80d = daily["risk_score_day"].quantile(0.8)
+    q90d = daily["risk_score_day"].quantile(0.9)
 
-    if len(sumlam):
-        tmp = sumlam.copy()
-        tmp["rank"] = tmp.groupby(["GEOID","date"])["lam"].rank(method="first", ascending=False)
-        tmp = tmp[tmp["rank"] <= 3].copy()
-        tmp["rank"] = tmp["rank"].astype(int)
-        tmp["prob"] = 1.0 - np.exp(-tmp["lam"])
+    def _level_d(x):
+        if x >= max(threshold, q90d):
+            return "critical"
+        if x >= max(threshold * 0.8, q80d):
+            return "high"
+        if x >= 0.5 * threshold:
+            return "medium"
+        return "low"
 
-        cat_w  = tmp.pivot_table(index=["GEOID","date"], columns="rank", values="cat",  aggfunc="first")
-        lam_w  = tmp.pivot_table(index=["GEOID","date"], columns="rank", values="lam",  aggfunc="first")
-        prob_w = tmp.pivot_table(index=["GEOID","date"], columns="rank", values="prob", aggfunc="first")
+    daily["risk_level_day"] = daily["risk_score_day"].apply(_level_d)
 
-        cat_w  = cat_w.rename(columns={1:"top1_category", 2:"top2_category", 3:"top3_category"})
-        lam_w  = lam_w.rename(columns={1:"top1_expected", 2:"top2_expected", 3:"top3_expected"})
-        prob_w = prob_w.rename(columns={1:"top1_prob",     2:"top2_prob",     3:"top3_prob"})
-
-        daily = daily.merge(cat_w,  on=["GEOID","date"], how="left")
-        daily = daily.merge(lam_w,  on=["GEOID","date"], how="left")
-        daily = daily.merge(prob_w, on=["GEOID","date"], how="left")
+    _vals = pd.to_numeric(daily["risk_score_day"], errors="coerce").fillna(0.0)
+    _ranks = _vals.rank(method="first", pct=True)
+    if _ranks.nunique() < 2:
+        daily["risk_decile_day"] = 1
     else:
-        for i in (1,2,3):
-            daily[f"top{i}_category"] = ""
-            daily[f"top{i}_prob"]     = 0.0
-            daily[f"top{i}_expected"] = 0.0
+        daily["risk_decile_day"] = pd.qcut(_ranks, q=10, labels=False, duplicates="drop") + 1
+    daily["risk_decile_day"] = pd.to_numeric(daily["risk_decile_day"], errors="coerce").fillna(1).astype(int)
 
-    # risk_level & decile
-    q80 = daily["risk_score"].quantile(0.8) if len(daily) else 0.8
-    q90 = daily["risk_score"].quantile(0.9) if len(daily) else 0.9
-    daily["risk_decile"] = _quantile_deciles(pd.to_numeric(daily["risk_score"], errors="coerce").fillna(0.0))
-    daily["risk_level"]  = daily["risk_score"].apply(lambda x: _risk_level_from_score(x, q80, q90, threshold))
+    # --- daily top3 by expected λ ---
+    _stack = pd.concat([
+        risk[["GEOID", "date", "top1_category", "top1_expected"]].rename(columns={"top1_category":"cat","top1_expected":"lam"}),
+        risk[["GEOID", "date", "top2_category", "top2_expected"]].rename(columns={"top2_category":"cat","top2_expected":"lam"}),
+        risk[["GEOID", "date", "top3_category", "top3_expected"]].rename(columns={"top3_category":"cat","top3_expected":"lam"}),
+    ], ignore_index=True)
 
-    # hour_range = "" (başlık sabit)
-    daily["hour_range"] = ""
+    _stack = _stack[_stack["cat"].astype(str) != ""]
+    _sumlam = _stack.groupby(["GEOID","date","cat"], as_index=False)["lam"].sum()
 
-    # REQ_COLS sırala + eksikleri tamamla
-    for c in REQ_COLS:
-        if c not in daily.columns:
-            daily[c] = "" if c.endswith("_category") or c=="hour_range" else (0 if c in ("risk_decile",) else 0.0)
-    daily = daily[REQ_COLS].copy()
-    return daily
+    tmp = _sumlam.copy()
+    tmp["rank"] = tmp.groupby(["GEOID","date"])["lam"].rank(method="first", ascending=False)
+    tmp = tmp[tmp["rank"] <= 3].copy()
+    tmp["rank"] = tmp["rank"].astype(int)
+    tmp["prob"] = 1.0 - np.exp(-tmp["lam"])
 
-# ──────────────────────────────────────────────────────────────
-# CLI
-# ──────────────────────────────────────────────────────────────
+    cat_w  = tmp.pivot_table(index=["GEOID","date"], columns="rank", values="cat",  aggfunc="first")
+    lam_w  = tmp.pivot_table(index=["GEOID","date"], columns="rank", values="lam",  aggfunc="first")
+    prob_w = tmp.pivot_table(index=["GEOID","date"], columns="rank", values="prob", aggfunc="first")
+
+    cat_w  = cat_w.rename(columns={1:"top1_category_day",2:"top2_category_day",3:"top3_category_day"})
+    lam_w  = lam_w.rename(columns={1:"top1_expected_day",2:"top2_expected_day",3:"top3_expected_day"})
+    prob_w = prob_w.rename(columns={1:"top1_prob_day",2:"top2_prob_day",3:"top3_prob_day"})
+
+    daily_extra = pd.concat([cat_w, lam_w, prob_w], axis=1).reset_index()
+    daily = daily.merge(daily_extra, on=["GEOID","date"], how="left")
+
+    daily_path = os.path.join(CRIME_DIR, f"risk_daily{out_prefix}.csv")
+    daily.to_csv(daily_path, index=False)
+
+    # =========================================================
+    # Patrol recommendations (latest day, top-K per slot)
+    # =========================================================
+    latest_date = pd.to_datetime(risk["date"], errors="coerce").max()
+    patrol_path = os.path.join(CRIME_DIR, f"patrol_recs{out_prefix}.csv")
+    if pd.notna(latest_date):
+        latest_date = latest_date.date()
+        day = risk[pd.to_datetime(risk["date"], errors="coerce").dt.date == latest_date].copy()
+        rec_rows = []
+        TOP_K = int(os.getenv("PATROL_TOP_K", "50"))
+
+        for hr in sorted(day["hour_range"].dropna().unique()):
+            slot = day[day["hour_range"] == hr].sort_values("risk_score", ascending=False)
+            for _, r in slot.head(TOP_K).iterrows():
+                rec_rows.append({
+                    "date": latest_date,
+                    "hour_range": hr,
+                    "GEOID": r.get("GEOID", ""),
+                    "risk_score": float(r["risk_score"]),
+                    "risk_level": r["risk_level"],
+                    "expected_count": float(r.get("expected_count", 0.0)),
+                    "top1_category": r.get("top1_category", ""),
+                    "top1_prob": float(r.get("top1_prob", 0.0)),
+                })
+
+        pd.DataFrame(rec_rows).to_csv(patrol_path, index=False)
+
+    print(f"Hourly risk  → {hourly_path}")
+    print(f"Daily  risk  → {daily_path}")
+    print(f"Patrol recs  → {patrol_path}")
+    return hourly_path, patrol_path
+
+# =========================================================
+# Optional Top-3 crime types
+# =========================================================
+def optional_top_crime_types(window_days: int = 365, out_name: str = "risk_types_top3.csv"):
+    """
+    sf_crime.csv mevcutsa, son `window_days` penceresinde:
+      - overall Top-3 suç türü
+      - hour_range (saatlik) bazında Top-3 suç türü
+    üretir. Yoksa None döner.
+    """
+    try:
+        df = _load_recent_crime(window_days=window_days)
+        if df is None or len(df) == 0 or "category" not in df.columns:
+            return None
+
+        # overall top3
+        over = (
+            df.groupby("category").size()
+              .rename("count").reset_index()
+              .sort_values("count", ascending=False)
+              .head(3)
+        )
+        over["rank"] = np.arange(1, len(over) + 1)
+        over["scope"] = "overall"
+        over["hour_range"] = ""
+
+        # hour_range top3
+        df["hour_range"] = df["hour_range"].apply(_normalize_hour_range)
+        by_hr = (
+            df.groupby(["hour_range", "category"]).size()
+              .rename("count").reset_index()
+        )
+
+        rows = []
+        for hr, grp in by_hr.groupby("hour_range"):
+            g = grp.sort_values("count", ascending=False).head(3).copy()
+            g["rank"] = np.arange(1, len(g) + 1)
+            g["scope"] = "by_hour_range"
+            g["hour_range"] = hr
+            rows.append(g)
+
+        hr_top = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(
+            columns=["hour_range", "category", "count", "rank", "scope"]
+        )
+
+        out = pd.concat([over, hr_top], ignore_index=True)
+
+        total_over = float(df.shape[0]) if df.shape[0] > 0 else 1.0
+        out["share_overall"] = out["count"] / total_over
+
+        start = df["date"].min().date()
+        end = df["date"].max().date()
+        out["period_start"] = str(start)
+        out["period_end"] = str(end)
+        out["ndays"] = max(1, (pd.to_datetime(str(end)) - pd.to_datetime(str(start))).days + 1)
+
+        out_path = os.path.join(CRIME_DIR, out_name)
+        out[[
+            "scope", "hour_range", "rank", "category",
+            "count", "share_overall", "period_start", "period_end", "ndays"
+        ]].to_csv(out_path, index=False)
+
+        print(f"Top crime types → {out_path}")
+        return out_path
+
+    except Exception as e:
+        print(f"[WARN] optional_top_crime_types failed: {e}")
+        return None
+
+
+# =========================================================
+# CLI (optional)
+# =========================================================
+def _read_proba(proba_path: str):
+    ext = str(proba_path).lower()
+    if ext.endswith(".npy"):
+        return np.load(proba_path)
+
+    dfp = pd.read_csv(proba_path)
+    for c in ["proba", "prob", "p", "y_pred_proba", "risk_score"]:
+        if c in dfp.columns:
+            return dfp[c].values
+
+    if dfp.shape[1] == 1:
+        return dfp.iloc[:, 0].values
+
+    raise ValueError("Proba dosyasında uygun kolon bulunamadı.")
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--df", required=True, help="Özellik/kimlik DF (GEOID,date/hour_range olabilir).")
-    ap.add_argument("--proba", default=None, help="Harici proba (csv tek kolon / npy).")
-    ap.add_argument("--proba-from-risk", default=None, help="risk_hourly_grid_full_labeled.csv (join ile risk_score).")
-    ap.add_argument("--threshold", type=float, default=0.5)
-    args = ap.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--df", required=True, help="Kimlik/özellik CSV (GEOID,date/hour_range içerebilir)")
+    p.add_argument("--proba", required=True, help="Tahmin olasılıkları (CSV tek kolon veya .npy)")
+    p.add_argument("--threshold", type=float, default=0.5)
+    p.add_argument("--out-prefix", default="")
+    p.add_argument("--top3-window-days", type=int, default=30, help="Top crime types penceresi (gün)")
+    args = p.parse_args()
 
     df = pd.read_csv(args.df, low_memory=False, dtype={"GEOID": str})
-    df = _ensure_date_hour(df)
+    proba = _read_proba(args.proba)
 
-    # PROBA
-    proba = None
-    if args.proba:
-        proba = _read_proba_path(args.proba)
-    if proba is None:
-        proba = _risk_from_df_or_riskfile(df, args.proba_from_risk)
-    if proba is None:
-        print("❌ PROBA/risk_score bulunamadı (DF veya risk dosyası).", file=sys.stderr)
-        sys.exit(2)
+    export_risk_tables(
+        df=df,
+        y=None,
+        proba=proba,
+        threshold=args.threshold,
+        out_prefix=args.out_prefix
+    )
 
-    # Saatlik
-    hourly = build_hourly(df, proba, threshold=args.threshold)
-    hourly_path = CRIME_DIR / "risk_hourly_grid_full_labeled.csv"
-    hourly.to_csv(hourly_path, index=False)
-    try: hourly.to_parquet(hourly_path.with_suffix(".parquet"), index=False)
-    except Exception: pass
-    print(f"✅ Hourly yazıldı → {hourly_path} (rows={len(hourly)})")
+    optional_top_crime_types(
+        window_days=args.top3_window_days,
+        out_name="risk_types_top3.csv"
+    )
 
-    # Günlük
-    daily = build_daily_from_hourly(hourly, threshold=args.threshold)
-    daily_path = CRIME_DIR / "risk_daily_grid_full_labeled.csv"
-    daily.to_csv(daily_path, index=False)
-    try: daily.to_parquet(daily_path.with_suffix(".parquet"), index=False)
-    except Exception: pass
-    print(f"✅ Daily  yazıldı → {daily_path} (rows={len(daily)})")
 
 if __name__ == "__main__":
     main()
+
