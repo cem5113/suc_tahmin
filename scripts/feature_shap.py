@@ -1,152 +1,99 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-FA v1 — ONLY Feature Analysis + SHAP
-------------------------------------
+FA v2 — ONLY Feature Analysis + SHAP
 Girdi : fr_crime_09.csv
 Çıktı :
-  - fr_crime_09_clean.csv
   - feature_importances_fr09.csv
   - shap_feature_importance_fr09.csv
   - features_fr09.json
 """
 
-import os
-import csv
-import math
-import json
-import warnings
-from pathlib import Path
-
+import os, json, math, warnings
 import numpy as np
 import pandas as pd
-from datetime import timedelta
+from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
-# ML
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-import joblib
 
 
-# ================================
+# ============================================================
 # GEOID normalize
-# ================================
-def normalize_geoid(val, length: int = 11) -> str | None:
-    if val is None or (isinstance(val, float) and math.isnan(val)):
+# ============================================================
+def normalize_geoid(val, length=11):
+    if val is None or (isinstance(val,float) and math.isnan(val)):
         return None
     s = str(val).strip()
     if s.endswith(".0"):
         s = s[:-2]
     try:
-        if "e" in s.lower():
-            s = str(int(float(s)))
-    except:
-        pass
-    if s.isdigit():
-        s = s.zfill(length)
-    return s
+        if "e" in s.lower(): s = str(int(float(s)))
+    except: pass
+    return s.zfill(length) if s.isdigit() else s
 
 
 def main():
-
-    # ============================================================
-    # PATH AYARLARI
-    # ============================================================
+    # ------------------------------------------------------------
+    # PATHS
+    # ------------------------------------------------------------
     base_dir = Path(os.environ.get("CRIME_DATA_DIR", ".")).resolve()
-    output_dir = Path(os.environ.get("FR_OUTPUT_DIR", base_dir / "fr_outputs")).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    out_dir  = Path(os.environ.get("FR_OUTPUT_DIR", base_dir / "fr_outputs")).resolve()
+    out_dir.mkdir(exist_ok=True, parents=True)
 
-    raw_path   = base_dir / "fr_crime_09.csv"
-    clean_path = output_dir / "fr_crime_09_clean.csv"
+    in_path  = base_dir / "fr_crime_09.csv"
 
-    print("📂 CRIME_DATA_DIR :", base_dir)
-    print("📂 FR_OUTPUT_DIR  :", output_dir)
-    print("📄 RAW_PATH       :", raw_path)
-    print("📄 CLEAN_PATH     :", clean_path)
+    print("📌 INPUT  :", in_path)
+    print("📌 OUTPUT :", out_dir)
 
-    if not raw_path.exists():
-        raise FileNotFoundError(f"❌ fr_crime_09.csv bulunamadı: {raw_path}")
+    if not in_path.exists():
+        raise FileNotFoundError(f"fr_crime_09.csv bulunamadı → {in_path}")
 
-    # ============================================================
-    # 1) CSV TEMİZLEME (ParserError önleme)
-    # ============================================================
-    print(f"\n📥 Orijinal CSV temizleniyor...")
+    # ------------------------------------------------------------
+    # LOAD DATA
+    # ------------------------------------------------------------
+    df = pd.read_csv(in_path, low_memory=False)
+    print("📊 Veri shape:", df.shape)
 
-    with open(raw_path, "r", encoding="utf-8", errors="ignore") as fin, \
-         open(clean_path, "w", encoding="utf-8", newline="") as fout:
-
-        reader = csv.reader(fin)
-        writer = csv.writer(fout)
-
-        header = next(reader)
-        expected_cols = len(header)
-        writer.writerow(header)
-
-        bad = 0
-
-        for row in reader:
-            if len(row) == expected_cols:
-                writer.writerow(row)
-            else:
-                bad += 1
-
-    print(f"🧹 Temizleme tamam — hatalı satır: {bad}")
-    print("✔ Temiz CSV yazıldı:", clean_path)
-
-    # ============================================================
-    # 2) VERİ YÜKLE & FEATURE SET HAZIRLA
-    # ============================================================
-    df = pd.read_csv(clean_path, low_memory=False)
-    print("📊 Temiz veri:", df.shape)
-
-    df.columns = [c.strip() for c in df.columns]
-
-    # GEOID
-    if "geoid" in df:
-        df["geoid"] = df["geoid"].astype(str)
-    elif "GEOID" in df:
-        df["geoid"] = df["GEOID"].astype(str)
+    # temel colonlar
+    if "GEOID" in df:
+        df["GEOID"] = df["GEOID"].astype(str).apply(normalize_geoid)
+        df["geoid"] = df["GEOID"]
+    elif "geoid" in df:
+        df["geoid"] = df["geoid"].astype(str).apply(normalize_geoid)
     else:
-        raise Exception("❌ GEOID/geoid kolonu yok.")
+        raise Exception("CSV içinde GEOID/geoid yok.")
 
-    df["geoid"] = df["geoid"].str.replace(r"\.0$", "", regex=True).str.zfill(11)
+    if "date" not in df:
+        raise Exception("'date' kolonu yok.")
 
-    # datetime → date
-    if "date" not in df.columns:
-        raise Exception("❌ 'date' kolonu yok.")
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"]).reset_index(drop=True)
 
-    if "Y_label" not in df.columns:
-        raise Exception("❌ Y_label yok.")
+    if "Y_label" not in df:
+        raise Exception("Y_label yok.")
 
-    # ==========================
-    # ML subset
-    # ==========================
-    if "hour" not in df:
-        df["hour"] = df["date"].dt.hour
-
-    # sadece regression-like düşmeyelim → binary Y
+    # ML hazırlanışı
     y = df["Y_label"]
-    drop_cols = ["Y_label", "date"]
-
-    X = df.drop(columns=[c for c in drop_cols if c in df.columns])
+    X = df.drop(columns=["Y_label", "date"], errors="ignore")
 
     num_cols = X.select_dtypes(include=np.number).columns.tolist()
     cat_cols = X.select_dtypes(include="object").columns.tolist()
 
-    print(f"🔢 Feature sayısı → num={len(num_cols)}, cat={len(cat_cols)}")
+    print(f"🔢 num={len(num_cols)}, cat={len(cat_cols)}")
 
-    # Preprocess
-    pre = ColumnTransformer([
+    # ------------------------------------------------------------
+    # PIPELINE (RF importance için)
+    # ------------------------------------------------------------
+    prep = ColumnTransformer([
         ("num", Pipeline([
             ("imp", SimpleImputer(strategy="median")),
-            ("sc", StandardScaler())
+            ("sc",  StandardScaler())
         ]), num_cols),
         ("cat", Pipeline([
             ("imp", SimpleImputer(strategy="most_frequent")),
@@ -154,58 +101,48 @@ def main():
         ]), cat_cols)
     ])
 
-    print("\n⏳ Preprocess + RF importance eğitiliyor...")
-
-    rf = Pipeline([
-        ("prep", pre),
+    model = Pipeline([
+        ("prep", prep),
         ("rf", RandomForestClassifier(
             n_estimators=300,
             max_depth=12,
-            n_jobs=-1,
-            random_state=42
+            random_state=42,
+            n_jobs=-1
         ))
     ])
 
-    rf.fit(X, y)
+    print("\n⏳ RF importance eğitiliyor...")
+    model.fit(X, y)
 
-    # Feature names
-    feat_names = rf.named_steps["prep"].get_feature_names_out()
-    rf_imp_raw = rf.named_steps["rf"].feature_importances_
+    feat_names = model.named_steps["prep"].get_feature_names_out()
+    imps = model.named_steps["rf"].feature_importances_
 
-    imp_df = pd.DataFrame({
-        "feature": feat_names,
-        "importance": rf_imp_raw
-    }).sort_values("importance", ascending=False)
+    imp_df = pd.DataFrame({"feature": feat_names, "importance": imps})
+    imp_df = imp_df.sort_values("importance", ascending=False)
 
-    imp_df.to_csv(output_dir / "feature_importances_fr09.csv", index=False)
-    print("💾 RF feature importance kaydedildi.")
+    imp_df.to_csv(out_dir/"feature_importances_fr09.csv", index=False)
+    print("💾 RF importance yazıldı.")
 
-    # Ayrıca orijinal kolon listesi:
-    with open(output_dir / "features_fr09.json", "w", encoding="utf-8") as f:
-        json.dump(X.columns.tolist(), f, indent=2)
-
-    print("💾 Feature list yazıldı (features_fr09.json).")
-
-    # ============================================================
-    # 3) SHAP IMPORTANCE
-    # ============================================================
-    print("\n⏳ SHAP hesaplanıyor (RF bazlı)...")
-
+    # ------------------------------------------------------------
+    # SHAP IMPORTANCE
+    # ------------------------------------------------------------
     try:
         import shap
+        print("\n⏳ SHAP açıklanabilirlik hesaplanıyor...")
 
-        rf_only = rf.named_steps["rf"]
-        pre_only = rf.named_steps["prep"]
+        rf_only  = model.named_steps["rf"]
+        prep_only = model.named_steps["prep"]
 
+        # örneklem
         N = min(3000, len(X))
         Xs = X.sample(N, random_state=42)
-        Xt = pre_only.transform(Xs)
+        Xt = prep_only.transform(Xs)
 
         explainer = shap.TreeExplainer(rf_only)
         shap_vals = explainer.shap_values(Xt)
 
         if isinstance(shap_vals, list):
-            shap_vals = shap_vals[1]  # binary pos-class
+            shap_vals = shap_vals[1]  # binary
 
         mean_abs = np.mean(np.abs(shap_vals), axis=0)
 
@@ -214,14 +151,19 @@ def main():
             "mean_abs_shap": mean_abs
         }).sort_values("mean_abs_shap", ascending=False)
 
-        shap_df.to_csv(output_dir / "shap_feature_importance_fr09.csv", index=False)
-
-        print("💾 SHAP feature importance kaydedildi.")
+        shap_df.to_csv(out_dir/"shap_feature_importance_fr09.csv", index=False)
+        print("💾 SHAP importance yazıldı.")
 
     except Exception as e:
-        print("⚠️ SHAP hesaplamasında hata:", e)
+        print("⚠️ SHAP atlandı:", e)
 
-    print("\n✅ Feature Analysis + SHAP TAMAMLANDI.")
+    # ------------------------------------------------------------
+    # FEATURE LIST
+    # ------------------------------------------------------------
+    with open(out_dir/"features_fr09.json", "w", encoding="utf-8") as f:
+        json.dump(X.columns.tolist(), f, indent=2)
+
+    print("\n✅ SADE FA + SHAP Tamamlandı.")
 
 
 if __name__ == "__main__":
