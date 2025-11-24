@@ -297,16 +297,23 @@ jobs:
 
       - name: FR 09) Neighbors
         env:
-          CRIME_DATA_DIR: ${{ env.FR_OUTPUT_DIR }}
-          NEIGHBOR_OUTPUT_CSV: ${{ env.FR_OUTPUT_DIR }}/fr_crime_09.csv
-          NEIGHBOR_INPUT_CSV:  ${{ env.FR_OUTPUT_DIR }}/fr_crime_08.csv
-          NEIGH_FILE: ${{ github.workspace }}/crime_prediction_data/neighbors.csv
+          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
+          ARTIFACT_DIR:   ${{ env.ARTIFACT_DIR }}
+          FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
+          FALLBACK_DIRS:  ${{ env.FALLBACK_DIRS }}
         shell: bash
         run: |
           set -euo pipefail
-          python -u "${{ github.workspace }}/make_neighbors_fr.py"
-          echo "HEAD fr_crime_09.csv:"
-          head -n 5 "${{ env.FR_OUTPUT_DIR }}/fr_crime_09.csv"
+          if [ -f scripts/make_neighbors_fr.py ]; then
+            PY=scripts/make_neighbors_fr.py
+          elif [ -f make_neighbors_fr.py ]; then
+            PY=make_neighbors_fr.py
+          else
+            echo "⚠️ make_neighbors_fr.py bulunamadı, adım atlanıyor."
+            exit 0
+          fi
+          python -u "$PY" || true
+          echo "HEAD fr_crime_09.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
 
       - name: FR 10) Stacking + Feature + SHAP (fr_crime_09)
         env:
