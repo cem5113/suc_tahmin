@@ -268,8 +268,11 @@ jobs:
             echo "⚠️ update_police_gov_fr.py yok, adım atlanıyor"
             exit 0
           fi
-          python -u "$PY" || true
-          echo "HEAD fr_crime_07.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_07.csv" || true
+          python -u "$PY"
+          test -f "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_07.csv"
+          echo "HEAD fr_crime_07.csv:"
+          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_07.csv"
+
 
       - name: FR 08) Weather
         env:
