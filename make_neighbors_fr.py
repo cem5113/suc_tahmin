@@ -1,279 +1,127 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-make_neighbors_fr.py  (FULL REVIZE — SIMPLE LOGIC)
+make_neighbors.py (zaman bağımsız)
+fr_crime_08.csv + neighbors.csv → fr_crime_09.csv
 
-Girdi :
-  - fr_crime_08.csv  (event-based, last 5y)
-  - neighbors.csv    (focal geoid -> neighbor geoid)
+Amaç:
+- Her GEOID için, KOMŞU GEOID'LERDEKİ TOPLAM SUÇ SAYISINI hesaplamak.
+- datetime gerektirmez. Zaman penceresi yoktur.
+- Toplam suç: öncelik "crime_count", yoksa "Y_label" (veya "label"/"target").
 
-Çıktı:
-  - fr_crime_09.csv  (neighbor_crime_24h / 72h / 7d eklenmiş)
-
-Mantık:
-  Her satır (geoid, datetime) için:
-    komşu geoid'lerde T-24h..T arası suç toplamı
-    komşu geoid'lerde T-72h..T arası suç toplamı
-    komşu geoid'lerde T-7d ..T arası suç toplamı
+Ortam değişkenleri:
+- CRIME_DATA_DIR (varsayılan: "crime_prediction_data")
+- NEIGH_FILE (varsayılan: "neighbors.csv")
+- GEOID_LEN (varsayılan: 11)
 """
-
 from __future__ import annotations
 import os
 from pathlib import Path
-import numpy as np
 import pandas as pd
 
-pd.options.mode.copy_on_write = True
+# --- I/O yolları ---
+CRIME_DIR = Path(os.environ.get("CRIME_DATA_DIR", "crime_prediction_data"))
+SRC = CRIME_DIR / "fr_crime_08.csv"
+DST = CRIME_DIR / "fr_crime_09.csv"
+NEIGH_FILE = Path(os.environ.get("NEIGH_FILE", str(CRIME_DIR / "neighbors.csv")))
+GEOID_LEN = int(os.environ.get("GEOID_LEN", "11"))
 
-
-# =============================================================================
-# CONFIG / PATHS
-# =============================================================================
-BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).resolve()
-BASE_DIR.mkdir(parents=True, exist_ok=True)
-
-IN_CSV  = Path(os.getenv("NEIGHBOR_INPUT_CSV",  str(BASE_DIR / "fr_crime_08.csv"))).resolve()
-OUT_CSV = Path(os.getenv("NEIGHBOR_OUTPUT_CSV", str(BASE_DIR / "fr_crime_09.csv"))).resolve()
-
-GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
-
-
-# =============================================================================
-# HELPERS
-# =============================================================================
-def log_shape(df: pd.DataFrame, label: str):
-    r, c = df.shape
-    print(f"📊 {label}: {r:,} satır × {c} sütun")
-
-def _norm_geoid(s: pd.Series, L: int = GEOID_LEN) -> pd.Series:
-    return (
-        s.astype(str)
-         .str.extract(r"(\d+)", expand=False)
-         .str[:L]
-         .str.zfill(L)
-    )
+def _norm_geoid(s: pd.Series, L=GEOID_LEN) -> pd.Series:
+    return (s.astype(str).str.extract(r"(\d+)")[0].str.zfill(L))
 
 def _pick_col(cols, *cands):
     low = {c.lower(): c for c in cols}
-    for cand in cands:
-        if isinstance(cand, (list, tuple)):
-            for c in cand:
-                if c.lower() in low:
-                    return low[c.lower()]
-        else:
-            if cand.lower() in low:
-                return low[cand.lower()]
+    for c in cands:
+        if c.lower() in low:
+            return low[c.lower()]
     return None
 
-def safe_save_csv(df: pd.DataFrame, path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
-
-def resolve_neighbors_file(base_dir: Path) -> Path:
-    """
-    neighbors.csv'yi mümkün olan her yerden bul.
-    """
-    tried = []
-
-    env_path = os.environ.get("NEIGH_FILE")
-    if env_path:
-        p = Path(env_path).expanduser().resolve()
-        tried.append(str(p))
-        if p.exists():
-            print(f"✅ neighbors.csv env ile bulundu: {p}")
-            return p
-
-    p1 = (base_dir / "neighbors.csv").resolve()
-    tried.append(str(p1))
-    if p1.exists():
-        print(f"✅ neighbors.csv BASE_DIR içinde bulundu: {p1}")
-        return p1
-
-    here = Path(__file__).resolve().parent
-    ups = [here, here.parent, here.parent.parent, here.parent.parent.parent]
-    for up in ups:
-        cand = (up / "neighbors.csv").resolve()
-        tried.append(str(cand))
-        if cand.exists():
-            print(f"✅ neighbors.csv script çevresinde bulundu: {cand}")
-            return cand
-
-    try:
-        root = here.parent
-        for cand in root.rglob("neighbors.csv"):
-            cand = cand.resolve()
-            tried.append(str(cand))
-            print(f"✅ neighbors.csv rglob ile bulundu: {cand}")
-            return cand
-    except Exception:
-        pass
-
-    msg = "❌ neighbors.csv bulunamadı.\nDenediğim yollar:\n- " + "\n- ".join(tried)
-    raise FileNotFoundError(msg)
-
-
-def compute_neighbor_window(
-    focal: pd.DataFrame,
-    events: pd.DataFrame,
-    window: pd.Timedelta
-) -> pd.Series:
-    """
-    focal:  ['geoid','datetime']  (tüm satırlar)
-    events: ['geoid','datetime','crime_w']  (komşularda olmuş suçlar, focal geoid'e bağlanmış)
-
-    Mantık: cum(T) - cum(T-window)
-    """
-    focal_sorted  = focal.sort_values(["geoid", "datetime"]).reset_index()
-    events_sorted = events.sort_values(["geoid", "datetime"]).reset_index(drop=True)
-
-    # komşu suç kümülatifi
-    events_sorted["cum"] = events_sorted.groupby("geoid")["crime_w"].cumsum()
-
-    # cum(T)
-    left = pd.merge_asof(
-        focal_sorted,
-        events_sorted[["geoid","datetime","cum"]],
-        left_on="datetime",
-        right_on="datetime",
-        left_by="geoid",
-        right_by="geoid",
-        direction="backward",
-        allow_exact_matches=True
-    )
-    cum_t = left["cum"].fillna(0.0)
-
-    # cum(T-window)
-    focal_minus = focal_sorted.copy()
-    focal_minus["datetime"] = focal_minus["datetime"] - window
-
-    right = pd.merge_asof(
-        focal_minus,
-        events_sorted[["geoid","datetime","cum"]],
-        left_on="datetime",
-        right_on="datetime",
-        left_by="geoid",
-        right_by="geoid",
-        direction="backward",
-        allow_exact_matches=True
-    )
-    cum_tm = right["cum"].fillna(0.0)
-
-    vals = (cum_t - cum_tm).clip(lower=0).astype("int64")
-    vals.index = left["index"].values
-    return vals.reindex(focal.index, fill_value=0)
-
-
-# =============================================================================
-# MAIN
-# =============================================================================
 def main():
-    if not IN_CSV.exists():
-        raise FileNotFoundError(f"❌ Girdi bulunamadı: {IN_CSV}")
+    # 0) Girdi kontrolleri
+    if not SRC.exists():
+        raise FileNotFoundError(f"Girdi dosyası yok: {SRC}")
+    if not NEIGH_FILE.exists():
+        raise FileNotFoundError(f"Komşuluk dosyası yok: {NEIGH_FILE.resolve()}")
 
-    NEIGH_FILE = resolve_neighbors_file(BASE_DIR)
+    print(f"▶︎ SF komşuluk (zaman bağımsız) başlıyor: {SRC.name} + {NEIGH_FILE.name} → {DST.name}")
 
-    print(f"▶︎ IN : {IN_CSV}")
-    print(f"▶︎ NB : {NEIGH_FILE}")
-    print(f"▶︎ OUT: {OUT_CSV}")
+    # 1) Veri yükle
+    df = pd.read_csv(SRC, low_memory=False)
+    if df.empty:
+        df.assign(neighbor_crime_total=0).to_csv(DST, index=False)
+        print(f"⚠️ {SRC.name} boş; {DST.name} yazıldı (0 toplam).")
+        return
 
-    # -------------------------------------------------------------------------
-    # 1) CRIME LOAD + NORMALIZE
-    # -------------------------------------------------------------------------
-    df = pd.read_csv(IN_CSV, low_memory=False)
-    log_shape(df, "CRIME (load)")
-
-    gcol = _pick_col(df.columns, ["geoid","GEOID","geography_id","tract"], "iris", "insee")
-    dcol = _pick_col(df.columns, ["datetime","incident_datetime","timestamp"], "date")
-
+    # 2) GEOID ve suç sayısı kolonu tespiti
+    gcol = _pick_col(df.columns, "geoid", "GEOID", "geography_id")
     if not gcol:
-        raise RuntimeError("❌ GEOID kolonu bulunamadı.")
-    if not dcol:
-        raise RuntimeError("❌ datetime/date kolonu bulunamadı.")
+        raise RuntimeError("GEOID kolonu bulunamadı (örn. geoid/GEOID/geography_id).")
+    df["GEOID"] = _norm_geoid(df[gcol])
 
-    df["geoid"] = _norm_geoid(df[gcol])
-    df["datetime"] = pd.to_datetime(df[dcol], errors="coerce")
+    crime_col = _pick_col(df.columns, "crime_count")
+    if not crime_col:
+        crime_col = _pick_col(df.columns, "Y_label", "label", "target")
+        if not crime_col:
+            raise RuntimeError("crime_count veya Y_label/label/target kolonu bulunamadı.")
+    df["_crime_used"] = pd.to_numeric(df[crime_col], errors="coerce").fillna(0)
 
-    nat_rate = df["datetime"].isna().mean()
-    if nat_rate > 0:
-        print(f"⚠️ datetime NaT oranı: {nat_rate:.3f}")
-
-    # suç ağırlığı
-    if "crime_count" in df.columns:
-        crime_w = pd.to_numeric(df["crime_count"], errors="coerce").fillna(0)
-    elif "Y_label" in df.columns:
-        crime_w = pd.to_numeric(df["Y_label"], errors="coerce").fillna(0)
-    else:
-        crime_w = pd.Series(1, index=df.index)
-
-    df["crime_w"] = crime_w.astype("float32")
-
-    # -------------------------------------------------------------------------
-    # 2) NEIGHBORS LOAD + NORMALIZE
-    # -------------------------------------------------------------------------
-    nb = pd.read_csv(NEIGH_FILE, low_memory=False, dtype=str).dropna()
-
-    s = _pick_col(nb.columns, ["geoid","src","source","from","GEOID"])
-    t = _pick_col(nb.columns, ["neighbor","dst","target","to","NEIGHBOR"])
-
+    # 3) Komşuluk verisi
+    nb = pd.read_csv(NEIGH_FILE, dtype=str)
+    # sütun isimlerini esnekçe bul
+    s = _pick_col(nb.columns, "geoid", "src", "source")
+    t = _pick_col(nb.columns, "neighbor", "dst", "target")
     if not s or not t:
-        raise RuntimeError(f"❌ neighbors.csv başlıkları anlaşılamadı: {nb.columns.tolist()}")
+        raise RuntimeError(f"neighbors.csv başlıkları anlaşılamadı: {nb.columns.tolist()}")
 
-    nb = nb.rename(columns={s:"geoid", t:"neighbor"})[["geoid","neighbor"]].dropna()
-    nb["geoid"]    = _norm_geoid(nb["geoid"])
-    nb["neighbor"] = _norm_geoid(nb["neighbor"])
+    nb = nb[[s, t]].dropna().rename(columns={s: "SRC_GEOID", t: "NEI_GEOID"})
+    nb["SRC_GEOID"] = _norm_geoid(nb["SRC_GEOID"])
+    nb["NEI_GEOID"] = _norm_geoid(nb["NEI_GEOID"])
+    # olası tekrar/öz yineleme temizliği
     nb = nb.drop_duplicates()
+    # kendine komşuluğu varsa (SRC==NEI) istersek hariç tutabiliriz:
+    nb = nb[nb["SRC_GEOID"] != nb["NEI_GEOID"]]
 
-    log_shape(nb, "NEIGHBORS (load+norm)")
+    if nb.empty:
+        # Komşuluk yoksa sütunu 0 ile ekleyip çık
+        out = df.copy()
+        out["neighbor_crime_total"] = 0
+        DST.parent.mkdir(parents=True, exist_ok=True)
+        out.to_csv(DST, index=False)
+        print("⚠️ neighbors.csv boş; tüm neighbor_crime_total = 0 yazıldı.")
+        return
 
-    # -------------------------------------------------------------------------
-    # 3) KOMŞU SUÇ OLAYLARINI FOCAL GEOID'E BAĞLA
-    # -------------------------------------------------------------------------
-    crimes = df.loc[df["crime_w"] > 0, ["geoid","datetime","crime_w"]].copy()
-    crimes = crimes.dropna(subset=["datetime"])
-    log_shape(crimes, "CRIMES (crime_w>0)")
-
-    # Komşularla suçları eşleştir:
-    # nb.geoid = focal geoid (satırın geoid'i)
-    # nb.neighbor = komşu geoid
-    neigh_events = nb.merge(
-        crimes,
-        left_on="neighbor",
-        right_on="geoid",
-        how="inner"
+    # 4) GEOID toplam suç (zaman bağımsız toplam)
+    geo_totals = (
+        df.groupby("GEOID", as_index=False)["_crime_used"]
+          .sum()
+          .rename(columns={"_crime_used": "GEOID_CRIME_TOTAL"})
     )
 
-    # focal geoid zaten nb.geoid kolonu
-    neigh_events = neigh_events[["geoid", "datetime", "crime_w"]].dropna()
-    log_shape(neigh_events, "NEIGH_EVENTS (mapped)")
-
-    # -------------------------------------------------------------------------
-    # 4) PENCERE HESAPLARI (T-24h, T-72h, T-7d)
-    # -------------------------------------------------------------------------
-    focal = df[["geoid","datetime"]].copy()
-
-    df["neighbor_crime_24h"] = compute_neighbor_window(
-        focal, neigh_events, pd.Timedelta(hours=24)
+    # 5) Komşu toplamlarını kaynak GEOID'e projekte et
+    #    NEI_GEOID ile geo_totals'ı eşleyip SRC_GEOID bazında topla
+    nei_with_counts = nb.merge(
+        geo_totals.rename(columns={"GEOID": "NEI_GEOID"}),
+        on="NEI_GEOID",
+        how="left"
     )
-    df["neighbor_crime_72h"] = compute_neighbor_window(
-        focal, neigh_events, pd.Timedelta(hours=72)
-    )
-    df["neighbor_crime_7d"]  = compute_neighbor_window(
-        focal, neigh_events, pd.Timedelta(days=7)
+    nei_with_counts["GEOID_CRIME_TOTAL"] = nei_with_counts["GEOID_CRIME_TOTAL"].fillna(0)
+
+    nei_sum = (
+        nei_with_counts.groupby("SRC_GEOID", as_index=False)["GEOID_CRIME_TOTAL"]
+        .sum()
+        .rename(columns={"SRC_GEOID": "GEOID", "GEOID_CRIME_TOTAL": "neighbor_crime_total"})
     )
 
-    # -------------------------------------------------------------------------
-    # 5) CLEANUP + SAVE
-    # -------------------------------------------------------------------------
-    df = df.drop(columns=["crime_w"], errors="ignore")
+    # 6) Ana tabloya geri yaz
+    out = df.merge(nei_sum, on="GEOID", how="left")
+    out["neighbor_crime_total"] = out["neighbor_crime_total"].fillna(0).astype(int)
 
-    safe_save_csv(df, OUT_CSV)
-    log_shape(df, "OUT (saved)")
-    print(f"✅ Yazıldı: {OUT_CSV.name}")
-
-    show_cols = ["geoid","datetime","neighbor_crime_24h","neighbor_crime_72h","neighbor_crime_7d"]
-    show_cols = [c for c in show_cols if c in df.columns]
-    print(df[show_cols].head(5).to_string(index=False))
-
+    # 7) Temizlik ve çıktı
+    out = out.drop(columns=["_crime_used"])
+    DST.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(DST, index=False)
+    print(f"✅ {DST.name} oluşturuldu → {len(out):,} satır, {out.shape[1]} sütun")
+    print("ℹ️ Eklenen sütun: neighbor_crime_total (zaman bağımsız toplam)")
 
 if __name__ == "__main__":
     main()
