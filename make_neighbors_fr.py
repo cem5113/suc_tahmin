@@ -1,14 +1,13 @@
-# make_neighbors_fr.py
+# make_neighbors_fr.py 
 
 from __future__ import annotations
 import os
 from pathlib import Path
-from datetime import timedelta
-
 import numpy as np
 import pandas as pd
 
 pd.options.mode.copy_on_write = True
+
 
 # =============================================================================
 # CONFIG / PATHS
@@ -16,12 +15,11 @@ pd.options.mode.copy_on_write = True
 BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).resolve()
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-IN_CSV  = Path(os.getenv("NEIGHBOR_INPUT_CSV",  str(BASE_DIR / "fr_crime_08.csv")))
-OUT_CSV = Path(os.getenv("NEIGHBOR_OUTPUT_CSV", str(BASE_DIR / "fr_crime_09.csv")))
-
-NEIGH_FILE = Path(os.getenv("NEIGH_FILE", str(BASE_DIR / "neighbors.csv")))
+IN_CSV  = Path(os.getenv("NEIGHBOR_INPUT_CSV",  str(BASE_DIR / "fr_crime_08.csv"))).resolve()
+OUT_CSV = Path(os.getenv("NEIGHBOR_OUTPUT_CSV", str(BASE_DIR / "fr_crime_09.csv"))).resolve()
 
 GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
+
 
 # =============================================================================
 # HELPERS
@@ -30,6 +28,7 @@ def log_shape(df: pd.DataFrame, label: str):
     r, c = df.shape
     print(f"📊 {label}: {r:,} satır × {c} sütun")
 
+
 def _norm_geoid(s: pd.Series, L: int = GEOID_LEN) -> pd.Series:
     return (
         s.astype(str)
@@ -37,6 +36,7 @@ def _norm_geoid(s: pd.Series, L: int = GEOID_LEN) -> pd.Series:
          .str[:L]
          .str.zfill(L)
     )
+
 
 def _pick_col(cols, *cands):
     low = {c.lower(): c for c in cols}
@@ -50,9 +50,64 @@ def _pick_col(cols, *cands):
                 return low[cand.lower()]
     return None
 
+
 def safe_save_csv(df: pd.DataFrame, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+
+
+def resolve_neighbors_file(base_dir: Path) -> Path:
+    """
+    neighbors.csv'yi mümkün olan her yerden bulmaya çalışır.
+    Öncelik sırası:
+      1) NEIGH_FILE env (tam yol)
+      2) base_dir/neighbors.csv
+      3) script klasörü ve üstleri
+      4) repo içinde rglob
+    """
+    tried = []
+
+    # 1) env ile verilmişse
+    env_path = os.environ.get("NEIGH_FILE")
+    if env_path:
+        p = Path(env_path).expanduser().resolve()
+        tried.append(str(p))
+        if p.exists():
+            print(f"✅ neighbors.csv env ile bulundu: {p}")
+            return p
+
+    # 2) base_dir içinde
+    p1 = (base_dir / "neighbors.csv").resolve()
+    tried.append(str(p1))
+    if p1.exists():
+        print(f"✅ neighbors.csv BASE_DIR içinde bulundu: {p1}")
+        return p1
+
+    # 3) script klasörü ve üstleri
+    here = Path(__file__).resolve().parent
+    ups = [here, here.parent, here.parent.parent, here.parent.parent.parent]
+    for up in ups:
+        cand = (up / "neighbors.csv").resolve()
+        tried.append(str(cand))
+        if cand.exists():
+            print(f"✅ neighbors.csv script çevresinde bulundu: {cand}")
+            return cand
+
+    # 4) repo içinde glob (son çare)
+    try:
+        root = here.parent  # genelde repo root burada olur
+        for cand in root.rglob("neighbors.csv"):
+            cand = cand.resolve()
+            tried.append(str(cand))
+            print(f"✅ neighbors.csv rglob ile bulundu: {cand}")
+            return cand
+    except Exception:
+        pass
+
+    # bulunamadı → açıklayıcı hata
+    msg = "❌ Komşuluk dosyası (neighbors.csv) bulunamadı.\nDenediğim yollar:\n- " + "\n- ".join(tried)
+    raise FileNotFoundError(msg)
+
 
 def compute_neighbor_window(
     focal: pd.DataFrame,
@@ -64,11 +119,9 @@ def compute_neighbor_window(
     focal:  ['geoid','datetime']  (tüm satırlar)
     events: ['geoid_focal','datetime','crime_w']  (komşu suç eventleri)
     window: örn pd.Timedelta('24h')
-    out_col: çıktı kolon adı
 
     Mantık: cum(t) - cum(t-window)
     """
-    # focal ve events sıralı olmalı
     focal_sorted  = focal.sort_values(["geoid", "datetime"]).reset_index()
     events_sorted = events.sort_values(["geoid_focal", "datetime"]).reset_index(drop=True)
 
@@ -105,9 +158,11 @@ def compute_neighbor_window(
     cum_tm = right["cum"].fillna(0.0)
 
     vals = (cum_t - cum_tm).clip(lower=0).astype("int64")
+
     # orijinal index sırasına geri döndür
     vals.index = left["index"].values
     return vals.reindex(focal.index, fill_value=0)
+
 
 # =============================================================================
 # MAIN
@@ -115,12 +170,12 @@ def compute_neighbor_window(
 def main():
     if not IN_CSV.exists():
         raise FileNotFoundError(f"❌ Girdi bulunamadı: {IN_CSV}")
-    if not NEIGH_FILE.exists():
-        raise FileNotFoundError(f"❌ Komşuluk dosyası bulunamadı: {NEIGH_FILE}")
 
-    print(f"▶︎ IN : {IN_CSV.resolve()}")
-    print(f"▶︎ NB : {NEIGH_FILE.resolve()}")
-    print(f"▶︎ OUT: {OUT_CSV.resolve()}")
+    NEIGH_FILE = resolve_neighbors_file(BASE_DIR)
+
+    print(f"▶︎ IN : {IN_CSV}")
+    print(f"▶︎ NB : {NEIGH_FILE}")
+    print(f"▶︎ OUT: {OUT_CSV}")
 
     # 1) crime df
     df = pd.read_csv(IN_CSV, low_memory=False)
@@ -137,7 +192,6 @@ def main():
     df["geoid"] = _norm_geoid(df[gcol])
     df["datetime"] = pd.to_datetime(df[dcol], errors="coerce")
 
-    # NaT varsa bile satır düşürmüyoruz; sadece hesapta etkisiz kalır
     nat_rate = df["datetime"].isna().mean()
     if nat_rate > 0:
         print(f"⚠️ datetime parse NaT oranı: {nat_rate:.3f}")
@@ -173,7 +227,6 @@ def main():
     log_shape(crimes, "CRIMES (crime_w>0)")
 
     # neighbor’da olan suçları focal geoid’e bağla
-    # nb.geoid = focal, nb.neighbor = komşu
     neigh_events = nb.merge(
         crimes,
         left_on="neighbor",
@@ -199,7 +252,7 @@ def main():
         focal, neigh_events, pd.Timedelta(days=7), "neighbor_crime_7d"
     )
 
-    # 5) cleanup (yardımcı kolon)
+    # 5) cleanup
     df = df.drop(columns=["crime_w"], errors="ignore")
 
     # 6) save
