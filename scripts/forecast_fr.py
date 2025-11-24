@@ -28,6 +28,8 @@ from datetime import timedelta
 import numpy as np
 import pandas as pd
 import joblib
+import zipfile
+import tempfile
 
 # -------------------------------------------------------------
 # SUÇ TÜRÜ KOLONU ADAYLARI
@@ -79,6 +81,52 @@ IGNORE_FEATURES = {
 # -------------------------------------------------------------
 # YARDIMCI FONKSİYONLAR
 # -------------------------------------------------------------
+def resolve_models_dir() -> Path:
+    """
+    Stacking pipeline'ın ürettiği models klasörünü bul.
+    Öncelik:
+      1) CRIME_DATA_DIR/models
+      2) ARTIFACT_DIR/models
+      3) ARTIFACT_ZIP içinden çıkar
+      4) FALLBACK_DIRS altında ara
+    """
+    candidates = []
+
+    crime_dir = os.getenv("CRIME_DATA_DIR", ".")
+    candidates.append(Path(crime_dir) / "models")
+
+    artifact_dir = os.getenv("ARTIFACT_DIR", "artifact/sf-crime-pipeline-output")
+    candidates.append(Path(artifact_dir) / "models")
+
+    # FALLBACK_DIRS: virgüllü liste
+    fb = os.getenv("FALLBACK_DIRS", "")
+    for p in [x.strip() for x in fb.split(",") if x.strip()]:
+        candidates.append(Path(p) / "models")
+
+    for c in candidates:
+        if c.exists():
+            print(f"✅ models dir bulundu → {c}")
+            return c
+
+    # Zip fallback
+    zpath = os.getenv("ARTIFACT_ZIP", "")
+    if zpath and Path(zpath).exists():
+        print(f"📦 ARTIFACT_ZIP bulundu → {zpath} | unzip ediliyor...")
+        tmpdir = Path(tempfile.mkdtemp(prefix="models_"))
+        with zipfile.ZipFile(zpath, "r") as zf:
+            zf.extractall(tmpdir)
+        # zip içindeki muhtemel yol: sf-crime-pipeline-output/models
+        for root, dirs, files in os.walk(tmpdir):
+            if os.path.basename(root) == "models":
+                mdir = Path(root)
+                print(f"✅ models dir zip içinden bulundu → {mdir}")
+                return mdir
+
+    raise RuntimeError(
+        "❌ models klasörü bulunamadı. "
+        "CRIME_DATA_DIR, ARTIFACT_DIR, ARTIFACT_ZIP veya FALLBACK_DIRS kontrol et."
+    )
+  
 def detect_crime_category_column(df_raw: pd.DataFrame) -> str | None:
     for c in CRIME_CAT_CANDIDATES:
         if c in df_raw.columns:
@@ -185,22 +233,25 @@ def _find_hist_csv(base_dir: Path) -> Path | None:
 
 def _load_stacking_bundle(models_dir: Path):
     """
-    stacking_meta_*.joblib + threshold_*.json auto-detect.
+    stacking_meta_*.joblib + threshold_meta_*.json auto-detect.
+    Stacking pipeline formatı:
+      - stacking_meta_lgb.joblib / stacking_meta_logreg.joblib
+      - threshold_meta_lgb.json  / threshold_meta_logreg.json
+      - içerik: {"names": [...], "meta": meta_model}
     """
-    stack_path = _find_latest_file(models_dir, "stacking_*.joblib")
+    stack_path = _find_latest_file(models_dir, "stacking_meta_*.joblib")
     if stack_path is None:
-        raise RuntimeError(f"❌ stacking_*.joblib bulunamadı: {models_dir}")
+        raise RuntimeError(f"❌ stacking_meta_*.joblib bulunamadı: {models_dir}")
 
-    thr_path = _find_latest_file(models_dir, "threshold_*.json")
+    thr_path = _find_latest_file(models_dir, "threshold_meta_*.json")
     if thr_path is None:
-        raise RuntimeError(f"❌ threshold_*.json bulunamadı: {models_dir}")
+        raise RuntimeError(f"❌ threshold_meta_*.json bulunamadı: {models_dir}")
 
     stack_obj = joblib.load(stack_path)
     thr = json.loads(thr_path.read_text(encoding="utf-8")).get("threshold", 0.5)
 
-    # stack_obj = {"names": [...], "meta": meta_model}
     if not isinstance(stack_obj, dict) or "names" not in stack_obj or "meta" not in stack_obj:
-        raise RuntimeError("❌ stacking_*.joblib formatı beklenen dict yapısında değil.")
+        raise RuntimeError("❌ stacking_meta_*.joblib formatı beklenen dict yapısında değil.")
 
     return stack_obj, float(thr), stack_path, thr_path
 
@@ -396,8 +447,7 @@ def main() -> None:
     BASE_DIR = Path(base_dir_env).resolve()
     BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-    MODELS_DIR = BASE_DIR / "models"
-
+    MODELS_DIR = resolve_models_dir()
     # ---------------------------------------------------------
     # HIST CSV (baseline için)
     # ---------------------------------------------------------
@@ -422,11 +472,20 @@ def main() -> None:
     stack_obj, thr, STACK_PATH, THR_PATH = _load_stacking_bundle(MODELS_DIR)
 
     expected_raw_cols = _get_expected_raw_cols(pre)
+    
     if not expected_raw_cols:
-        # fallback: base_pipes ilk pipeline'dan yakala
         any_pipe = next(iter(base_pipes.values()))
-        if hasattr(any_pipe.named_steps.get("prep", None), "feature_names_in_"):
-            expected_raw_cols = list(any_pipe.named_steps["prep"].feature_names_in_)
+        prep_step = any_pipe.named_steps.get("prep", None)
+        if hasattr(prep_step, "feature_names_in_"):
+            expected_raw_cols = list(prep_step.feature_names_in_)
+    
+    if not expected_raw_cols:
+        # son çare: base_pipes'in transformers listesinden kolonları topla
+        raw_cols = []
+        for _, _, cols in getattr(pre, "transformers", []):
+            if isinstance(cols, (list, tuple)):
+                raw_cols.extend(cols)
+        expected_raw_cols = sorted(set(raw_cols))
 
     print("📥 Veri (baseline):", CSV_PATH)
     print("📥 Preprocessor:", PRE_PATH)
