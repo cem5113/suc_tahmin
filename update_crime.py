@@ -24,7 +24,7 @@ import json
 SF_TZ = zoneinfo.ZoneInfo("America/Los_Angeles")
 SF_TZ_NAME = "America/Los_Angeles"
 
-AGGR_Y_THRESHOLD   = int(os.getenv("AGGR_Y_THRESHOLD", "3"))     # takvim grid label eşiği
+AGGR_Y_THRESHOLD   = int(os.getenv("AGGR_Y_THRESHOLD", "2"))     # takvim grid label eşiği
 DAILY_Y_THRESHOLD  = int(os.getenv("DAILY_Y_THRESHOLD", "1"))    # günlük grid label eşiği
 DEFAULT_GEOID_LEN  = int(os.getenv("GEOID_LEN", "11"))           # tract GEOID uzunluğu
 SF_BBOX            = (-123.2, 37.6, -122.3, 37.9)
