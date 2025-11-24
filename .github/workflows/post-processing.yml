@@ -297,14 +297,14 @@ jobs:
 
       - name: FR 09) Neighbors
         env:
-          CRIME_DATA_DIR:   ${{ env.FR_OUTPUT_DIR }}
+          CRIME_DATA_DIR: ${{ env.FR_OUTPUT_DIR }}
           NEIGHBOR_OUTPUT_CSV: ${{ env.FR_OUTPUT_DIR }}/fr_crime_09.csv
           NEIGHBOR_INPUT_CSV:  ${{ env.FR_OUTPUT_DIR }}/fr_crime_08.csv
-          NEIGH_FILE: ${{ env.FR_OUTPUT_DIR }}/neighbors.csv
+          NEIGH_FILE: ${{ github.workspace }}/crime_prediction_data/neighbors.csv
         shell: bash
         run: |
           set -euo pipefail
-          python -u make_neighbors_fr.py
+          python -u crime_prediction_data/make_neighbors_fr.py
           echo "HEAD fr_crime_09.csv:"
           head -n 5 "${{ env.FR_OUTPUT_DIR }}/fr_crime_09.csv"
 
