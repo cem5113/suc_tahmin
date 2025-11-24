@@ -24,12 +24,12 @@ warnings.filterwarnings("ignore")
 
 from pathlib import Path
 from datetime import timedelta
+import zipfile
+import tempfile
 
 import numpy as np
 import pandas as pd
 import joblib
-import zipfile
-import tempfile
 
 # -------------------------------------------------------------
 # SUÇ TÜRÜ KOLONU ADAYLARI
@@ -79,6 +79,87 @@ IGNORE_FEATURES = {
 }
 
 # -------------------------------------------------------------
+# ✅ SpatialTargetEncoder (joblib load için gerekli)
+# -------------------------------------------------------------
+from sklearn.base import BaseEstimator, TransformerMixin
+
+class SpatialTargetEncoder(BaseEstimator, TransformerMixin):
+    """
+    GEOID için hedef kodlama (komşu katkılı, Laplace smoothing):
+      TE(g) = (sum_y(g) + m * global_mean + sum_y(neighbors(g))) / (n(g) + m + n_neighbors(g))
+    - m = TE_ALPHA (Laplace smoothing)
+    - neighbors(g) varsa eklenir, yoksa yalnız Laplace yapılır.
+    Not: CV sırasında sızıntı yok; Pipeline içindeki her fold'un train'inde fit edilir.
+    """
+    def __init__(self, geo_col="GEOID", alpha=50.0, neighbors_dict=None):
+        self.geo_col = geo_col
+        self.alpha = float(alpha)
+        self.neighbors_dict = neighbors_dict
+        self.mapping_ = None
+        self.global_mean_ = None
+
+    def _geo_series(self, X):
+        import pandas as pd, numpy as np
+        if isinstance(X, pd.DataFrame):
+            if self.geo_col in X.columns:
+                return X[self.geo_col].astype(str)
+            if X.shape[1] == 1:
+                return X.iloc[:, 0].astype(str)
+            raise ValueError(f"{self.geo_col} kolonu bulunamadı ve çoklu sütun geldi.")
+        X = np.asarray(X)
+        if X.ndim == 1:
+            return pd.Series(X.ravel().astype(str))
+        return pd.Series(X[:, 0].astype(str))
+
+    def fit(self, X, y=None):
+        import pandas as pd
+        import numpy as np
+        if y is None:
+            raise ValueError("SpatialTargetEncoder.fit için y gerekli.")
+        s_geo = self._geo_series(X)
+        y = pd.Series(y).astype(float)
+        if len(s_geo) != len(y):
+            raise ValueError("X ve y uzunlukları uyumsuz.")
+
+        grp = pd.DataFrame({"geo": s_geo, "y": y}).groupby("geo")["y"].agg(["sum", "count"])
+        grp.columns = ["sum_y", "n"]
+        self.global_mean_ = float(y.mean()) if len(y) else 0.5
+
+        if self.neighbors_dict:
+            sum_dict = grp["sum_y"].to_dict()
+            n_dict   = grp["n"].to_dict()
+            neigh_sum, neigh_n = [], []
+            for g in grp.index:
+                acc_s = 0.0
+                acc_n = 0.0
+                for nb in self.neighbors_dict.get(g, []):
+                    acc_s += sum_dict.get(nb, 0.0)
+                    acc_n += n_dict.get(nb, 0.0)
+                neigh_sum.append(acc_s)
+                neigh_n.append(acc_n)
+            grp["neigh_sum"] = neigh_sum
+            grp["neigh_n"]   = neigh_n
+        else:
+            grp["neigh_sum"] = 0.0
+            grp["neigh_n"]   = 0.0
+
+        m = self.alpha
+        grp["te"] = (
+            (grp["sum_y"] + m*self.global_mean_ + grp["neigh_sum"])
+            / (grp["n"] + m + grp["neigh_n"])
+        )
+        self.mapping_ = grp["te"].to_dict()
+        return self
+
+    def transform(self, X):
+        import pandas as pd, numpy as np
+        s_geo = self._geo_series(X)
+        te = s_geo.map(self.mapping_).fillna(
+            self.global_mean_ if self.global_mean_ is not None else 0.5
+        )
+        return te.to_numpy().reshape(-1, 1)
+
+# -------------------------------------------------------------
 # YARDIMCI FONKSİYONLAR
 # -------------------------------------------------------------
 def resolve_models_dir() -> Path:
@@ -98,7 +179,6 @@ def resolve_models_dir() -> Path:
     artifact_dir = os.getenv("ARTIFACT_DIR", "artifact/sf-crime-pipeline-output")
     candidates.append(Path(artifact_dir) / "models")
 
-    # FALLBACK_DIRS: virgüllü liste
     fb = os.getenv("FALLBACK_DIRS", "")
     for p in [x.strip() for x in fb.split(",") if x.strip()]:
         candidates.append(Path(p) / "models")
@@ -108,14 +188,12 @@ def resolve_models_dir() -> Path:
             print(f"✅ models dir bulundu → {c}")
             return c
 
-    # Zip fallback
     zpath = os.getenv("ARTIFACT_ZIP", "")
     if zpath and Path(zpath).exists():
         print(f"📦 ARTIFACT_ZIP bulundu → {zpath} | unzip ediliyor...")
         tmpdir = Path(tempfile.mkdtemp(prefix="models_"))
         with zipfile.ZipFile(zpath, "r") as zf:
             zf.extractall(tmpdir)
-        # zip içindeki muhtemel yol: sf-crime-pipeline-output/models
         for root, dirs, files in os.walk(tmpdir):
             if os.path.basename(root) == "models":
                 mdir = Path(root)
@@ -126,7 +204,7 @@ def resolve_models_dir() -> Path:
         "❌ models klasörü bulunamadı. "
         "CRIME_DATA_DIR, ARTIFACT_DIR, ARTIFACT_ZIP veya FALLBACK_DIRS kontrol et."
     )
-  
+
 def detect_crime_category_column(df_raw: pd.DataFrame) -> str | None:
     for c in CRIME_CAT_CANDIDATES:
         if c in df_raw.columns:
@@ -224,7 +302,6 @@ def _find_hist_csv(base_dir: Path) -> Path | None:
         p = base_dir / name
         if p.exists():
             return p
-    # yoksa fr_crime*.csv içinde en günceli
     p2 = _find_latest_file(base_dir, "fr_crime*.csv")
     if p2:
         return p2
@@ -447,10 +524,11 @@ def main() -> None:
     BASE_DIR = Path(base_dir_env).resolve()
     BASE_DIR.mkdir(parents=True, exist_ok=True)
 
+    # ---------------------------------------------------------
+    # ✅ MODELS_DIR ve HIST CSV BURADA OLMALI
+    # ---------------------------------------------------------
     MODELS_DIR = resolve_models_dir()
-    # ---------------------------------------------------------
-    # HIST CSV (baseline için)
-    # ---------------------------------------------------------
+
     CSV_PATH = _find_hist_csv(BASE_DIR)
     if CSV_PATH is None or not CSV_PATH.exists():
         raise RuntimeError(f"❌ Baseline için fr_crime*.csv bulunamadı: {BASE_DIR}")
@@ -472,15 +550,14 @@ def main() -> None:
     stack_obj, thr, STACK_PATH, THR_PATH = _load_stacking_bundle(MODELS_DIR)
 
     expected_raw_cols = _get_expected_raw_cols(pre)
-    
+
     if not expected_raw_cols:
         any_pipe = next(iter(base_pipes.values()))
         prep_step = any_pipe.named_steps.get("prep", None)
         if hasattr(prep_step, "feature_names_in_"):
             expected_raw_cols = list(prep_step.feature_names_in_)
-    
+
     if not expected_raw_cols:
-        # son çare: base_pipes'in transformers listesinden kolonları topla
         raw_cols = []
         for _, _, cols in getattr(pre, "transformers", []):
             if isinstance(cols, (list, tuple)):
@@ -522,7 +599,6 @@ def main() -> None:
     else:
         raise RuntimeError("❌ GEOID veya geoid kolonu yok!")
 
-    # normalize GEOID uzunluğu (stacking ile aynı)
     geoid_len = int(os.getenv("GEOID_LEN", "11"))
     df["GEOID"] = _normalize_geoid_series(df["GEOID"], geoid_len)
 
@@ -583,7 +659,6 @@ def main() -> None:
 
     print("🧩 Geo profile shape:", geo_profile.shape)
 
-    # Medyanlar (explanation için)
     num_medians: dict = {}
     for c in EXPLAIN_NUM_FEATURES:
         if c in df_base.columns:
@@ -597,7 +672,7 @@ def main() -> None:
                 return None
             return base_row.iloc[0].to_dict()
 
-        dfg7 = dfg.tail(168)  # ~7 gün saatlik
+        dfg7 = dfg.tail(168)
         num_cols2 = dfg7.select_dtypes(include="number").columns
         base = dfg7[num_cols2].mean().to_dict()
         base["GEOID"] = gid
