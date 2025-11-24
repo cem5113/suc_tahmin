@@ -36,9 +36,6 @@ Path(BASE_DIR).mkdir(parents=True, exist_ok=True)
 # Crime input candidates
 CRIME_IN_CANDS = [
     os.path.join(BASE_DIR, "fr_crime_07.csv"),
-    os.path.join(BASE_DIR, "sf_crime_07.csv"),
-    os.path.join(BASE_DIR, "fr_crime.csv"),
-    os.path.join(BASE_DIR, "sf_crime.csv"),
 ]
 
 # ---- GitHub artifact settings (update_crime.py ile aynı mantık) ----
