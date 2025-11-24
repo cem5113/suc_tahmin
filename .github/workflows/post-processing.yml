@@ -304,7 +304,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -u crime_prediction_data/make_neighbors_fr.py
+          python -u "${{ github.workspace }}/make_neighbors_fr.py"
           echo "HEAD fr_crime_09.csv:"
           head -n 5 "${{ env.FR_OUTPUT_DIR }}/fr_crime_09.csv"
 
