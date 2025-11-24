@@ -315,7 +315,7 @@ jobs:
           python -u "$PY" || true
           echo "HEAD fr_crime_09.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
 
-      - name: FR 10) Stacking + Feature + SHAP (fr_crime_09)
+      - name: FR 10) Feature + SHAP (fr_crime_09)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
@@ -326,10 +326,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f scripts/stacking_feature_shap.py ]; then
-            PY=scripts/stacking_feature_shap.py
+          if [ -f scripts/feature_shap.py ]; then
+            PY=scripts/feature_shap.py
           else
-            echo "❌ stacking_feature_shap.py bulunamadı."
+            echo "❌ feature_shap.py bulunamadı."
             exit 1
           fi
           python -u "$PY"
