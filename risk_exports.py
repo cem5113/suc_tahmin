@@ -1,16 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-risk_exports.py
-Saatlik + günlük risk exportları + opsiyonel Top-3 suç türü tablosu
-
-Çıktılar:
-  - risk_hourly{out_prefix}.csv
-  - risk_daily{out_prefix}.csv
-  - patrol_recs{out_prefix}.csv
-  - (opsiyonel) risk_types_top3.csv
-"""
-
+# risk_exports.py 
 import os, math, argparse
 from pathlib import Path
 from datetime import datetime
@@ -27,21 +15,32 @@ SF_TZ = ZoneInfo("America/Los_Angeles")
 # Helpers
 # =========================================================
 def _normalize_hour_range(hr):
-    """'00-03' formatını garanti et."""
+    """
+    Saatlik slot formatını garanti et: "HH-(HH+1)"
+    - hr boşsa → "00-01"
+    - hr tek sayıysa → o saatten +1 slot üret
+    - hr "a-b" formatındaysa b ignore edilip a+1 üretilir (tutarlılık)
+    """
     if pd.isna(hr):
-        return "00-03"
+        return "00-01"
+
     s = str(hr).strip().replace("–", "-").replace("—", "-")
+
+    # "a-b" yakala
     m = pd.Series([s]).str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
-    if not m.notna().all(axis=1).iloc[0]:
-        try:
-            h = int(float(s))
-        except Exception:
-            h = 0
-        a = int((h // 3) * 3)
-        b = int(((h // 3) * 3 + 3) % 24)
+    if m.notna().all(axis=1).iloc[0]:
+        a = int(float(m.iloc[0, 0])) % 24
+        b = (a + 1) % 24
         return f"{a:02d}-{b:02d}"
-    a = int(float(m.iloc[0, 0])) % 24
-    b = int(float(m.iloc[0, 1])) % 24
+
+    # tek sayı / diğer formatlar
+    try:
+        h = int(float(s)) % 24
+    except Exception:
+        h = 0
+
+    a = h
+    b = (a + 1) % 24
     return f"{a:02d}-{b:02d}"
 
 
@@ -49,6 +48,8 @@ def _ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     df'de date + hour_range + GEOID'i güvenle hazırla.
     date yoksa datetime'dan türet, ikisi de yoksa bugünkü SF tarihi.
+
+    ✅ hour_range: SAATLİK "HH-(HH+1)"
     """
     df = df.copy()
 
@@ -75,8 +76,9 @@ def _ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
             h = pd.to_datetime(df["datetime"], errors="coerce").dt.hour.fillna(0).astype(int) % 24
         else:
             h = pd.Series(np.zeros(len(df), dtype=int))
-        a = (h // 3) * 3
-        b = (a + 3) % 24
+
+        a = h
+        b = (h + 1) % 24
         df["hour_range"] = a.map("{:02d}".format) + "-" + pd.Series(b).map("{:02d}".format)
     else:
         df["hour_range"] = df["hour_range"].apply(_normalize_hour_range)
@@ -91,6 +93,7 @@ def _ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
 def _load_recent_crime(window_days=30):
     """
     Baseline ve top3 için sf_crime.csv'den son window_days verisini getir.
+    ✅ hour_range: SAATLİK
     """
     raw_path = os.path.join(CRIME_DIR, "sf_crime.csv")
     if not os.path.exists(raw_path):
@@ -114,14 +117,15 @@ def _load_recent_crime(window_days=30):
     start = latest.normalize() - pd.Timedelta(days=window_days - 1)
     dfc = dfc[(dfc["date"] >= start) & (dfc["date"] <= latest)].copy()
 
-    # hour_range
+    # hour_range saatlik üret
     if "hour_range" not in dfc.columns:
         if "event_hour" in dfc.columns:
             h = pd.to_numeric(dfc["event_hour"], errors="coerce").fillna(0).astype(int) % 24
         else:
             h = dfc["date"].dt.hour.fillna(0).astype(int) % 24
-        a = (h // 3) * 3
-        b = (a + 3) % 24
+
+        a = h
+        b = (h + 1) % 24
         dfc["hour_range"] = a.map("{:02d}".format) + "-" + pd.Series(b).map("{:02d}".format)
     else:
         dfc["hour_range"] = dfc["hour_range"].apply(_normalize_hour_range)
@@ -135,7 +139,7 @@ def _load_recent_crime(window_days=30):
 def _compute_baselines(window_days=30):
     """
     Son window_days içinde:
-      - GEOID×hour_range için λ_base ve p_base
+      - GEOID×hour_range için λ_base ve p_base  (hour_range SAATLİK)
       - category payları
       - city fallback (hour_range bazında)
     """
@@ -202,7 +206,7 @@ def _clip(v, lo, hi):
 # =========================================================
 def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     """
-    Saatlik + günlük risk çıktıları üretir.
+    Saatlik + günlük risk çıktıları üretir (hour_range saatlik).
 
     df: GEOID, date/datetime, hour_range/event_hour içeren tablo
     proba: aynı uzunlukta risk olasılığı (0-1)
@@ -218,8 +222,10 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
 
     proba = np.asarray(proba).reshape(-1)
     if len(proba) != len(risk):
-        raise ValueError(f"export_risk_tables: proba uzunluğu uyumsuz "
-                         f"(proba={len(proba)} vs df={len(risk)}).")
+        raise ValueError(
+            f"export_risk_tables: proba uzunluğu uyumsuz "
+            f"(proba={len(proba)} vs df={len(risk)})."
+        )
 
     # risk score → float + clip
     risk["risk_score"] = pd.to_numeric(proba, errors="coerce").astype(float)
@@ -265,7 +271,7 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
 
     for _, row in risk.iterrows():
         g = row.get("GEOID", "")
-        hr = row.get("hour_range", "00-03")
+        hr = row.get("hour_range", "00-01")
         p_pred = float(np.clip(row["risk_score"], 0.001, 0.999))
 
         lam_base = lam_map.get((g, hr), lam_city.get(hr, 0.0))
@@ -413,7 +419,7 @@ def optional_top_crime_types(window_days: int = 365, out_name: str = "risk_types
     """
     sf_crime.csv mevcutsa, son `window_days` penceresinde:
       - overall Top-3 suç türü
-      - hour_range bazında Top-3 suç türü
+      - hour_range (saatlik) bazında Top-3 suç türü
     üretir. Yoksa None döner.
     """
     try:
