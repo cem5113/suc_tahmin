@@ -11,9 +11,9 @@ permissions:
   actions: write
 
 concurrency:
-  group: post-processing-${{ github.run_id }}
-  cancel-in-progress: false
-  
+  group: post-processing-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   run_fr:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
@@ -32,10 +32,9 @@ jobs:
       PATROL_TOP_K: "50"
       FAST_MODE: "1"
       SKIP_CV: "1"
-      REUSE_MODELS: "0"
-      BASE_MODELS: "lgb"
-      FOLDS_SELECT: "1"
-      RUN_FORECAST: "0"
+      REUSE_MODELS: "1"
+      BASE_MODELS: "hgb,lgb"
+      FOLDS_SELECT: "2"
 
     steps:
       - name: Checkout repository
@@ -161,21 +160,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # parquet varsa onu input yap
           if [ -f "${FR_311_IN_PQ}" ]; then
             export FR_311_IN="${FR_311_IN_PQ}"
           fi
-
-          # update_311_fr.py sadece root'ta
-          if [ -f update_311_fr.py ]; then
-            PY=update_311_fr.py
-          else
-            echo "⚠️ update_311_fr.py root'ta yok, adım atlanıyor"
-            exit 0
-          fi
-
-          python -u "$PY" || true
+          python -u update_311_fr.py || true
           echo "HEAD fr_crime_02.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_02.csv" || true
 
       - name: FR 03) Population
@@ -324,55 +312,39 @@ jobs:
           python -u "$PY" || true
           echo "HEAD fr_crime_09.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
 
-      - name: FR 09.5) Feature Analysis
-        env:
-          CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          ls -lh "${CRIME_DATA_DIR}"
-          test -f "${CRIME_DATA_DIR}/fr_crime_09.csv" || (echo "❌ fr_crime_09.csv yok"; exit 1)
-
-          python3 run_feature_analysis_fr.py \
-            --csv "${CRIME_DATA_DIR}/fr_crime_09.csv" \
-            --out_csv "${CRIME_DATA_DIR}/fr_crime_10_FA.csv" \
-            --outdir "${CRIME_DATA_DIR}/outputs_feature_analysis_fr" \
-            --topk 10
-
-          test -f "${CRIME_DATA_DIR}/fr_crime_10_FA.csv" || (echo "❌ fr_crime_10_FA.csv üretilmedi"; exit 1)
-
-      - name: FR 10) Train stacking (risk + FA entegre) — LITE for GitHub runner
+      - name: FR 10) Stacking + Feature + SHAP (fr_crime_09)
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
+          # sf_cells.geojson repo kökünde (main'de)
           SF_CELLS_PATH:  ${{ github.workspace }}/sf_cells.geojson
-          TRAIN_PHASE: "final"
-
-          SUBSET_STRATEGY: "last1w"
-          SUBSET_MIN_POS: "1500"
-
-          FAST_MODE: "1"
-          SKIP_CV: "1"
-          REUSE_MODELS: "0"
-
-          BASE_MODELS: "lgb"
-          FOLDS_SELECT: "1"
-          PATROL_HORIZON_DAYS: "1"
-          STACKING_DATASET: "fr_crime_10_FA.csv"
+          FR_ML_DAYS:     "365"
+          FR_NEG_FRAC:    "0.3"
+        shell: bash
         run: |
           set -euo pipefail
-          python3 stacking_risk_pipeline.py
+          if [ -f scripts/stacking_feature_shap.py ]; then
+            PY=scripts/stacking_feature_shap.py
+          else
+            echo "❌ stacking_feature_shap.py bulunamadı."
+            exit 1
+          fi
+          python -u "$PY"
 
       - name: FR 11) Forecasts (24h / 7gün / 365gün)
-        if: ${{ env.RUN_FORECAST == '1' }}
         env:
           CRIME_DATA_DIR: ${{ env.CRIME_DATA_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
-          PYTHONPATH: ${{ github.workspace }}:${{ env.CRIME_DATA_DIR }}:${{ github.workspace }}/scripts
         shell: bash
         run: |
           set -euo pipefail
-          python3 -u forecast_pipeline.py
+          if [ -f scripts/forecast_fr.py ]; then
+            PY=scripts/forecast_fr.py
+          else
+            echo "❌ scripts/forecast_fr.py bulunamadı."
+            exit 1
+          fi
+          python -u "$PY"
 
       - name: FR 12) SHAP (XGBoost global feature importance)
         env:
@@ -413,10 +385,11 @@ jobs:
           cd "$FR_OUTPUT_DIR"
 
           echo "📦 FR CSV ve Parquet çıktıları zipleniyor..."
+          
           rm -f fr_csv_outputs.zip fr_parquet_outputs.zip || true
 
           # --- CSV ZIP ---
-          csv_list=$(ls fr_*.csv risk_*.csv shap_feature_importance_fr*.csv fr_report_*.csv top3_types_next7d.csv top5_types_next365d.csv 2>/dev/null || true)
+          csv_list=$(ls fr_*.csv risk_*.csv shap_feature_importance_fr*.csv fr_report_*.csv 2>/dev/null || true)
           if [ -n "$csv_list" ]; then
             echo "🔎 CSV dosyaları bulundu:"
             echo "$csv_list"
@@ -428,13 +401,40 @@ jobs:
           fi
 
           # --- EXTRA: CSV → Parquet dönüştür (eksik parquetler için) ---
-          echo "📌 CSV → Parquet (eksikler) ..."
+          echo "📌 CSV dosyalarının Parquet versiyonları oluşturuluyor..."
+
           for csvf in fr_*.csv risk_*.csv shap_feature_importance_fr*.csv fr_report_*.csv; do
             if [ -f "$csvf" ]; then
               pqf="${csvf%.csv}.parquet"
               if [ ! -f "$pqf" ]; then
                 echo "➡ Parquet üretiliyor: $csvf → $pqf"
-                python3 -c "import pandas as pd, sys; df=pd.read_csv(sys.argv[1]); df.to_parquet(sys.argv[2], index=False)" "$csvf" "$pqf"
+                python3 -c "import pandas as pd, sys; df = pd.read_csv(sys.argv[1]); df.to_parquet(sys.argv[2], index=False)" "$csvf" "$pqf"
+              fi
+            fi
+          done
+
+          # --- PARQUET ZIP ---
+          pq_list=$(ls fr_*.parquet risk_*.parquet 2>/dev/null || true)
+          if [ -n "$pq_list" ]; then
+            echo "🔎 Parquet dosyaları bulundu:"
+            echo "$pq_list"
+            zip -r fr_parquet_outputs.zip $pq_list
+          else
+            echo "⚠️ Parquet bulunamadı, bilgi amaçlı küçük bir dosya ile zip oluşturuluyor."
+            echo "No Parquet outputs produced in this FR run." > fr_parquet_outputs_info.txt
+            zip fr_parquet_outputs.zip fr_parquet_outputs_info.txt
+          fi
+
+          # --- EXTRA: CSV → Parquet dönüştür (eksik parquetler için) ---
+          echo "📌 CSV dosyalarının Parquet versiyonları oluşturuluyor..."
+          for csvf in fr_*.csv risk_*.csv shap_feature_importance_fr*.csv fr_report_*.csv; do
+            if [ -f "$csvf" ]; then
+              pqf="${csvf%.csv}.parquet"
+              if [ ! -f "$pqf" ]; then
+                echo "➡ Parquet üretiliyor: $csvf → $pqf"
+                python3 -c "import pandas as pd, sys; \
+                csvf=sys.argv[1]; pqf=sys.argv[2]; \
+                df=pd.read_csv(csvf); df.to_parquet(pqf, index=False)" "$csvf" "$pqf"
               fi
             fi
           done
@@ -455,16 +455,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fr-crime-outputs-csv
-          path: ${{ env.FR_OUTPUT_DIR }}/fr_csv_outputs.zip
+          path: ${{ env.CRIME_DATA_DIR }}/fr_csv_outputs.zip
           overwrite: true
           if-no-files-found: error
           retention-days: 14
-      
+
       - name: Upload FR outputs (Parquet ZIP)
         uses: actions/upload-artifact@v4
         with:
           name: fr-crime-outputs-parquet
-          path: ${{ env.FR_OUTPUT_DIR }}/fr_parquet_outputs.zip
+          path: ${{ env.CRIME_DATA_DIR }}/fr_parquet_outputs.zip
           overwrite: true
           if-no-files-found: error
           retention-days: 14
