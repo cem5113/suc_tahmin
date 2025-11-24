@@ -1,4 +1,5 @@
 # risk_exports.py 
+
 import os, math, argparse
 from pathlib import Path
 from datetime import datetime
@@ -12,24 +13,25 @@ SF_TZ = ZoneInfo("America/Los_Angeles")
 
 
 # =========================================================
-# Helpers
+# Helpers — hour_range ve date
 # =========================================================
 def _normalize_hour_range(hr):
     """
     Saatlik slot formatını garanti et: "HH-(HH+1)"
     - hr boşsa → "00-01"
     - hr tek sayıysa → o saatten +1 slot üret
-    - hr "a-b" formatındaysa b ignore edilip a+1 üretilir (tutarlılık)
+    - hr "a-b" formatındaysa b ignore edilip a+1 üretilir
     """
     if pd.isna(hr):
         return "00-01"
 
     s = str(hr).strip().replace("–", "-").replace("—", "-")
 
-    # "a-b" yakala
-    m = pd.Series([s]).str.extract(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$")
-    if m.notna().all(axis=1).iloc[0]:
-        a = int(float(m.iloc[0, 0])) % 24
+    # "a-b"
+    import re
+    m = re.match(r"^\s*(\d{1,2})\s*-\s*(\d{1,2})\s*$", s)
+    if m:
+        a = int(m.group(1)) % 24
         b = (a + 1) % 24
         return f"{a:02d}-{b:02d}"
 
@@ -61,7 +63,6 @@ def _ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     else:
         dt = pd.Series([pd.Timestamp(datetime.now(SF_TZ))] * len(df))
 
-    # Tamamen NaT ise fallback
     if dt.notna().sum() == 0:
         print("[WARN] _ensure_date_hour_on_df: date/datetime parse edilemedi → SF today fallback.")
         dt = pd.Series([pd.Timestamp(datetime.now(SF_TZ))] * len(df))
@@ -70,8 +71,11 @@ def _ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- hour_range ---
     if "hour_range" not in df.columns:
+        # önce event_hour, sonra datetime.hour, yoksa 0
         if "event_hour" in df.columns:
             h = pd.to_numeric(df["event_hour"], errors="coerce").fillna(0).astype(int) % 24
+        elif "hr_key" in df.columns:
+            h = pd.to_numeric(df["hr_key"], errors="coerce").fillna(0).astype(int) % 24
         elif "datetime" in df.columns:
             h = pd.to_datetime(df["datetime"], errors="coerce").dt.hour.fillna(0).astype(int) % 24
         else:
@@ -86,17 +90,104 @@ def _ensure_date_hour_on_df(df: pd.DataFrame) -> pd.DataFrame:
     # --- GEOID ---
     if "GEOID" in df.columns:
         df["GEOID"] = df["GEOID"].astype(str)
+    elif "geoid" in df.columns:
+        df["GEOID"] = df["geoid"].astype(str)
 
     return df
 
 
+# =========================================================
+# Risk post-processing (uçları yumuşatma)
+# =========================================================
+def _sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+def _logit(p):
+    p = np.clip(p, 1e-9, 1 - 1e-9)
+    return np.log(p / (1 - p))
+
+def postprocess_proba(proba: np.ndarray) -> np.ndarray:
+    """
+    Tahmin olasılıklarını uçlardan yumuşatır.
+    Varsayılan mod: temp_power
+
+    ENV:
+      RISK_POSTPROC_MODE: raw | temp | power | temp_power | rank
+      RISK_TEMP: 1.8
+      RISK_POWER: 0.85
+      RISK_WINSOR_QHI: 0.995
+      RISK_WINSOR_QLO: 0.000
+      RISK_MIN: 0.0005
+      RISK_MAX: 0.9995
+    """
+    mode = os.getenv("RISK_POSTPROC_MODE", "temp_power").strip().lower()
+    temp = float(os.getenv("RISK_TEMP", "1.8"))
+    power = float(os.getenv("RISK_POWER", "0.85"))
+    qhi = float(os.getenv("RISK_WINSOR_QHI", "0.995"))
+    qlo = float(os.getenv("RISK_WINSOR_QLO", "0.000"))
+    pmin = float(os.getenv("RISK_MIN", "0.0005"))
+    pmax = float(os.getenv("RISK_MAX", "0.9995"))
+
+    p = np.asarray(proba, dtype=float).reshape(-1)
+    p = np.nan_to_num(p, nan=0.0, posinf=1.0, neginf=0.0)
+    p = np.clip(p, 0.0, 1.0)
+
+    if mode == "raw":
+        out = p
+
+    elif mode == "temp":
+        # temperature scaling on logit
+        z = _logit(p) / max(temp, 1e-6)
+        out = _sigmoid(z)
+
+    elif mode == "power":
+        # power transform (compress highs if power<1)
+        out = np.power(p, power)
+
+    elif mode == "temp_power":
+        z = _logit(p) / max(temp, 1e-6)
+        out = _sigmoid(z)
+        out = np.power(out, power)
+
+    elif mode == "rank":
+        # rank-based spreading (avoids spikes)
+        r = pd.Series(p).rank(method="average", pct=True).values
+        out = r
+
+    else:
+        out = p  # fallback
+
+    # winsorize (quantile cap)
+    try:
+        lo_v = np.quantile(out, qlo) if qlo > 0 else None
+        hi_v = np.quantile(out, qhi) if qhi < 1 else None
+        if lo_v is not None:
+            out = np.maximum(out, lo_v)
+        if hi_v is not None:
+            out = np.minimum(out, hi_v)
+    except Exception:
+        pass
+
+    # final hard clip
+    out = np.clip(out, pmin, pmax)
+    return out
+
+
+# =========================================================
+# Baseline / top3 için son suç penceresi yükle
+# =========================================================
 def _load_recent_crime(window_days=30):
     """
-    Baseline ve top3 için sf_crime.csv'den son window_days verisini getir.
+    Baseline ve top3 için son window_days suç verisi.
+    Öncelik: sf_crime.csv → fr_crime.csv
     ✅ hour_range: SAATLİK
     """
-    raw_path = os.path.join(CRIME_DIR, "sf_crime.csv")
-    if not os.path.exists(raw_path):
+    cand_paths = [
+        os.path.join(CRIME_DIR, "sf_crime.csv"),
+        os.path.join(CRIME_DIR, "fr_crime.csv"),
+    ]
+    raw_path = next((p for p in cand_paths if os.path.exists(p)), None)
+    if not raw_path:
         return None
 
     dfc = pd.read_csv(raw_path, low_memory=False, dtype={"GEOID": str})
@@ -117,16 +208,13 @@ def _load_recent_crime(window_days=30):
     start = latest.normalize() - pd.Timedelta(days=window_days - 1)
     dfc = dfc[(dfc["date"] >= start) & (dfc["date"] <= latest)].copy()
 
-    # hour_range saatlik üret
+    # hour_range saatlik üret/normalize
     if "hour_range" not in dfc.columns:
         if "event_hour" in dfc.columns:
             h = pd.to_numeric(dfc["event_hour"], errors="coerce").fillna(0).astype(int) % 24
         else:
             h = dfc["date"].dt.hour.fillna(0).astype(int) % 24
-
-        a = h
-        b = (h + 1) % 24
-        dfc["hour_range"] = a.map("{:02d}".format) + "-" + pd.Series(b).map("{:02d}".format)
+        dfc["hour_range"] = h.map("{:02d}".format) + "-" + (h + 1).map(lambda x: f"{x%24:02d}")
     else:
         dfc["hour_range"] = dfc["hour_range"].apply(_normalize_hour_range)
 
@@ -139,7 +227,7 @@ def _load_recent_crime(window_days=30):
 def _compute_baselines(window_days=30):
     """
     Son window_days içinde:
-      - GEOID×hour_range için λ_base ve p_base  (hour_range SAATLİK)
+      - GEOID×hour_range için λ_base ve p_base (hourly)
       - category payları
       - city fallback (hour_range bazında)
     """
@@ -164,7 +252,7 @@ def _compute_baselines(window_days=30):
     cat["share"] = cat["n"] / cat["n_tot"].replace(0, np.nan)
 
     lam_map = {(r["GEOID"], r["hour_range"]): float(r["lambda_base"]) for _, r in tot.iterrows()}
-    p_map = {(r["GEOID"], r["hour_range"]): float(r["p_base"]) for _, r in tot.iterrows()}
+    p_map   = {(r["GEOID"], r["hour_range"]): float(r["p_base"])      for _, r in tot.iterrows()}
 
     shares_map = {}
     for (g, hr), grp in cat.groupby(key):
@@ -174,12 +262,13 @@ def _compute_baselines(window_days=30):
             if not pd.isna(row["share"])
         }
 
+    # city fallback
     hr_tot = dfc.groupby(["hour_range"]).size().rename("events").reset_index()
     hr_tot["lambda_hr_city"] = hr_tot["events"] / (ndays * max(1, dfc["GEOID"].nunique()))
     hr_tot["p_hr_city"] = 1.0 - np.exp(-hr_tot["lambda_hr_city"])
 
     lam_city = {r["hour_range"]: float(r["lambda_hr_city"]) for _, r in hr_tot.iterrows()}
-    p_city = {r["hour_range"]: float(r["p_hr_city"]) for _, r in hr_tot.iterrows()}
+    p_city   = {r["hour_range"]: float(r["p_hr_city"])      for _, r in hr_tot.iterrows()}
 
     city_cat = dfc.groupby(["hour_range", "category"]).size().rename("n").reset_index()
     city_cat_tot = city_cat.groupby(["hour_range"])["n"].sum().rename("n_tot").reset_index()
@@ -227,8 +316,10 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
             f"(proba={len(proba)} vs df={len(risk)})."
         )
 
-    # risk score → float + clip
-    risk["risk_score"] = pd.to_numeric(proba, errors="coerce").astype(float)
+    # ---- Post-process risk score ----
+    p_pp = postprocess_proba(proba)
+
+    risk["risk_score"] = pd.to_numeric(p_pp, errors="coerce").astype(float)
     risk["risk_score"] = risk["risk_score"].fillna(0.0).clip(0.0, 1.0)
 
     risk["hour_range"] = risk["hour_range"].apply(_normalize_hour_range)
@@ -275,12 +366,12 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
         p_pred = float(np.clip(row["risk_score"], 0.001, 0.999))
 
         lam_base = lam_map.get((g, hr), lam_city.get(hr, 0.0))
-        p_base = p_map.get((g, hr), p_city.get(hr, 0.0))
-        shares = shares_map.get((g, hr), shares_city.get(hr, {}))
+        p_base   = p_map.get((g, hr),   p_city.get(hr, 0.0))
+        shares   = shares_map.get((g, hr), shares_city.get(hr, {}))
 
         if p_base < EPS and lam_base <= 0:
             lam_base = lam_city.get(hr, 0.0)
-            p_base = p_city.get(hr, 0.0)
+            p_base   = p_city.get(hr, 0.0)
 
         adj = (p_pred / max(p_base, EPS)) if p_base > 0 else (p_pred / max(p_city.get(hr, EPS), EPS))
         adj = _clip(adj, 0.2, 3.0)
@@ -365,13 +456,13 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
     tmp["rank"] = tmp["rank"].astype(int)
     tmp["prob"] = 1.0 - np.exp(-tmp["lam"])
 
-    cat_w = tmp.pivot_table(index=["GEOID", "date"], columns="rank", values="cat", aggfunc="first")
-    lam_w = tmp.pivot_table(index=["GEOID", "date"], columns="rank", values="lam", aggfunc="first")
+    cat_w  = tmp.pivot_table(index=["GEOID", "date"], columns="rank", values="cat",  aggfunc="first")
+    lam_w  = tmp.pivot_table(index=["GEOID", "date"], columns="rank", values="lam",  aggfunc="first")
     prob_w = tmp.pivot_table(index=["GEOID", "date"], columns="rank", values="prob", aggfunc="first")
 
-    cat_w = cat_w.rename(columns={1: "top1_category_day", 2: "top2_category_day", 3: "top3_category_day"})
-    lam_w = lam_w.rename(columns={1: "top1_expected_day", 2: "top2_expected_day", 3: "top3_expected_day"})
-    prob_w = prob_w.rename(columns={1: "top1_prob_day", 2: "top2_prob_day", 3: "top3_prob_day"})
+    cat_w  = cat_w.rename(columns={1: "top1_category_day", 2: "top2_category_day", 3: "top3_category_day"})
+    lam_w  = lam_w.rename(columns={1: "top1_expected_day", 2: "top2_expected_day", 3: "top3_expected_day"})
+    prob_w = prob_w.rename(columns={1: "top1_prob_day",     2: "top2_prob_day",     3: "top3_prob_day"})
 
     daily_extra = pd.concat([cat_w, lam_w, prob_w], axis=1).reset_index()
     daily = daily.merge(daily_extra, on=["GEOID", "date"], how="left")
@@ -417,7 +508,7 @@ def export_risk_tables(df, y, proba, threshold, out_prefix=""):
 # =========================================================
 def optional_top_crime_types(window_days: int = 365, out_name: str = "risk_types_top3.csv"):
     """
-    sf_crime.csv mevcutsa, son `window_days` penceresinde:
+    sf_crime.csv/fr_crime.csv mevcutsa, son `window_days` penceresinde:
       - overall Top-3 suç türü
       - hour_range (saatlik) bazında Top-3 suç türü
     üretir. Yoksa None döner.
@@ -427,7 +518,6 @@ def optional_top_crime_types(window_days: int = 365, out_name: str = "risk_types
         if df is None or len(df) == 0 or "category" not in df.columns:
             return None
 
-        # overall top3
         over = (
             df.groupby("category").size()
               .rename("count").reset_index()
@@ -438,7 +528,6 @@ def optional_top_crime_types(window_days: int = 365, out_name: str = "risk_types
         over["scope"] = "overall"
         over["hour_range"] = ""
 
-        # hour_range top3
         df["hour_range"] = df["hour_range"].apply(_normalize_hour_range)
         by_hr = (
             df.groupby(["hour_range", "category"]).size()
