@@ -285,18 +285,8 @@ def _find_latest_file(base_dir: Path, glob_pat: str) -> Path | None:
     return files[0]
 
 def _find_hist_csv(base_dir: Path) -> Path | None:
-    """
-    Baseline için en güncel fr_crime*.csv'yi seç.
-    Öncelik:
-      fr_crime_10.csv → fr_crime_10_FA.csv → fr_crime_09_clean.csv → fr_crime.csv
-    """
     candidates = [
-        "fr_crime_10.csv",
-        "fr_crime_10_FA.csv",
-        "fr_crime_09_clean.csv",
         "fr_crime_09.csv",
-        "fr_crime.csv",
-        "sf_crime_grid_full_labeled.csv",
     ]
     for name in candidates:
         p = base_dir / name
