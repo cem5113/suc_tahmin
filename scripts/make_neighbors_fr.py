@@ -111,15 +111,18 @@ def bump_version_name(p: Path) -> Path:
     return p.with_name(f"{prefix}{new_num:02d}{suffix}")
 
 # ---------- config ----------
-BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).resolve()
+BASE_DIR = Path(os.environ.get("CRIME_DATA_DIR", "crime_prediction_data"))
 
-FR_IN_ENV  = os.getenv("FR_CRIME_IN", "fr_crime_08.csv")
-FR_OUT_ENV = os.getenv("FR_CRIME_OUT", "fr_crime_09.csv")
+# fr_crime_08 → fr_crime_09 sabit, ama istersen env ile override edebilirsin
+FR_IN_ENV  = os.environ.get("FR_CRIME_IN",  "fr_crime_08.csv")
+FR_OUT_ENV = os.environ.get("FR_CRIME_OUT", "fr_crime_09.csv")
 
-NEIGH_FILE_ENV = os.getenv("NEIGH_FILE", "neighbors.csv")
-NEIGH_PATH = (BASE_DIR / NEIGH_FILE_ENV) if not Path(NEIGH_FILE_ENV).is_absolute() else Path(NEIGH_FILE_ENV)
+# neighbors.csv için: env verilmemişse BASE_DIR / "neighbors.csv" kullan
+NEIGH_PATH = Path(
+    os.environ.get("NEIGH_FILE", str(BASE_DIR / "neighbors.csv"))
+)
 
-GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
+GEOID_LEN = int(os.environ.get("GEOID_LEN", "11"))
 
 # ---------- core ----------
 def neighbor_daily_features(base: pd.DataFrame, neigh: pd.DataFrame) -> pd.DataFrame:
@@ -195,15 +198,16 @@ def neighbor_daily_features(base: pd.DataFrame, neigh: pd.DataFrame) -> pd.DataF
 
 def main() -> int:
     log("🚀 enrich_with_neighbors_fr.py (fr_crime_08 → fr_crime_09)")
-
+    
     BASE_DIR.mkdir(parents=True, exist_ok=True)
-
+    
     # ---- input/output fr_crime ----
     fr_in = BASE_DIR / FR_IN_ENV if not Path(FR_IN_ENV).is_absolute() else Path(FR_IN_ENV)
     fr_out = BASE_DIR / FR_OUT_ENV if not Path(FR_OUT_ENV).is_absolute() else Path(FR_OUT_ENV)
-
+    
     log(f"📥 FR input : {fr_in}")
     log(f"📤 FR output: {fr_out}")
+    log(f"📂 NEIGH PATH: {NEIGH_PATH}")
     
     df_raw = _read_csv(fr_in)
     if df_raw.empty:
