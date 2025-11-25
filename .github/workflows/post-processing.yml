@@ -301,9 +301,17 @@ jobs:
           ARTIFACT_DIR:   ${{ env.ARTIFACT_DIR }}
           FR_OUTPUT_DIR:  ${{ env.FR_OUTPUT_DIR }}
           FALLBACK_DIRS:  ${{ env.FALLBACK_DIRS }}
+      
+          # 🔥 En kritik ekleme → neighbors.csv dizinini açıkça belirt
+          NEIGH_FILE: neighbors.csv          # ← Eğer repo kökünde ise
+          # NEIGH_FILE: crime_prediction_data/neighbors.csv   # ← Eğer burada ise
+          # NEIGH_FILE: data/neighbors.csv                    # ← Eğer data/ altında ise
+      
         shell: bash
         run: |
           set -euo pipefail
+          
+          # Script'i bul
           if [ -f scripts/make_neighbors_fr.py ]; then
             PY=scripts/make_neighbors_fr.py
           elif [ -f make_neighbors_fr.py ]; then
@@ -312,8 +320,13 @@ jobs:
             echo "⚠️ make_neighbors_fr.py bulunamadı, adım atlanıyor."
             exit 0
           fi
-          python -u "$PY" || true
-          echo "HEAD fr_crime_09.csv:"; head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv" || true
+      
+          # Çalıştır
+          python -u "$PY"
+      
+          # Output önizleme
+          echo "HEAD fr_crime_09.csv:"
+          head -n 5 "$GITHUB_WORKSPACE/crime_prediction_data/fr_crime_09.csv"
 
       - name: FR 10) Feature + SHAP (fr_crime_09)
         env:
