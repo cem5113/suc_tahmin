@@ -111,10 +111,10 @@ def bump_version_name(p: Path) -> Path:
     return p.with_name(f"{prefix}{new_num:02d}{suffix}")
 
 # ---------- config ----------
-BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", ".")).resolve()
+BASE_DIR = Path(os.getenv("CRIME_DATA_DIR", "crime_prediction_data")).resolve()
 
-FR_IN_ENV  = os.getenv("FR_CRIME_IN", "")   # ör: fr_crime_08.csv
-FR_OUT_ENV = os.getenv("FR_CRIME_OUT", "")  # ör: fr_crime_09.csv
+FR_IN_ENV  = os.getenv("FR_CRIME_IN", "fr_crime_08.csv")
+FR_OUT_ENV = os.getenv("FR_CRIME_OUT", "fr_crime_09.csv")
 
 NEIGH_FILE_ENV = os.getenv("NEIGH_FILE", "neighbors.csv")
 NEIGH_PATH = (BASE_DIR / NEIGH_FILE_ENV) if not Path(NEIGH_FILE_ENV).is_absolute() else Path(NEIGH_FILE_ENV)
@@ -199,19 +199,12 @@ def main() -> int:
     BASE_DIR.mkdir(parents=True, exist_ok=True)
 
     # ---- input/output fr_crime ----
-    if FR_IN_ENV:
-        fr_in = BASE_DIR / FR_IN_ENV if not Path(FR_IN_ENV).is_absolute() else Path(FR_IN_ENV)
-    else:
-        fr_in = find_latest_fr_crime(BASE_DIR)
-
-    if FR_OUT_ENV:
-        fr_out = BASE_DIR / FR_OUT_ENV if not Path(FR_OUT_ENV).is_absolute() else Path(FR_OUT_ENV)
-    else:
-        fr_out = bump_version_name(fr_in)
+    fr_in = BASE_DIR / FR_IN_ENV if not Path(FR_IN_ENV).is_absolute() else Path(FR_IN_ENV)
+    fr_out = BASE_DIR / FR_OUT_ENV if not Path(FR_OUT_ENV).is_absolute() else Path(FR_OUT_ENV)
 
     log(f"📥 FR input : {fr_in}")
     log(f"📤 FR output: {fr_out}")
-
+    
     df_raw = _read_csv(fr_in)
     if df_raw.empty:
         raise RuntimeError("❌ Girdi CSV boş veya okunamadı.")
