@@ -4,7 +4,7 @@
 fr_reports_geo_time_crime.py — Suç, GEOID ve zaman bazlı özet raporlar
 
 Girdi  :
-  - FR_OUTPUT_DIR/fr_crime_09_clean.csv
+  - FR_OUTPUT_DIR/fr_crime_09.csv
 
 Çıktılar (FR_OUTPUT_DIR altında):
   - fr_report_by_geoid.csv
@@ -28,7 +28,7 @@ def main() -> None:
     BASE_DIR = Path(base_dir_env).resolve()
     BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-    DATA_PATH = BASE_DIR / "fr_crime_09_clean.csv"
+    DATA_PATH = BASE_DIR / "fr_crime_09.csv"
     OUT_GEOID = BASE_DIR / "fr_report_by_geoid.csv"
     OUT_TIME = BASE_DIR / "fr_report_by_time.csv"
     OUT_CRIME = BASE_DIR / "fr_report_by_crime.csv"
@@ -37,7 +37,7 @@ def main() -> None:
     print("📥 Veri:", DATA_PATH)
 
     if not DATA_PATH.exists():
-        raise RuntimeError(f"❌ fr_crime_09_clean.csv bulunamadı: {DATA_PATH}")
+        raise RuntimeError(f"❌ fr_crime_09.csv bulunamadı: {DATA_PATH}")
 
     df = pd.read_csv(DATA_PATH, low_memory=False)
     df.columns = [c.strip() for c in df.columns]
