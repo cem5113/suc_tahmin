@@ -119,7 +119,7 @@ FR_OUT_ENV = os.environ.get("FR_CRIME_OUT", "fr_crime_09.csv")
 
 # neighbors.csv için: env verilmemişse BASE_DIR / "neighbors.csv" kullan
 NEIGH_PATH = Path(
-    os.environ.get("NEIGH_FILE", str(BASE_DIR / "neighbors.csv"))
+    os.environ.get("NEIGH_FILE", "neighbors.csv")
 )
 
 GEOID_LEN = int(os.environ.get("GEOID_LEN", "11"))
